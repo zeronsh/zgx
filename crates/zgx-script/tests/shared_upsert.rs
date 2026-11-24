@@ -197,3 +197,174 @@ fn a_burst_into_a_long_list_is_one_pass() {
     // in a debug build; one pass, about 10,000 lookups, well under one.)
     assert!(took < std::time::Duration::from_millis(250), "{took:?}");
 }
+
+mod placed {
+    //! Rows given a place (`Shared::upsert_at`): before a key's row, at the
+    //! end, or where they are.
+    use super::{row, rows};
+    use zgx_script::{Place, ScriptHost, Shared, Slice, Value, testing::TestApp};
+
+    fn listed(app: &TestApp, ids: &[&str]) -> Shared {
+        app.host.shared(
+            "rows",
+            Value::List(Slice::from(
+                ids.iter().map(|id| row(id, "x")).collect::<Vec<_>>(),
+            )),
+        )
+    }
+    fn app() -> TestApp {
+        TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.column {}"))
+    }
+    fn before(key: &str) -> Place {
+        Place::Before(key.into())
+    }
+    fn order(shared: &Shared) -> String {
+        rows(&shared.get())
+            .iter()
+            .map(|r| r.split(':').next().unwrap().to_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A row of the list placed at the end moves there; the rest stay the
+    /// very rows they were.
+    #[test]
+    fn a_row_moves_to_the_end() {
+        let app = app();
+        let shared = listed(&app, &["a", "b", "c"]);
+        let Value::List(was) = shared.get() else {
+            panic!()
+        };
+        assert!(
+            shared
+                .upsert_at("id", vec![(row("a", "x"), Place::End)])
+                .unwrap()
+        );
+        assert_eq!(order(&shared), "b c a");
+        let Value::List(now) = shared.get() else {
+            panic!()
+        };
+        let same = |a: &Value, b: &Value| matches!((a, b), (Value::Map(a), Value::Map(b)) if Slice::ptr_eq(a, b));
+        assert!(
+            same(&now[0], &was[1]) && same(&now[1], &was[2]),
+            "b and c are the rows they were"
+        );
+        assert!(same(&now[2], &was[0]), "a, given equal, is the row it was");
+        assert!(
+            !shared
+                .upsert_at("id", vec![(row("a", "x"), Place::End)])
+                .unwrap(),
+            "there already"
+        );
+    }
+
+    /// A row moved and a row inserted before one key go before it in the
+    /// order given, and a row moved up is reconciled with its old one.
+    #[test]
+    fn a_move_and_an_insert_share_an_anchor() {
+        let app = app();
+        let shared = listed(&app, &["a", "b", "c", "d"]);
+        let given = vec![
+            (row("d", "moved"), before("b")),
+            (row("x", "new"), before("b")),
+        ];
+        assert!(shared.upsert_at("id", given).unwrap());
+        assert_eq!(
+            rows(&shared.get()),
+            ["a:x", "d:moved", "x:new", "b:x", "c:x"]
+        );
+    }
+
+    /// A row placed before itself is refused, nothing written.
+    #[test]
+    fn a_row_before_itself_is_refused() {
+        let app = app();
+        let shared = listed(&app, &["a", "b"]);
+        let refused = shared.upsert_at(
+            "id",
+            vec![(row("b", "y"), Place::End), (row("a", "y"), before("a"))],
+        );
+        assert_eq!(refused.unwrap_err(), "row 2 is placed before itself (`a`)");
+        assert_eq!(rows(&shared.get()), ["a:x", "b:x"]);
+    }
+
+    /// Rows placed before one another are refused, saying which, and a
+    /// row placed before a key no one has; nothing written either way.
+    #[test]
+    fn a_cycle_or_a_gone_anchor_is_refused() {
+        let app = app();
+        let shared = listed(&app, &["a", "b", "c"]);
+        let cycle = vec![
+            (row("a", "y"), before("b")),
+            (row("b", "y"), before("c")),
+            (row("c", "y"), before("a")),
+        ];
+        assert_eq!(
+            shared.upsert_at("id", cycle).unwrap_err(),
+            "rows are placed before one another: `a` before `b` before `c` before `a`"
+        );
+        let gone = vec![(row("x", "y"), Place::End), (row("y", "y"), before("zz"))];
+        assert_eq!(
+            shared.upsert_at("id", gone).unwrap_err(),
+            "row 2 is placed before `zz`, which isn't in the list"
+        );
+        assert_eq!(rows(&shared.get()), ["a:x", "b:x", "c:x"]);
+    }
+
+    /// New rows each placed before the next (as a module that diffs a
+    /// reordered list posts them) go in that order before the last's
+    /// anchor; a row that stays is written where it is; new rows that stay
+    /// go at the end.
+    #[test]
+    fn a_chain_of_rows_goes_in_order() {
+        let app = app();
+        let shared = listed(&app, &["a", "b", "c"]);
+        let given = vec![
+            (row("y", "n"), before("c")),
+            (row("x", "n"), before("y")),
+            (row("b", "B"), Place::Stay),
+            (row("z", "n"), Place::Stay),
+        ];
+        assert!(shared.upsert_at("id", given).unwrap());
+        assert_eq!(order(&shared), "a b x y c z");
+        assert_eq!(rows(&shared.get())[1], "b:B");
+        // Before a row that moves itself: after it, where it goes.
+        let given = vec![(row("a", "x"), Place::End), (row("q", "n"), before("a"))];
+        shared.upsert_at("id", given).unwrap();
+        assert_eq!(order(&shared), "b x y c z q a");
+    }
+
+    /// A long burst of rows, each before the next, into a long list: one
+    /// walk, and no stack for the chain.
+    #[test]
+    fn a_burst_of_placed_rows_is_one_walk() {
+        let app = app();
+        let ids: Vec<String> = (0..10_000).map(|i| format!("r{i:05}")).collect();
+        let shared = listed(&app, &ids.iter().map(String::as_str).collect::<Vec<_>>());
+        // 500 new rows, spread through it, and a chain of 10,000 at its end.
+        let mut given: Vec<(Value, Place)> = (0..500)
+            .map(|i| (row(&format!("n{i}"), "n"), before(&ids[i * 20])))
+            .collect();
+        given.extend((0..10_000).map(|i| {
+            (
+                row(&format!("c{i}"), "c"),
+                if i == 9_999 {
+                    Place::End
+                } else {
+                    before(&format!("c{}", i + 1))
+                },
+            )
+        }));
+        let started = std::time::Instant::now();
+        assert!(shared.upsert_at("id", given).unwrap());
+        let took = started.elapsed();
+        let order = rows(&shared.get());
+        assert_eq!(order.len(), 20_500);
+        assert_eq!(
+            (&*order[0], &*order[1], &*order[21], &*order[22]),
+            ("n0:n", "r00000:x", "n1:n", "r00020:x")
+        );
+        assert_eq!((&*order[10_500], &*order[20_499]), ("c0:c", "c9999:c"));
+        assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+    }
+}

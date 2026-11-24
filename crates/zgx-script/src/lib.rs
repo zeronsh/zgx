@@ -192,8 +192,8 @@ pub fn window_size_value(width: f32, height: f32) -> Value {
 }
 pub use rules::GuardKind;
 pub use value::{
-    ElementHandle, Field, Folded, List, Map, PathKey, Shared, Slice, Store, Str, Unfold, Value,
-    WeakSlice, tables_converted, values_converted, values_filed,
+    ElementHandle, Field, Folded, List, Map, PathKey, Place, Shared, Slice, Store, Str, Unfold,
+    Value, WeakSlice, tables_converted, values_converted, values_filed,
 };
 pub use windows::{Window, WindowExtras};
 

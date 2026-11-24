@@ -177,6 +177,7 @@ static API: Api = Api {
     image_set,
     image_drop,
     image_remove,
+    shared_upsert_at,
 };
 
 /// A registration's `user`, freed with the host's hold on it.
@@ -1002,6 +1003,61 @@ unsafe extern "C" fn shared_upsert(
             unsafe { out.cast::<Value>().write(Value::from(why.as_str())) };
             abi::FAILED
         }
+    }
+}
+unsafe extern "C" fn shared_upsert_at(
+    shared: *const c_void,
+    key: *const u8,
+    key_len: usize,
+    rows: *mut Raw,
+    places: *mut Raw,
+    out: *mut Raw,
+) -> u32 {
+    use crate::value::Place;
+    // SAFETY: A handle, held; the module's `&str`; its owned lists, taken.
+    let (handle, key, rows, places) = unsafe {
+        (
+            handle_of(shared),
+            name_of(key, key_len),
+            take(rows),
+            take(places),
+        )
+    };
+    let failed = |why: String| {
+        // SAFETY: `out` takes why.
+        unsafe { out.cast::<Value>().write(Value::from(why.as_str())) };
+        abi::FAILED
+    };
+    let Some(signal) = handle.signal() else {
+        // SAFETY: `out` takes why.
+        return unsafe { host_gone(out) };
+    };
+    let (rows, places) = match (rows, places) {
+        (Value::List(rows), Value::List(places)) => (rows, places),
+        (Value::Nil, Value::Nil) => return abi::DONE,
+        _ => return failed("rows and their places are lists".into()),
+    };
+    if rows.len() != places.len() {
+        return failed(format!("{} places for {} rows", places.len(), rows.len()));
+    }
+    let mut given = Vec::with_capacity(rows.len());
+    for (i, (row, place)) in rows.iter().zip(places.iter()).enumerate() {
+        let place = match place {
+            Value::Nil => Place::Stay,
+            Value::Bool(true) => Place::End,
+            Value::Str(key) => Place::Before(key.to_string()),
+            _ => {
+                return failed(format!(
+                    "row {}'s place is nil (where it is), a key (before it) or true (the end)",
+                    i + 1
+                ));
+            }
+        };
+        given.push((row.clone(), place));
+    }
+    match crate::value::place_rows(signal, &key, given) {
+        Ok(_) => abi::DONE,
+        Err(why) => failed(why),
     }
 }
 unsafe extern "C" fn shared_remove(

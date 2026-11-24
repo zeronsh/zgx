@@ -13,6 +13,10 @@
 //! `Api::shared_upsert`), or the host setting the whole list with those
 //! rows changed (`ARM=host`, what a module that can't patch does). It
 //! prints the time a batch takes too.
+//! `CASE=place`: `N` batches each moving 500 rows of the 10,000 (every
+//! 20th, each to just before the row 10 on), the module keeping the model:
+//! posted as the moved rows placed (`ARM=module`, `Shared::upsert_at`), or
+//! as the whole reordered list set (`ARM=host`, what a module did before).
 //!
 //! It prints nothing to compare by itself: count it at two `N`s under
 //! cachegrind and take the difference over the difference of `N`
@@ -55,6 +59,32 @@ mod reach {
             }
             Value::NIL
         });
+        // The model, kept by the module: ids in order.
+        let model = std::cell::RefCell::new(
+            (0..super::LIST)
+                .map(|i| format!("r{i}"))
+                .collect::<Vec<_>>(),
+        );
+        let placed = host.shared("rows", Value::NIL).unwrap();
+        host.function("bench.place", move |arg| {
+            let whole = arg.field("whole").and_then(|w| w.bool()).unwrap_or(false);
+            for i in 0..arg.field("n").and_then(|n| n.num()).unwrap_or(0.) as usize {
+                let moves = super::moves(i);
+                let mut model = model.borrow_mut();
+                *model = super::moved(&model, &moves);
+                if whole {
+                    placed
+                        .set(Value::list(model.iter().map(|id| super::row_of(id))))
+                        .unwrap();
+                } else {
+                    let rows = moves
+                        .iter()
+                        .map(|(id, before)| (super::row_of(id), zgx_module::Place::Before(before)));
+                    placed.upsert_at("id", rows).unwrap();
+                }
+            }
+            Value::NIL
+        });
         let ui = host.ui();
         host.function("bench.ui", move |_| {
             *UI.lock().unwrap() = Some(ui.clone());
@@ -78,6 +108,45 @@ const BATCH: usize = 500;
 /// Batch `i`'s rows: every 20th row from `i`, titled with `i`.
 fn batch(i: usize) -> impl Iterator<Item = (String, String)> {
     (0..BATCH).map(move |j| (format!("r{}", (j * 20 + i) % LIST), format!("b{i}")))
+}
+/// Batch `i`'s moves: every 20th row from `i`, each to before the row 10
+/// on (never one that moves).
+fn moves(i: usize) -> Vec<(String, String)> {
+    (0..BATCH)
+        .map(|j| {
+            (
+                format!("r{}", (j * 20 + i) % LIST),
+                format!("r{}", (j * 20 + i + 10) % LIST),
+            )
+        })
+        .collect()
+}
+/// `order` with `moves` made: each moved row taken out and put just before
+/// its anchor, as `upsert_at` puts it.
+fn moved(order: &[String], moves: &[(String, String)]) -> Vec<String> {
+    let moving: std::collections::HashSet<&str> = moves.iter().map(|(id, _)| id.as_str()).collect();
+    let mut before: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    for (id, anchor) in moves {
+        before.entry(anchor.as_str()).or_default().push(id.as_str());
+    }
+    let mut next = Vec::with_capacity(order.len());
+    for id in order {
+        if moving.contains(id.as_str()) {
+            continue;
+        }
+        for m in before.get(id.as_str()).into_iter().flatten() {
+            next.push((*m).to_owned());
+        }
+        next.push(id.clone());
+    }
+    next
+}
+/// A module's row of the model, by id.
+fn row_of(id: &str) -> zgx_module::Value {
+    zgx_module::Value::record([
+        ("id", zgx_module::Value::from(id)),
+        ("title", zgx_module::Value::from("x")),
+    ])
 }
 fn row(id: &str, title: &str) -> Value {
     Value::record([("id", Value::from(id)), ("title", Value::from(title))])
@@ -108,6 +177,12 @@ fn main() {
     let call = |name: &str, arg: Value| app.host.registered_function(name).unwrap()(arg).unwrap();
     let started = std::time::Instant::now();
     match (case.as_str(), module) {
+        ("place", _) => {
+            call(
+                "bench.place",
+                Value::record([("n", Value::Num(n as f64)), ("whole", Value::Bool(!module))]),
+            );
+        }
         ("upsert", true) => {
             call("bench.upsert", Value::Num(n as f64));
         }
@@ -183,7 +258,7 @@ fn main() {
             }
             thread.join().unwrap();
         }
-        _ => panic!("CASE=set|post|upsert"),
+        _ => panic!("CASE=set|post|upsert|place"),
     }
     let took = started.elapsed();
     println!(

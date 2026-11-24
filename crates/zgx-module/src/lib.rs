@@ -1189,6 +1189,53 @@ impl Shared {
             ))
         }
     }
+    /// [`Shared::upsert`] with a place for each row ([`Place`]): just before
+    /// a key's row, at the end, or where its key's row is. A row the list
+    /// has moves to its place, so a module that diffs a reordered list on
+    /// its thread posts only the rows that moved, each placed before the row
+    /// that follows it. Rows placed before one key go in the order given;
+    /// one walk of the list. An error, nothing written, if a row is placed
+    /// before itself, before a key neither the list nor the rows have, rows
+    /// are placed before one another, or what `upsert` refuses.
+    pub fn upsert_at<'p>(
+        &self,
+        key: &str,
+        rows: impl IntoIterator<Item = (Value, Place<'p>)>,
+    ) -> Result<(), Failed> {
+        let (rows, places): (Vec<Value>, Vec<Value>) = rows
+            .into_iter()
+            .map(|(row, place)| {
+                let place = match place {
+                    Place::Stay => Value::NIL,
+                    Place::Before(key) => Value::from(key),
+                    Place::End => Value::from(true),
+                };
+                (row, place)
+            })
+            .unzip();
+        let mut rows = std::mem::ManuallyDrop::new(Value::list(rows));
+        let mut places = std::mem::ManuallyDrop::new(Value::list(places));
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: A handle, held; both lists given; `out` written only
+        // failing.
+        unsafe {
+            if (api().shared_upsert_at)(
+                self.0,
+                key.as_ptr(),
+                key.len(),
+                std::ptr::from_mut(&mut rows.raw),
+                std::ptr::from_mut(&mut places.raw),
+                out.as_mut_ptr(),
+            ) == abi::DONE
+            {
+                return Ok(());
+            }
+            let why = Value::owned(out.assume_init());
+            Err(Failed(
+                why.get().str().unwrap_or("couldn't be written").to_owned(),
+            ))
+        }
+    }
     /// The rows of the list it holds whose field `key` is one of `keys`
     /// removed (every such row); whether any was. An error once its host is
     /// gone.
@@ -1358,6 +1405,19 @@ fn free_box_of<F>(_: *mut F) -> abi::Free {
         drop(unsafe { Box::from_raw(user as *mut F) });
     }
     free::<F>
+}
+
+/// Where a row given to [`Shared::upsert_at`] goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place<'a> {
+    /// Where the list's row of its key is, or at the end if it has none:
+    /// as [`Shared::upsert`] writes it.
+    Stay,
+    /// Just before the row with this key: the list's first of it, or one
+    /// given with it (wherever that one goes).
+    Before(&'a str),
+    /// At the end of the list.
+    End,
 }
 
 /// An image's pixels, written by the module on any thread and given to
