@@ -662,6 +662,12 @@ impl TestApp {
         self.frame.set(self.frame.get() + n);
         self.run_timers(self.host.0.timers.test_now() + interval * n as u32);
     }
+    /// Whether anything waits for the next frame (an animation, a
+    /// `ui.frames` measure): a window at rest asks for none.
+    #[doc(hidden)]
+    pub fn wants_frame(&self) -> bool {
+        self.clock.wants_frame()
+    }
     /// `n` frames: an animation's worth.
     pub fn frames(&self, n: usize) {
         for _ in 0..n {

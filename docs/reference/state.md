@@ -498,6 +498,30 @@ return ui.list {
 
 - `ui.json.encode(value, { pretty })` writes what state could hold as JSON (lists as arrays, tables as objects, `ui.null` as null), and `ui.json.decode(text)` gives back tables the script may change, failing with where the JSON is wrong: a document saved and opened with `ui.write_file` and `ui.read_file`.
 
+## Measuring frames
+
+`ui.frames.measure(fn, { window_ms = 1000 })` runs `fn` (the action: a tab switch, a sort) and gives a promise of how the app's frames came after it, for analytics. It counts as a web page's `requestAnimationFrame` measure does, so the desktop's numbers and the browser's compare:
+
+| field | |
+| --- | --- |
+| `duration_ms` | the second frame's time after the action |
+| `blocked_ms` | the sum of the gaps between frames over 50 ms, whole (the first gap counts from the action) |
+| `settled_ms` | the later of `duration_ms` and the end of the last such gap |
+| `frames`, `long_frames` | the frames in the window, and those after a gap over 50 ms |
+| `times`, `start_ms` | each frame's time from the action (ms), and the action's on `ui.now`'s clock |
+
+```luau
+ui.frames.measure(function()
+	tab:set("files")
+end):after(function(m)
+	analytics.send("tab_switch", { duration_ms = m.duration_ms, settled_ms = m.settled_ms, blocked_ms = m.blocked_ms })
+end)
+```
+
+It settles once frames have come for `window_ms`, two at least. A window that stops showing frames (hidden, minimised) ends it, and a new measure ends the last: a sample cut short has `duration_ms` alone (if two frames came), as the web's does. For a gesture, `local m = ui.frames.begin()` records until `m:finish()` (a promise of the same), 30 s at most (`capped = true`). `times` gives what else to work out (intervals, percentiles, frames dropped against the refresh).
+
+A frame's time is when it is due on screen: the display's refresh on the desktop, `requestAnimationFrame`'s in the browser. While a measure runs, frames come every refresh, as a rAF loop asks them; with none running nothing is recorded or asked for.
+
 ## Refs
 
 `ui.ref()` makes a ref; give nodes `ref = r` (or `ref = { r1, r2 }`).
