@@ -3,6 +3,9 @@
 //! the heap comes back to near where it was. Core Text kept the glyphs of
 //! every font it drew with for as long as zgx kept the font: some 30 MB of
 //! heap after CJK text at three sizes, for good, and 40 MB of footprint.
+//! And what Core Text handed back autoreleased as each new character's
+//! face was looked up stayed where no event loop drains a pool, as here:
+//! 9 MB more.
 //! The heap in use (every malloc zone: Core Text's are the system's) rather
 //! than the footprint, which also counts Metal's driver blocks, given back
 //! some time after its queue rests. A binary of its own: the heap is the
@@ -101,10 +104,10 @@ fn a_page_read_through_gives_its_memory_back_at_rest() {
     let grown = heap();
     rest(&mut scene, &mut gpu);
     let rest = heap();
-    // 11 MB above where it was (of 37 grown); with Core Text's fonts kept,
-    // 30 MB.
+    // 1.5 MB above where it was (of 28 grown); with the lookups' autoreleased
+    // objects kept, 11 MB, and with Core Text's fonts kept too, 30 MB.
     assert!(
-        rest < start + 15.,
+        rest < start + 4.,
         "at rest: {rest:.1} MB, from {start:.1} (grown {grown:.1})"
     );
 }
