@@ -161,6 +161,13 @@ static API: Api = Api {
     after,
     timer_release,
     state,
+    shared,
+    shared_get,
+    shared_set,
+    shared_append,
+    shared_observe,
+    shared_unobserve,
+    shared_release,
 };
 
 /// A registration's `user`, freed with the host's hold on it.
@@ -809,6 +816,135 @@ unsafe extern "C" fn timer_release(timer: *mut c_void, stop: u32) {
     if stop == 0 {
         timer.detach();
     }
+}
+
+/// A module's handle to a host's shared state (`Api::shared`): its signal
+/// while the host is there, and the host's handle, lent to observers. On
+/// the interface's thread only.
+struct SharedHandle {
+    signal: RefCell<Option<zgx::reactive::Signal<Value>>>,
+    host: Weak<crate::Inner>,
+    mailbox: Arc<Mailbox>,
+}
+impl SharedHandle {
+    /// Its signal, while its host is there (let go of as the host goes).
+    fn signal(&self) -> Option<zgx::reactive::Signal<Value>> {
+        if self.host.strong_count() == 0 {
+            self.signal.borrow_mut().take();
+            return None;
+        }
+        self.signal.borrow().clone()
+    }
+}
+unsafe extern "C" fn shared(
+    host: *mut c_void,
+    key: *const u8,
+    len: usize,
+    initial: *mut Raw,
+) -> *mut c_void {
+    // SAFETY: The module's owned value, taken.
+    let initial = unsafe { take(initial) };
+    // SAFETY: A host handle, held; the module's `&str`.
+    let (script_host, key) = (unsafe { host_of(host) }, unsafe { name_of(key, len) });
+    let Some(script_host) = script_host else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: The same handle, held once more for the state's observers.
+    let mailbox = unsafe {
+        Arc::increment_strong_count(host as *const Mailbox);
+        Arc::from_raw(host as *const Mailbox)
+    };
+    let signal = script_host.shared(&key, initial).signal();
+    Box::into_raw(Box::new(SharedHandle {
+        signal: RefCell::new(Some(signal)),
+        host: Rc::downgrade(&script_host.0),
+        mailbox,
+    })) as *mut c_void
+}
+/// # Safety
+/// `shared` is a handle `shared` made, held.
+unsafe fn handle_of<'a>(shared: *const c_void) -> &'a SharedHandle {
+    // SAFETY: The caller's.
+    unsafe { &*(shared as *const SharedHandle) }
+}
+unsafe extern "C" fn shared_get(shared: *const c_void, out: *mut Raw) {
+    // SAFETY: A handle, held.
+    let value = unsafe { handle_of(shared) }
+        .signal()
+        .map_or(Value::Nil, |signal| signal.get());
+    // SAFETY: `out` takes what is made.
+    unsafe { out.cast::<Value>().write(value) }
+}
+unsafe extern "C" fn shared_set(shared: *const c_void, value: *mut Raw) -> u32 {
+    // SAFETY: The module's owned value, taken; a handle, held.
+    let (value, handle) = unsafe { (take(value), handle_of(shared)) };
+    handle
+        .signal()
+        .is_some_and(|signal| crate::Shared(signal).set(value)) as u32
+}
+unsafe extern "C" fn shared_append(
+    shared: *const c_void,
+    text: *const u8,
+    len: usize,
+    out: *mut Raw,
+) -> u32 {
+    // SAFETY: A handle, held; the module's UTF-8.
+    let (handle, text) = unsafe { (handle_of(shared), name_of(text, len)) };
+    let Some(signal) = handle.signal() else {
+        return abi::DONE;
+    };
+    match crate::Shared(signal).append(&text) {
+        Ok(()) => abi::DONE,
+        Err(why) => {
+            // SAFETY: `out` takes what is made.
+            unsafe { out.cast::<Value>().write(Value::from(why.as_str())) };
+            abi::FAILED
+        }
+    }
+}
+/// A shared state's observer: its effect, and the module's `user` (freed as
+/// it goes).
+struct Observer {
+    _effect: zgx::reactive::Effect,
+}
+unsafe extern "C" fn shared_observe(
+    shared: *const c_void,
+    call: abi::Observe,
+    user: *mut c_void,
+    free: abi::Free,
+) -> *mut c_void {
+    let user = User { ptr: user, free };
+    // SAFETY: A handle, held.
+    let handle = unsafe { handle_of(shared) };
+    let (Some(signal), Some(host)) = (handle.signal(), handle.host.upgrade()) else {
+        return std::ptr::null_mut();
+    };
+    let runtime = host.runtime.clone();
+    let mailbox = handle.mailbox.clone();
+    let mut first = true;
+    let effect = host.runtime.effect(move || {
+        // (The whole `user`, freed with the effect.)
+        let user = &user;
+        let value = signal.get();
+        // (Not at once: from the next change.)
+        if std::mem::take(&mut first) {
+            return;
+        }
+        let handle = Arc::as_ptr(&mailbox) as *mut c_void;
+        // SAFETY: The module's observer and its `user`, alive with the
+        // effect; the value and the handle lent for the call, which reads
+        // nothing it follows.
+        runtime.untracked(|| unsafe { call(user.ptr, handle, std::ptr::from_ref(&value).cast()) });
+    });
+    Box::into_raw(Box::new(Observer { _effect: effect })) as *mut c_void
+}
+unsafe extern "C" fn shared_unobserve(subscription: *mut c_void) {
+    // SAFETY: A subscription `shared_observe` made, let go of once.
+    drop(unsafe { Box::from_raw(subscription as *mut Observer) });
+}
+unsafe extern "C" fn shared_release(shared: *mut c_void) {
+    // SAFETY: A handle `shared` made, let go of once.
+    drop(unsafe { Box::from_raw(shared as *mut SharedHandle) });
 }
 
 /// What a script passed a module's function, as the values it is lent.

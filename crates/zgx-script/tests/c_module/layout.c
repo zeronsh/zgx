@@ -44,6 +44,13 @@ int main(void) {
     AT(zgx_api, after);
     AT(zgx_api, timer_release);
     AT(zgx_api, state);
+    AT(zgx_api, shared);
+    AT(zgx_api, shared_get);
+    AT(zgx_api, shared_set);
+    AT(zgx_api, shared_append);
+    AT(zgx_api, shared_observe);
+    AT(zgx_api, shared_unobserve);
+    AT(zgx_api, shared_release);
     SIZE(zgx_registrar);
     AT(zgx_registrar, size);
     AT(zgx_registrar, host);
