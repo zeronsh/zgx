@@ -106,6 +106,22 @@ pub fn smoothed(key: cosmic_text::CacheKey, smoothing: u8) -> cosmic_text::Cache
         | CacheKeyFlags::from_bits_retain(u32::from(smoothing.min(5)) << 6);
     key
 }
+/// `key` for its glyph drawn at `scale` device pixels a point on macOS:
+/// hinted at 1x, unhinted above. swash's hinting (skrifa's autohinter, on
+/// faces with no instructions such as SF) is none of macOS's: at 2x Core
+/// Text hints nothing (CoreGraphics' own autohinter runs only on whole
+/// pixel sizes from 7 to 18), and unhinted swash matches it to a mean of
+/// 0.02 a pixel where hinted it was 0.13 off. At 1x CoreGraphics does
+/// autohint, its own way, so swash's stays there for now.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn hinted_at(key: cosmic_text::CacheKey, scale: f32) -> cosmic_text::CacheKey {
+    let mut key = key;
+    if scale != 1. {
+        key.flags |= cosmic_text::CacheKeyFlags::DISABLE_HINTING;
+    }
+    key
+}
 /// The largest glyph `glyph_image` draws, in pixels: the GPU renderer's
 /// atlas side, past which it draws none either.
 #[doc(hidden)]
