@@ -1,5 +1,6 @@
 use std::{cell::Cell, rc::Rc};
 use zgx::{
+    canvas::{CanvasText, KnownSize, TextAnchor, TextBaseline},
     compose::prelude::*,
     scene::{NodeKind, Rect},
     widgets::Ui,
@@ -48,6 +49,78 @@ fn canvas_callback_tracks_content_and_size_with_owned_disposal() {
     color.set(rgb(0x0000ff));
     frame(&mut ui);
     assert_eq!(calls.get(), before);
+}
+
+/// A canvas's lines that come and go are laid out in the box that holds them
+/// alone (of a fixed size, a layout boundary), and what moves the canvas
+/// later finds them as they are: a terminal's rows, beside a sidebar that
+/// closes.
+#[test]
+fn a_canvas_moved_after_its_lines_changed_places_the_lines_it_has() {
+    let mut ui = Ui::new(400., 100.);
+    let (lines, beside) = (ui.signal(1), ui.signal(100.));
+    let view = ui.mount(
+        row().w(400.).h(100.).children([
+            div().h(100.).shrink_0().reactive_style({
+                let beside = beside.clone();
+                move || Styles::new().w(beside.get())
+            }),
+            canvas({
+                let lines = lines.clone();
+                move |_| {
+                    let mut canvas = Canvas::new();
+                    for line in 0..lines.get() {
+                        canvas.text(CanvasText {
+                            text: format!("line {line}").into(),
+                            x: 0.,
+                            y: line as f32 * 20.,
+                            size: 12.,
+                            color: rgb(0x000000),
+                            font: Default::default(),
+                            anchor: TextAnchor::Start,
+                            baseline: TextBaseline::Top,
+                            known_size: KnownSize::NONE,
+                            width: f32::INFINITY,
+                        });
+                    }
+                    canvas
+                }
+            })
+            .id("canvas")
+            .w(200.)
+            .h(80.),
+        ]),
+    );
+    frame(&mut ui);
+    let root = view.find("canvas").unwrap();
+    // Where each line's text is, across.
+    let placed = |ui: &Ui| {
+        let scene = ui.scene.borrow();
+        let mut stack = vec![root];
+        let mut at = Vec::new();
+        while let Some(id) = stack.pop() {
+            stack.extend(scene.children(id).iter().copied());
+            if matches!(scene.kind(id), NodeKind::Text { .. }) {
+                assert!(scene.bounds(id).width > 0., "a line laid out");
+                at.push(scene.bounds(id).x);
+            }
+        }
+        at
+    };
+    assert_eq!(placed(&ui), [100.]);
+    // Gone, then moved; come back, and more, then moved again.
+    for (count, left) in [(0, 0.), (1, 60.), (3, 100.), (1, 0.), (0, 100.), (2, 40.)] {
+        lines.set(count);
+        frame(&mut ui);
+        assert_eq!(placed(&ui).len(), count as usize, "its lines as drawn");
+        beside.set(left);
+        frame(&mut ui);
+        assert_eq!(
+            placed(&ui),
+            vec![left; count as usize],
+            "its lines as moved"
+        );
+    }
 }
 
 fn frame(ui: &mut Ui) -> zgx::scene::FrameReport {
