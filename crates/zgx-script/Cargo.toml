@@ -167,6 +167,12 @@ required-features = ["scene3d"]
 name = "module_call_bench"
 required-features = ["modules"]
 
+[[example]]
+# What a module's reach into its host costs (posting, shared state), against
+# the host's own way of doing the same.
+name = "module_reach_bench"
+required-features = ["modules"]
+
 [dev-dependencies]
 # The perf gate's output check, called by the gate benches each frame.
 zgx-fingerprint = { path = "../../scripts/perf/fingerprint" }

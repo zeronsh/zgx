@@ -2820,6 +2820,14 @@ fn raw_path(lua: &Lua, t: &Table) -> Option<Vec<PathKey>> {
     read.ok().and(path)
 }
 
+/// `signal` set to `value`, keeping the parts of what it held that are
+/// equal (`Shared::set`, and a native module's): whether anything changed.
+#[inline]
+pub(crate) fn set_reconciled(signal: &Signal<Value>, value: Value) -> bool {
+    let next = signal.with_untracked(|old| value.reconcile(old));
+    signal.set(next)
+}
+
 /// Shared state (`ui.shared`) as Rust holds it: a signal whose `set`
 /// reconciles (`Value::reconcile`), so a model republished whole keeps the
 /// parts that did not change, and what reads them does no work for them.
@@ -2830,8 +2838,7 @@ impl Shared {
     /// Sets the value, keeping the current one's parts where they are
     /// equal; whether anything changed.
     pub fn set(&self, value: Value) -> bool {
-        let next = self.0.with_untracked(|old| value.reconcile(old));
-        self.0.set(next)
+        set_reconciled(&self.0, value)
     }
     /// The signal itself (its `set` replaces without reconciling).
     pub fn signal(&self) -> Signal<Value> {

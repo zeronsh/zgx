@@ -1063,13 +1063,13 @@ impl Ui {
     /// job is dropped, unrun, here).
     pub fn post<J: FnOnce(&Host) + Send + 'static>(&self, job: J) -> bool {
         unsafe extern "C" fn run<J: FnOnce(&Host)>(user: *mut c_void, host: *mut c_void) {
-            // SAFETY: `user` is the `Option<J>` boxed below, freed after
-            // this; `host` lent for the call.
-            if let Some(job) = unsafe { &mut *(user as *mut Option<J>) }.take() {
-                job(&Host::lent(host));
-            }
+            // SAFETY: `user` is the `J` boxed below, run once and freed as
+            // it runs; `host` lent for the call.
+            let job = *unsafe { Box::from_raw(user as *mut J) };
+            job(&Host::lent(host));
         }
-        let user = Box::into_raw(Box::new(Some(job)));
+        // (A job that captures nothing allocates nothing.)
+        let user = Box::into_raw(Box::new(job));
         // SAFETY: A host handle, held; `user` and its `free` the box's,
         // which may be sent (`J: Send`).
         unsafe { (api().post)(self.0, run::<J>, user.cast(), free_box_of(user)) == abi::POSTED }

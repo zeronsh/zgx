@@ -680,8 +680,9 @@ impl Mailbox {
         self.queue.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
-/// A posted job and its `user`, freed after it runs or, unrun, as its host
-/// goes. A module's `user` for a job may cross threads (`Api::post`).
+/// A posted job and its `user`: the job frees it as it runs; a job that
+/// doesn't run (its host gone) is freed by its `free`. A module's `user`
+/// for a job may cross threads (`Api::post`).
 struct Posted {
     job: abi::Job,
     user: User,
@@ -755,24 +756,29 @@ async fn drained(mailbox: Arc<Mailbox>, host: Weak<crate::Inner>) {
     }
     let _closing = Closing(mailbox.clone());
     let handle = Arc::as_ptr(&mailbox) as *mut c_void;
+    // (Two lists traded turn by turn: posting allocates nothing once each
+    // holds what a turn brings.)
+    let mut jobs = Vec::new();
     loop {
-        let jobs = std::future::poll_fn(|cx| {
+        std::future::poll_fn(|cx| {
             let mut queue = mailbox.queue();
             if queue.jobs.is_empty() {
                 queue.waker = Some(cx.waker().clone());
                 return Poll::Pending;
             }
-            Poll::Ready(std::mem::take(&mut queue.jobs))
+            std::mem::swap(&mut queue.jobs, &mut jobs);
+            Poll::Ready(())
         })
         .await;
         let Some(host) = host.upgrade() else {
             return;
         };
-        for posted in jobs {
+        for Posted { job, user } in jobs.drain(..) {
+            // (The job frees its `user` as it runs.)
+            let user = ManuallyDrop::new(user);
             // SAFETY: The module's job and its own `user`, on the host's
             // thread, the handle lent (the mailbox is held here).
-            host.runtime
-                .batch(|| unsafe { (posted.job)(posted.user.ptr, handle) });
+            host.runtime.batch(|| unsafe { job(user.ptr, handle) });
         }
     }
 }
@@ -871,18 +877,15 @@ unsafe extern "C" fn timer_release(timer: *mut c_void, stop: u32) {
 /// while the host is there, and the host's handle, lent to observers. On
 /// the interface's thread only.
 struct SharedHandle {
-    signal: RefCell<Option<zgx::reactive::Signal<Value>>>,
+    signal: zgx::reactive::Signal<Value>,
     host: Weak<crate::Inner>,
     mailbox: Arc<Mailbox>,
 }
 impl SharedHandle {
-    /// Its signal, while its host is there (let go of as the host goes).
-    fn signal(&self) -> Option<zgx::reactive::Signal<Value>> {
-        if self.host.strong_count() == 0 {
-            self.signal.borrow_mut().take();
-            return None;
-        }
-        self.signal.borrow().clone()
+    /// Its signal, while its host is there: one load to know.
+    #[inline]
+    fn signal(&self) -> Option<&zgx::reactive::Signal<Value>> {
+        (self.host.strong_count() != 0).then_some(&self.signal)
     }
 }
 unsafe extern "C" fn shared(
@@ -905,7 +908,7 @@ unsafe extern "C" fn shared(
     };
     let signal = script_host.shared(&key, initial).signal();
     Box::into_raw(Box::new(SharedHandle {
-        signal: RefCell::new(Some(signal)),
+        signal,
         host: Rc::downgrade(&script_host.0),
         mailbox,
     })) as *mut c_void
@@ -929,7 +932,7 @@ unsafe extern "C" fn shared_set(shared: *const c_void, value: *mut Raw) -> u32 {
     let (value, handle) = unsafe { (take(value), handle_of(shared)) };
     handle
         .signal()
-        .is_some_and(|signal| crate::Shared(signal).set(value)) as u32
+        .is_some_and(|signal| crate::value::set_reconciled(signal, value)) as u32
 }
 unsafe extern "C" fn shared_append(
     shared: *const c_void,
@@ -942,7 +945,7 @@ unsafe extern "C" fn shared_append(
     let Some(signal) = handle.signal() else {
         return abi::DONE;
     };
-    match crate::Shared(signal).append(&text) {
+    match crate::Shared(signal.clone()).append(&text) {
         Ok(()) => abi::DONE,
         Err(why) => {
             // SAFETY: `out` takes what is made.
@@ -965,7 +968,7 @@ unsafe extern "C" fn shared_observe(
     let user = User { ptr: user, free };
     // SAFETY: A handle, held.
     let handle = unsafe { handle_of(shared) };
-    let (Some(signal), Some(host)) = (handle.signal(), handle.host.upgrade()) else {
+    let (Some(signal), Some(host)) = (handle.signal().cloned(), handle.host.upgrade()) else {
         return std::ptr::null_mut();
     };
     let runtime = host.runtime.clone();
@@ -1102,8 +1105,8 @@ unsafe extern "C" fn promise_host(promise: *const c_void) -> *mut c_void {
 }
 unsafe extern "C" fn promise_release(promise: *mut c_void) {
     unsafe extern "C" fn rejected(user: *mut c_void, _host: *mut c_void) {
-        // SAFETY: The number posted below.
-        let id = unsafe { *(user as *const u64) };
+        // SAFETY: The number posted below, freed as the job runs.
+        let id = *unsafe { Box::from_raw(user as *mut u64) };
         settled(id, |registered| {
             Err(format!(
                 "{} (module `{}`): the module dropped its promise unsettled",
