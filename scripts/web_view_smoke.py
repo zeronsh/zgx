@@ -12,8 +12,9 @@ the page; that what the page copies reaches other clients and what they
 copy pastes into the page; and that a script evaluates and the page's
 messages carry their origin.
 
-`--wayland`: the app on Wayland (Sway on an X11 output, no DISPLAY for the
-app; the clipboard through wl-clipboard). `--ime`: Pinyin composed into the
+`--wayland`: the app on Wayland (Sway's headless backend, no X server; input
+through Sway's virtual pointer and keyboard, the clipboard through
+wl-clipboard). `--ime`: Pinyin composed into the
 page's field instead (IBus over XIM on X11; Fcitx5 over text-input-v3 in
 Sway with `--wayland`), checked as the page's composition events and value.
 `--slow-replies`: WebKit's answers 800 ms late, as on a loaded machine: on
@@ -52,7 +53,9 @@ import threading
 import time
 
 from platform_smoke import private_runtime, stop, use_ibus_engine, wait_for_ibus_xim, wait_for_wm
-from sway_host import wait_for_sway_host, sway_config
+from sway_host import sway_config
+from wayland_keyboard import VirtualKeyboard
+from wayland_pointer import VirtualPointer
 
 # The probe's geometry (window points; probes run at scale 1).
 PAGE = (40, 40, 600, 400)
@@ -71,9 +74,12 @@ def near(found, wanted, tolerance=24):
 
 
 class Session:
-    def __init__(self, output, env, window, origin=(0, 0), wayland=None):
+    def __init__(self, output, env, window, origin=(0, 0), wayland=None, devices=None):
         self.output, self.env, self.window, self.origin = output, env, window, origin
         self.wayland = wayland
+        # Under Sway's headless backend: its virtual pointer and keyboard,
+        # and its output's size (`xdo` speaks through them).
+        self.devices = devices
         # The probe's own lines (stdout), apart from its stderr: GLib's
         # warnings come in pieces, and one of ours landing between two
         # started no line of its own (`PAGE` mid-way through an Avahi
@@ -83,7 +89,58 @@ class Session:
         self.presented = False
 
     def xdo(self, *parts):
+        if self.devices:
+            return self.wayland_xdo(*map(str, parts))
         subprocess.run(["xdotool", *map(str, parts)], env=self.env, check=True)
+
+    def wayland_xdo(self, *parts):
+        """xdotool's commands this probe uses, through Sway's virtual pointer
+        and keyboard: `mousemove [--window W] x y [click N]`, `mousedown N`,
+        `mouseup N`, `click [--repeat n --delay ms] N`, `key [--clearmodifiers]
+        names…`, `type [--clearmodifiers] [--delay ms] text`. The window is at
+        the output's top left, so its points are the output's."""
+        pointer, keyboard, (width, height) = self.devices
+        buttons = {"1": 0x110, "2": 0x112, "3": 0x111}
+        # xdotool's wheel buttons: a notch up, down, left, right.
+        wheels = {"4": (0, -1), "5": (0, 1), "6": (1, -1), "7": (1, 1)}
+
+        def press(button):
+            if button in wheels:
+                pointer.wheel(*wheels[button])
+            else:
+                pointer.click(buttons[button])
+        parts = [p for p in parts if p != "--clearmodifiers"]
+        command, rest = parts[0], parts[1:]
+
+        def option(name, default):
+            if name in rest:
+                at = rest.index(name)
+                value = rest[at + 1]
+                del rest[at:at + 2]
+                return value
+            return default
+        if command == "mousemove":
+            option("--window", None)
+            x, y = rest[0], rest[1]
+            pointer.move_to(int(float(x)), int(float(y)), width, height)
+            if rest[2:3] == ["click"]:
+                time.sleep(.05)
+                press(rest[3])
+        elif command in ("mousedown", "mouseup"):
+            pointer.button(command == "mousedown", buttons[rest[0]])
+        elif command == "click":
+            repeat = int(option("--repeat", "1"))
+            delay = int(option("--delay", "0")) / 1000
+            for _ in range(repeat):
+                press(rest[0])
+                time.sleep(delay)
+        elif command == "key":
+            keyboard.key(*rest)
+        elif command == "type":
+            delay = int(option("--delay", "12")) / 1000
+            keyboard.type(rest[0], delay)
+        else:
+            raise ValueError(f"no Wayland input for xdotool {command}")
 
     def click(self, x, y, button=1):
         self.xdo("mousemove", "--window", self.window, x, y, "click", button)
@@ -133,9 +190,7 @@ class Session:
         self.first_frame()
         if self.wayland:
             # What Sway composed (wlr-screencopy), the window at its output's
-            # top left: its X11 host window is no record of it (all black
-            # under Sway 1.11's X11 backend on Xvfb, the frames reaching Sway
-            # all the same).
+            # top left.
             shot = subprocess.run(["grim", "-t", "ppm", "-"], env=self.wayland, capture_output=True, check=True, timeout=10)
             image = Image.open(io.BytesIO(shot.stdout)).convert("RGB")
             image.save(self.output / "window.png")
@@ -1220,14 +1275,8 @@ def wayland(args, output, private):
     for name in ("DISPLAY", "WAYLAND_DISPLAY", "SWAYSOCK", "IBUS_ADDRESS", "XMODIFIERS", "GTK_IM_MODULE", "QT_IM_MODULE"):
         env.pop(name, None)
     owned = []
+    devices = []
     try:
-        with (output / "xvfb.log").open("w") as log:
-            xvfb = subprocess.Popen(["Xvfb", "-r", "-noreset", "-displayfd", "1", "-screen", "0", "1280x960x24", "-ac"],
-                                    stdout=subprocess.PIPE, stderr=log, text=True)
-        owned.append(xvfb)
-        if not select.select([xvfb.stdout], [], [], 30)[0]:
-            raise RuntimeError("Xvfb startup timed out")
-        env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
         downloads(private)
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
@@ -1242,9 +1291,6 @@ def wayland(args, output, private):
         if not select.select([bus.stdout], [], [], 10)[0]:
             raise RuntimeError("D-Bus startup timed out")
         env["DBUS_SESSION_BUS_ADDRESS"] = bus.stdout.readline().strip()
-        with (output / "openbox.log").open("w") as log:
-            owned.append(subprocess.Popen(["openbox"], env=env, stdout=log, stderr=log))
-        wait_for_wm(env)
         if args.ime:
             profile = pathlib.Path(private, "config/fcitx5/profile")
             profile.parent.mkdir(parents=True)
@@ -1261,11 +1307,16 @@ def wayland(args, output, private):
                           "xwayland disable\nseat seat0 fallback true\noutput * mode 1260x900\ndefault_border none\n"
                           "default_floating_border none\nfor_window [title=\"^Web view probe$\"] floating enable, move position 0 0\n"
                           "for_window [title=\"^Web Inspector\"] floating enable, move position 1080 0\n")
-        sway_env = dict(env, WLR_BACKENDS="x11", WLR_X11_OUTPUTS="1", WLR_RENDERER="pixman")
+        # Sway's headless backend, no X server under it: on its X11 backend
+        # under CPU load (Xvfb, pixman), Sway composed a correctly declared
+        # shm buffer of the window's sheared across its output, failing the
+        # pixel checks (docs/validation.md). Input comes through Sway's
+        # virtual pointer and keyboard.
+        size = (1260, 900) if args.inspector else (1260, 650)
+        sway_env = dict(env, WLR_BACKENDS="headless", WLR_LIBINPUT_NO_DEVICES="1", WLR_RENDERER="pixman")
         with (output / "sway.log").open("w") as log:
             compositor = subprocess.Popen(["sway", "--unsupported-gpu", "--config", str(config)], env=sway_env, stdout=log, stderr=log)
         owned.append(compositor)
-        window = wait_for_sway_host(env, output, compositor)
         deadline = time.monotonic() + 10
         while not [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"]:
             if time.monotonic() > deadline:
@@ -1273,7 +1324,9 @@ def wayland(args, output, private):
             time.sleep(.05)
         socket = [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"][0].name
         native = dict(env, WAYLAND_DISPLAY=socket, WINIT_UNIX_BACKEND="wayland")
-        native.pop("DISPLAY")
+        pointer = VirtualPointer(private, socket)
+        keyboard = VirtualKeyboard(private, socket)
+        devices.extend([pointer, keyboard])
         if args.ime:
             with (output / "fcitx.log").open("w") as log:
                 ime = subprocess.Popen(["fcitx5", "-D", "--disable=xcb"], env=native, stdout=log, stderr=log, start_new_session=True)
@@ -1293,10 +1346,8 @@ def wayland(args, output, private):
                                    env=dict(native, ZGX_SHADER_LOG="1", ZGX_WEB_DAMAGE="1"), stdout=log,
                                    stderr=errors)
         owned.append(app)
-        subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=False)
-        info = subprocess.check_output(["xwininfo", "-id", str(window)], env=env, text=True)
-        origin = tuple(int(re.search(rf"Absolute upper-left {axis}:\s+(-?\d+)", info).group(1)) for axis in "XY")
-        session = Session(output, env, window, origin, wayland=native)
+        # Its window at the output's top left (`move position 0 0`).
+        session = Session(output, env, None, (0, 0), wayland=native, devices=(pointer, keyboard, size))
 
         def ime_wayland(session, checks):
             session.click(120, 80)
@@ -1315,6 +1366,8 @@ def wayland(args, output, private):
             return inspector_checks(session), "Wayland"
         return page_checks(session, ime_wayland if args.ime else None, args.transparent, args.unaccelerated), "Wayland"
     finally:
+        for device in devices:
+            device.close()
         end(owned)
 
 
@@ -1332,8 +1385,8 @@ def main():
     parser.add_argument("--slow-replies", action="store_true",
                         help="WebKit's answers come 800 ms late (ZGX_WEBKITGTK_REPLY_DELAY_MS, debug builds only): on keys, after Ctrl is up; on the caret, after its frame")
     args = parser.parse_args()
-    needed = ["Xvfb", "openbox", "xdotool", "xwininfo"]
-    needed += ["sway", "dbus-daemon", "wl-copy", "wl-paste"] + (["fcitx5", "fcitx5-remote"] if args.ime else []) if args.wayland else []
+    needed = ["sway", "swaymsg", "grim", "dbus-daemon", "wl-copy", "wl-paste"] + (["fcitx5", "fcitx5-remote"] if args.ime else []) \
+        if args.wayland else ["Xvfb", "openbox", "xdotool", "xwininfo"]
     needed += ["xclip"] if not args.wayland and not args.ime and not args.orca and not args.media and not args.inspector else []
     needed += ["orca", "gdbus", "dbus-daemon"] if args.orca else []
     needed += ["gst-launch-1.0"] if args.media else []

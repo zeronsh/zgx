@@ -19,9 +19,9 @@ import time
 DISPLAY_SYNC, DISPLAY_GET_REGISTRY = 0, 1
 REGISTRY_BIND = 0
 MANAGER_CREATE = 0
-MOTION_ABSOLUTE, BUTTON, AXIS, FRAME, AXIS_SOURCE, AXIS_STOP = 1, 2, 3, 4, 5, 6
+MOTION_ABSOLUTE, BUTTON, AXIS, FRAME, AXIS_SOURCE, AXIS_STOP, AXIS_DISCRETE = 1, 2, 3, 4, 5, 6, 7
 BTN_LEFT = 0x110
-FINGER = 1
+WHEEL, FINGER = 0, 1
 VERTICAL, HORIZONTAL = 0, 1
 
 
@@ -124,6 +124,14 @@ class VirtualPointer:
         for axis, moved in ((VERTICAL, dy), (HORIZONTAL, dx)):
             if moved:
                 self._send(self.pointer, AXIS_STOP, struct.pack("<II", self._now(), axis))
+        self._send(self.pointer, FRAME)
+
+    def wheel(self, axis=VERTICAL, notches=1):
+        """A mouse wheel turned `notches` (positive: down or right), as
+        libinput reports a notch: 15 degrees, one discrete step each."""
+        self._send(self.pointer, AXIS_SOURCE, struct.pack("<I", WHEEL))
+        self._send(self.pointer, AXIS_DISCRETE, struct.pack("<II", self._now(), axis) + _fixed(15. * notches)
+                   + struct.pack("<i", notches))
         self._send(self.pointer, FRAME)
 
     def close(self):
