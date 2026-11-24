@@ -257,7 +257,7 @@ The highlight paints under the glyphs in the theme's `selection` colour, or
 `Ui::set_window_active`). It follows layout and reshaping. Removing a selected
 node drops its part, and unmounting the region ends the selection.
 
-Text that is not selectable costs nothing: no listeners, nodes or layouts. A
+Text that is not selectable adds no listeners, nodes or layouts. A
 selectable region adds one listener; a press shapes the text it lands on, and
 the layouts a gesture moves over are kept until it ends. Changing the
 selection repaints only where a highlight changed, and an unchanged one
