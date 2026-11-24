@@ -162,12 +162,13 @@ fn a_stream_of_small_writes_lands_whole() {
 }
 
 /// Typing reaches a program while its output streams in (between the
-/// paced reads, macOS).
+/// paced reads, macOS). The answer on a row of its own: `seq`, killed mid
+/// number, leaves its last line unended ("754got hi" on a CI runner).
 #[cfg(unix)]
 #[test]
 fn input_reaches_a_program_while_its_output_streams() {
     let mut run = Scripted::run(
-        "seq 1 2000000 & read line; kill $!; wait; echo \"got $line\"",
+        "seq 1 2000000 & read line; kill $!; wait; echo; echo \"got $line\"",
         20,
         4,
     );
