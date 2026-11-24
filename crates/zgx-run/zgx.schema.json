@@ -1,0 +1,452 @@
+{
+  "$defs": {
+    "caption_height": {
+      "description": "How tall inset's caption buttons are on Windows, in the content's points.",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "covers_display": {
+      "description": "Over the whole display, the menu bar and dock included (false by default)",
+      "type": "boolean"
+    },
+    "decorations": {
+      "description": "The platform's own frame and title bar (true by default)",
+      "type": "boolean"
+    },
+    "frame_autosave": {
+      "description": "true: the window reopens where it was left, its frame saved under the app_id; or a name to save it under.",
+      "type": [
+        "boolean",
+        "string"
+      ]
+    },
+    "glass": {
+      "description": "The desktop blurred behind the window: true (the HUD material), false, or { material, plain }",
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "material": {
+              "enum": [
+                "hud",
+                "liquid",
+                "under_window_background",
+                "under_page_background",
+                "window_background",
+                "content_background",
+                "titlebar",
+                "header_view",
+                "sidebar",
+                "menu",
+                "popover",
+                "sheet",
+                "tool_tip",
+                "full_screen_ui",
+                "selection"
+              ]
+            },
+            "plain": {
+              "description": "The blur alone: no tint or saturation of the platform's.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "height": {
+      "description": "Its height in points (640 by default).",
+      "type": "number"
+    },
+    "level": {
+      "description": "Where it sits among windows: \"normal\" or \"always_on_top\"",
+      "enum": [
+        "normal",
+        "always_on_top"
+      ]
+    },
+    "max_height": {
+      "description": "Its largest height in points, given with max_width.",
+      "type": "number"
+    },
+    "max_width": {
+      "description": "Its largest width in points, given with max_height.",
+      "type": "number"
+    },
+    "min_height": {
+      "description": "Its smallest height in points, given with min_width.",
+      "type": "number"
+    },
+    "min_width": {
+      "description": "Its smallest width in points, given with min_height.",
+      "type": "number"
+    },
+    "named_window": {
+      "additionalProperties": false,
+      "properties": {
+        "caption_height": {
+          "$ref": "#/$defs/caption_height"
+        },
+        "covers_display": {
+          "$ref": "#/$defs/covers_display"
+        },
+        "decorations": {
+          "$ref": "#/$defs/decorations"
+        },
+        "frame_autosave": {
+          "$ref": "#/$defs/frame_autosave"
+        },
+        "glass": {
+          "$ref": "#/$defs/glass"
+        },
+        "height": {
+          "$ref": "#/$defs/height"
+        },
+        "level": {
+          "$ref": "#/$defs/level"
+        },
+        "linux": {
+          "$ref": "#/$defs/platform_block",
+          "description": "Window keys on linux: each replaces the window's there, whole."
+        },
+        "macos": {
+          "$ref": "#/$defs/platform_block",
+          "description": "Window keys on macos: each replaces the window's there, whole."
+        },
+        "max_height": {
+          "$ref": "#/$defs/max_height"
+        },
+        "max_width": {
+          "$ref": "#/$defs/max_width"
+        },
+        "min_height": {
+          "$ref": "#/$defs/min_height"
+        },
+        "min_width": {
+          "$ref": "#/$defs/min_width"
+        },
+        "resizable": {
+          "$ref": "#/$defs/resizable"
+        },
+        "script": {
+          "description": "A script of its own to open, beside the app's.",
+          "type": "string"
+        },
+        "shadow": {
+          "$ref": "#/$defs/shadow"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "titlebar": {
+          "$ref": "#/$defs/titlebar"
+        },
+        "traffic_lights": {
+          "$ref": "#/$defs/traffic_lights"
+        },
+        "transparent": {
+          "$ref": "#/$defs/transparent"
+        },
+        "visible": {
+          "$ref": "#/$defs/visible"
+        },
+        "width": {
+          "$ref": "#/$defs/width"
+        },
+        "windows": {
+          "$ref": "#/$defs/platform_block",
+          "description": "Window keys on windows: each replaces the window's there, whole."
+        }
+      },
+      "type": "object"
+    },
+    "platform_block": {
+      "additionalProperties": false,
+      "properties": {
+        "caption_height": {
+          "$ref": "#/$defs/caption_height"
+        },
+        "covers_display": {
+          "$ref": "#/$defs/covers_display"
+        },
+        "decorations": {
+          "$ref": "#/$defs/decorations"
+        },
+        "frame_autosave": {
+          "$ref": "#/$defs/frame_autosave"
+        },
+        "glass": {
+          "$ref": "#/$defs/glass"
+        },
+        "height": {
+          "$ref": "#/$defs/height"
+        },
+        "level": {
+          "$ref": "#/$defs/level"
+        },
+        "max_height": {
+          "$ref": "#/$defs/max_height"
+        },
+        "max_width": {
+          "$ref": "#/$defs/max_width"
+        },
+        "min_height": {
+          "$ref": "#/$defs/min_height"
+        },
+        "min_width": {
+          "$ref": "#/$defs/min_width"
+        },
+        "resizable": {
+          "$ref": "#/$defs/resizable"
+        },
+        "shadow": {
+          "$ref": "#/$defs/shadow"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "titlebar": {
+          "$ref": "#/$defs/titlebar"
+        },
+        "traffic_lights": {
+          "$ref": "#/$defs/traffic_lights"
+        },
+        "transparent": {
+          "$ref": "#/$defs/transparent"
+        },
+        "visible": {
+          "$ref": "#/$defs/visible"
+        },
+        "width": {
+          "$ref": "#/$defs/width"
+        }
+      },
+      "type": "object"
+    },
+    "resizable": {
+      "description": "Whether the person can resize it (true by default)",
+      "type": "boolean"
+    },
+    "shadow": {
+      "description": "The platform's shadow around it (true by default)",
+      "type": "boolean"
+    },
+    "title": {
+      "description": "The window's title (the app's folder's name by default).",
+      "type": "string"
+    },
+    "titlebar": {
+      "description": "standard, inset (content under a transparent title bar) or hidden.",
+      "enum": [
+        "standard",
+        "inset",
+        "hidden"
+      ]
+    },
+    "traffic_lights": {
+      "additionalProperties": false,
+      "description": "Where inset's traffic lights go on macOS: the close button's top left in the content's points.",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "transparent": {
+      "description": "See-through where nothing is drawn (false by default)",
+      "type": "boolean"
+    },
+    "visible": {
+      "description": "false: it opens hidden, laid out and drawn, until the script shows it.",
+      "type": "boolean"
+    },
+    "width": {
+      "description": "Its width in points (960 by default).",
+      "type": "number"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An app's window and host, as zgx-run reads them (docs/scripting.md).",
+  "properties": {
+    "$schema": {
+      "description": "This schema, for editors.",
+      "type": "string"
+    },
+    "app_id": {
+      "description": "Where ui.persist keeps its data, and on Linux its windows' desktop file ID.",
+      "type": "string"
+    },
+    "application_id": {
+      "description": "A reverse-DNS application ID: the system then hands the app the files and URLs it opens with it.",
+      "type": "string"
+    },
+    "caption_height": {
+      "$ref": "#/$defs/caption_height"
+    },
+    "covers_display": {
+      "$ref": "#/$defs/covers_display"
+    },
+    "decorations": {
+      "$ref": "#/$defs/decorations"
+    },
+    "expose": {
+      "additionalProperties": false,
+      "description": "What plugins reach of the app.",
+      "properties": {
+        "actions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hooks": {
+          "additionalProperties": {
+            "enum": [
+              "open",
+              "override"
+            ]
+          },
+          "type": "object"
+        },
+        "shared": {
+          "additionalProperties": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "first": {
+      "description": "The window of named_windows that opens (zgx run --window opens another).",
+      "type": "string"
+    },
+    "frame_autosave": {
+      "$ref": "#/$defs/frame_autosave"
+    },
+    "glass": {
+      "$ref": "#/$defs/glass"
+    },
+    "height": {
+      "$ref": "#/$defs/height"
+    },
+    "level": {
+      "$ref": "#/$defs/level"
+    },
+    "linux": {
+      "$ref": "#/$defs/platform_block",
+      "description": "Window keys on linux: each replaces the window's there, whole."
+    },
+    "macos": {
+      "$ref": "#/$defs/platform_block",
+      "description": "Window keys on macos: each replaces the window's there, whole."
+    },
+    "max_height": {
+      "$ref": "#/$defs/max_height"
+    },
+    "max_width": {
+      "$ref": "#/$defs/max_width"
+    },
+    "min_height": {
+      "$ref": "#/$defs/min_height"
+    },
+    "min_width": {
+      "$ref": "#/$defs/min_width"
+    },
+    "modules": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "The app's native modules, by name: each a crate's folder or a library's path.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_]+$"
+      },
+      "type": "object"
+    },
+    "named_windows": {
+      "additionalProperties": {
+        "$ref": "#/$defs/named_window"
+      },
+      "description": "Windows by name, each with the window keys of the top level, which it starts from.",
+      "type": "object"
+    },
+    "packages": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Module folders outside the app it may require, by name: { \"kit\": \"../shared/kit\" }.",
+      "type": "object"
+    },
+    "plugins": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "allow": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "description": "The app's plugins, by name, each with what it is allowed.",
+      "type": "object"
+    },
+    "resizable": {
+      "$ref": "#/$defs/resizable"
+    },
+    "shadow": {
+      "$ref": "#/$defs/shadow"
+    },
+    "title": {
+      "$ref": "#/$defs/title"
+    },
+    "titlebar": {
+      "$ref": "#/$defs/titlebar"
+    },
+    "traffic_lights": {
+      "$ref": "#/$defs/traffic_lights"
+    },
+    "transparent": {
+      "$ref": "#/$defs/transparent"
+    },
+    "version": {
+      "description": "The app's version, as zgx build gives its bundle.",
+      "type": "string"
+    },
+    "visible": {
+      "$ref": "#/$defs/visible"
+    },
+    "width": {
+      "$ref": "#/$defs/width"
+    },
+    "windows": {
+      "$ref": "#/$defs/platform_block",
+      "description": "Window keys on windows: each replaces the window's there, whole."
+    }
+  },
+  "title": "zgx.json",
+  "type": "object"
+}
