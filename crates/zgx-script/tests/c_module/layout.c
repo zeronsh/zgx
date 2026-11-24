@@ -13,6 +13,7 @@ int main(void) {
     printf("kinds %d %d %d %d %d %d %d %d\n", ZGX_NIL, ZGX_BOOL, ZGX_NUM, ZGX_STR, ZGX_TEXT,
            ZGX_LIST, ZGX_MAP, ZGX_FOLDED);
     printf("statuses %u %u %u\n", ZGX_DONE, ZGX_FAILED, ZGX_REFUSED_ABI);
+    printf("posted %u %u\n", ZGX_POSTED, ZGX_GONE);
     printf("sum %u\n", zgx_manifest_sum((const uint8_t *)"{\"name\":\"c\"}", 12));
     SIZE(zgx_value);
     AT(zgx_value, kind);
@@ -37,6 +38,12 @@ int main(void) {
     AT(zgx_api, release);
     AT(zgx_api, open);
     AT(zgx_api, flat);
+    AT(zgx_api, host_retain);
+    AT(zgx_api, host_release);
+    AT(zgx_api, post);
+    AT(zgx_api, after);
+    AT(zgx_api, timer_release);
+    AT(zgx_api, state);
     SIZE(zgx_registrar);
     AT(zgx_registrar, size);
     AT(zgx_registrar, host);
@@ -44,5 +51,6 @@ int main(void) {
     AT(zgx_registrar, function_taking);
     AT(zgx_registrar, action);
     AT(zgx_registrar, state);
+    AT(zgx_registrar, host_ref);
     return 0;
 }

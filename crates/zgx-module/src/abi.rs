@@ -119,7 +119,66 @@ pub struct Api {
     /// A [`TEXT`] value as a string of all its text (a copy); `nil` for any
     /// other.
     pub flat: unsafe extern "C" fn(value: *const Raw, out: *mut Raw),
+    // What follows is the interface's second part, the host's own reach:
+    // a module's threads hand work to the interface's thread, and timers.
+    // Each function is called on the interface's thread unless it says
+    // otherwise.
+    /// The host handle `host` once more (a [`Registrar::host_ref`]'s), to
+    /// keep: any thread.
+    pub host_retain: unsafe extern "C" fn(host: *mut c_void) -> *mut c_void,
+    /// Lets go of a host handle: any thread.
+    pub host_release: unsafe extern "C" fn(host: *mut c_void),
+    /// Runs `job` on the host's thread, the interface's, at its next turn:
+    /// any thread. It wakes the host as a value sent to it does, and nothing
+    /// waits or polls while nothing is posted. The jobs of one turn run in
+    /// the order posted, each in one reactive batch (what it sets updates
+    /// once). [`POSTED`], or [`GONE`] once the host is: `free` is then
+    /// called at once, on the caller's thread.
+    pub post:
+        unsafe extern "C" fn(host: *mut c_void, job: Job, user: *mut c_void, free: Free) -> u32,
+    /// Calls `fire` after `ms` milliseconds on zgx's clock (a test's,
+    /// devtools' frozen one, video's virtual one, else the wall's), then
+    /// every `ms` while `repeat` is not 0 and `fire` returns not 0: a
+    /// timer, to let go with [`timer_release`](Self::timer_release).
+    /// `user` is freed as it ends. Null once the host is gone (`free` called
+    /// at once).
+    pub after: unsafe extern "C" fn(
+        host: *mut c_void,
+        ms: f64,
+        repeat: u32,
+        fire: Fire,
+        user: *mut c_void,
+        free: Free,
+    ) -> *mut c_void,
+    /// Lets go of a timer [`after`](Self::after) made, stopping it if
+    /// `stop` is not 0 (else it runs on until it ends or its host goes).
+    pub timer_release: unsafe extern "C" fn(timer: *mut c_void, stop: u32),
+    /// A module's state for this thread, as [`Registrar::state`] gives it,
+    /// asked by a host handle: from a job or a timer's call, after the
+    /// module loaded.
+    pub state: unsafe extern "C" fn(
+        host: *mut c_void,
+        name: *const u8,
+        len: usize,
+        size: usize,
+        align: usize,
+        init: unsafe extern "C" fn(state: *mut u8),
+        free: unsafe extern "C" fn(state: *mut u8),
+    ) -> *mut u8,
 }
+
+/// What [`Api::post`] returns when the job will run.
+pub const POSTED: u32 = 1;
+/// What [`Api::post`] returns when the host is gone: the job won't run.
+pub const GONE: u32 = 0;
+
+/// A job [`Api::post`] runs on the interface's thread: `host` is the host
+/// handle it was posted to, lent for the call. It runs once; its `user` is
+/// freed after (or unrun, if the host goes first).
+pub type Job = unsafe extern "C" fn(user: *mut c_void, host: *mut c_void);
+/// A timer's call ([`Api::after`]), on the interface's thread, `host` lent:
+/// a repeating timer goes on while it returns not 0.
+pub type Fire = unsafe extern "C" fn(user: *mut c_void, host: *mut c_void) -> u32;
 
 /// What a call returns when it did what it was asked.
 pub const DONE: u32 = 0;
@@ -202,6 +261,13 @@ pub struct Registrar {
         init: unsafe extern "C" fn(state: *mut u8),
         free: unsafe extern "C" fn(state: *mut u8),
     ) -> *mut u8,
+    // The interface's second part ([`Api::host_retain`] on).
+    /// A handle to the host being loaded into, kept past the entry call:
+    /// what [`Api::post`] and [`Api::after`] take, and what a module's
+    /// threads hand work to the host by. Let go with
+    /// [`Api::host_release`]. A host whose module asks for none keeps
+    /// nothing for it.
+    pub host_ref: unsafe extern "C" fn(host: *mut c_void) -> *mut c_void,
 }
 
 /// A module's entry, exported as [`ENTRY`]: called once per host it is

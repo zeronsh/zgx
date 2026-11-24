@@ -88,6 +88,20 @@ typedef struct zgx_bytes {
 
 /* The runtime's functions for values: the same for every module, for as
  * long as the process runs. Each writes what it makes to `out`, owned. */
+/* Frees a registration's, a job's or a timer's `user` when it is done. */
+typedef void (*zgx_free)(void *user);
+/* A job zgx_api.post runs on the interface's thread: `host` is the host
+ * handle it was posted to, lent. It runs once; `user` is freed after (or
+ * unrun, if the host goes first). */
+typedef void (*zgx_job)(void *user, void *host);
+/* A timer's call (zgx_api.after), on the interface's thread, `host` lent: a
+ * repeating timer goes on while it returns not 0. */
+typedef uint32_t (*zgx_fire)(void *user, void *host);
+
+/* What zgx_api.post returns: the job will run, or the host is gone. */
+#define ZGX_POSTED 1u
+#define ZGX_GONE 0u
+
 typedef struct zgx_api {
     uint32_t abi;  /* ZGX_MODULE_ABI */
     uint32_t size; /* this struct's size as the runtime built it: read no further */
@@ -111,6 +125,27 @@ typedef struct zgx_api {
     /* A ZGX_TEXT value as one string of all its text (a copy); `nil` for
      * any other. */
     void (*flat)(const zgx_value *value, zgx_value *out);
+    /* The host's own reach, on the interface's thread unless said. */
+    /* The host handle `host` once more, to keep: any thread. */
+    void *(*host_retain)(void *host);
+    /* Lets go of a host handle: any thread. */
+    void (*host_release)(void *host);
+    /* Runs `job` on the host's thread at its next turn, in one reactive
+     * batch: any thread. ZGX_POSTED, or ZGX_GONE once the host is (`free`
+     * then called at once, on the caller's thread). */
+    uint32_t (*post)(void *host, zgx_job job, void *user, zgx_free free);
+    /* Calls `fire` after `ms` milliseconds on zgx's clock, then every `ms`
+     * while `repeat` is not 0 and `fire` returns not 0: a timer, to let go
+     * with timer_release. `user` is freed as it ends. NULL once the host is
+     * gone (`free` called at once). */
+    void *(*after)(void *host, double ms, uint32_t repeat, zgx_fire fire, void *user,
+                   zgx_free free);
+    /* Lets go of a timer, stopping it if `stop` is not 0. */
+    void (*timer_release)(void *timer, uint32_t stop);
+    /* The module's state for this thread (zgx_registrar.state's), asked by
+     * a host handle: from a job or a timer's call. */
+    uint8_t *(*state)(void *host, const uint8_t *name, size_t len, size_t size, size_t align,
+                      void (*init)(uint8_t *state), void (*free)(uint8_t *state));
 } zgx_api;
 
 /* What a call returns: done, or failed. Failing, it wrote why (a string)
@@ -131,9 +166,6 @@ typedef uint32_t (*zgx_function_taking)(void *user, zgx_value *arg, zgx_value *o
 /* A module's action (`ui.action(name, arg)`, `ui.invoke`): `arg` lent. It
  * writes `out` only when it fails. */
 typedef uint32_t (*zgx_action)(void *user, const zgx_value *arg, zgx_value *out);
-/* Frees a registration's `user` when the host that held it goes. */
-typedef void (*zgx_free)(void *user);
-
 /* What a module registers with as it loads: valid only inside its entry.
  * Names are UTF-8, `len` bytes, not NUL-terminated. */
 typedef struct zgx_registrar {
@@ -151,6 +183,10 @@ typedef struct zgx_registrar {
      * thread ends. */
     uint8_t *(*state)(void *host, const uint8_t *name, size_t len, size_t size, size_t align,
                       void (*init)(uint8_t *state), void (*free)(uint8_t *state));
+    /* A handle to the host being loaded into, kept past the entry: what
+     * zgx_api.post and zgx_api.after take. Let go with
+     * zgx_api.host_release. */
+    void *(*host_ref)(void *host);
 } zgx_registrar;
 
 /* A module's entry, called once per host it is loaded into. Returns 0, or

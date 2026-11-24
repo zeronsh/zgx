@@ -24,6 +24,9 @@ use std::{
     mem::{ManuallyDrop, MaybeUninit},
     path::Path,
     rc::{Rc, Weak},
+    sync::{Arc, Mutex},
+    task::{Poll, Waker},
+    time::Duration,
 };
 
 use mlua::{Lua, Table};
@@ -152,6 +155,12 @@ static API: Api = Api {
     release,
     open,
     flat,
+    host_retain,
+    host_release,
+    post,
+    after,
+    timer_release,
+    state,
 };
 
 /// A registration's `user`, freed with the host's hold on it.
@@ -180,9 +189,10 @@ struct Pending {
     user: User,
 }
 /// What a registrar's `host` points at while a module's entry runs.
-#[derive(Default)]
 struct Loading {
     pending: RefCell<Vec<Pending>>,
+    /// The host it loads into, for a handle to it (`host_ref`).
+    host: ScriptHost,
 }
 
 unsafe fn name_of(name: *const u8, len: usize) -> String {
@@ -590,6 +600,217 @@ unsafe extern "C" fn state(
     })
 }
 
+// A module's reach into its host: a handle to it any thread can post work
+// to, run on the interface's thread, and timers. A host keeps nothing for
+// this until a module asks for a handle to it (`host_ref`): a host's
+// mailbox is made then, in a registry of this thread's, so a host and a VM
+// are no larger for it, and nothing runs or waits for a host that has none.
+
+/// Where a module's threads post work for a host (`Api::post`): a host
+/// handle is a counted pointer to one. Drained on the host's thread by one
+/// task, which waits on a waker: posting wakes it, and nothing else does.
+struct Mailbox {
+    thread: std::thread::ThreadId,
+    queue: Mutex<Queue>,
+}
+struct Queue {
+    jobs: Vec<Posted>,
+    waker: Option<Waker>,
+    /// Whether its host is there to run what is posted.
+    open: bool,
+}
+impl Mailbox {
+    fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+/// A posted job and its `user`, freed after it runs or, unrun, as its host
+/// goes. A module's `user` for a job may cross threads (`Api::post`).
+struct Posted {
+    job: abi::Job,
+    user: User,
+}
+// SAFETY: What `Api::post` asks of a module: a job's `user` may be sent.
+unsafe impl Send for Posted {}
+
+thread_local! {
+    /// The hosts on this thread a module holds a handle to, by their
+    /// mailboxes.
+    static REACHED: RefCell<Vec<(Weak<crate::Inner>, Arc<Mailbox>)>> = const { RefCell::new(Vec::new()) };
+}
+/// `host`'s mailbox: made the first time a module asks for a handle to it,
+/// the task that drains it with it.
+fn mailbox_of(host: &ScriptHost) -> Arc<Mailbox> {
+    REACHED.with_borrow_mut(|all| {
+        all.retain(|(host, _)| host.strong_count() > 0);
+        if let Some((_, mailbox)) = all
+            .iter()
+            .find(|(of, _)| std::ptr::eq(of.as_ptr(), Rc::as_ptr(&host.0)))
+        {
+            return mailbox.clone();
+        }
+        let mailbox = Arc::new(Mailbox {
+            thread: std::thread::current().id(),
+            queue: Mutex::new(Queue {
+                jobs: Vec::new(),
+                waker: None,
+                open: true,
+            }),
+        });
+        host.0
+            .timers
+            .spawn(drained(mailbox.clone(), Rc::downgrade(&host.0)));
+        all.push((Rc::downgrade(&host.0), mailbox.clone()));
+        mailbox
+    })
+}
+/// The host a handle is to, asked on its thread: none on another thread,
+/// or once the host is gone.
+///
+/// # Safety
+/// `handle` is a host handle (`host_ref`'s), held.
+unsafe fn host_of(handle: *mut c_void) -> Option<ScriptHost> {
+    // SAFETY: The caller's.
+    let mailbox = unsafe { &*(handle as *const Mailbox) };
+    if mailbox.thread != std::thread::current().id() {
+        return None;
+    }
+    REACHED.with_borrow(|all| {
+        all.iter()
+            .find(|(_, of)| std::ptr::eq(Arc::as_ptr(of), mailbox))
+            .and_then(|(host, _)| host.upgrade())
+            .map(ScriptHost)
+    })
+}
+/// Runs what is posted to `mailbox`, on its host's thread, as it comes;
+/// closes it as the host goes (what waits is freed, unrun).
+async fn drained(mailbox: Arc<Mailbox>, host: Weak<crate::Inner>) {
+    struct Closing(Arc<Mailbox>);
+    impl Drop for Closing {
+        fn drop(&mut self) {
+            let unrun = {
+                let mut queue = self.0.queue();
+                queue.open = false;
+                queue.waker = None;
+                std::mem::take(&mut queue.jobs)
+            };
+            drop(unrun);
+        }
+    }
+    let _closing = Closing(mailbox.clone());
+    let handle = Arc::as_ptr(&mailbox) as *mut c_void;
+    loop {
+        let jobs = std::future::poll_fn(|cx| {
+            let mut queue = mailbox.queue();
+            if queue.jobs.is_empty() {
+                queue.waker = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            Poll::Ready(std::mem::take(&mut queue.jobs))
+        })
+        .await;
+        let Some(host) = host.upgrade() else {
+            return;
+        };
+        for posted in jobs {
+            // SAFETY: The module's job and its own `user`, on the host's
+            // thread, the handle lent (the mailbox is held here).
+            host.runtime
+                .batch(|| unsafe { (posted.job)(posted.user.ptr, handle) });
+        }
+    }
+}
+
+/// A handle to the host a module loads into (`Registrar::host_ref`).
+unsafe extern "C" fn host_ref(loading: *mut c_void) -> *mut c_void {
+    // SAFETY: The registrar's own `host`, inside the entry call.
+    let loading = unsafe { &*(loading as *const Loading) };
+    Arc::into_raw(mailbox_of(&loading.host)) as *mut c_void
+}
+unsafe extern "C" fn host_retain(host: *mut c_void) -> *mut c_void {
+    // SAFETY: A host handle, held (any thread: the count is atomic).
+    unsafe { Arc::increment_strong_count(host as *const Mailbox) };
+    host
+}
+unsafe extern "C" fn host_release(host: *mut c_void) {
+    // SAFETY: A host handle the module let go of, once.
+    unsafe { Arc::decrement_strong_count(host as *const Mailbox) };
+}
+unsafe extern "C" fn post(
+    host: *mut c_void,
+    job: abi::Job,
+    user: *mut c_void,
+    free: abi::Free,
+) -> u32 {
+    // SAFETY: A host handle, held; any thread.
+    let mailbox = unsafe { &*(host as *const Mailbox) };
+    let posted = Posted {
+        job,
+        user: User { ptr: user, free },
+    };
+    let (waker, refused) = {
+        let mut queue = mailbox.queue();
+        if queue.open {
+            queue.jobs.push(posted);
+            (queue.waker.take(), None)
+        } else {
+            (None, Some(posted))
+        }
+    };
+    // (Freed or woken outside the lock: either may post again.)
+    if let Some(refused) = refused {
+        drop(refused);
+        return abi::GONE;
+    }
+    if let Some(waker) = waker {
+        waker.wake();
+    }
+    abi::POSTED
+}
+unsafe extern "C" fn after(
+    host: *mut c_void,
+    ms: f64,
+    repeat: u32,
+    fire: abi::Fire,
+    user: *mut c_void,
+    free: abi::Free,
+) -> *mut c_void {
+    let user = User { ptr: user, free };
+    // SAFETY: A host handle, held.
+    let Some(script_host) = (unsafe { host_of(host) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: The same handle, held once more for the timer's calls.
+    let mailbox = unsafe {
+        Arc::increment_strong_count(host as *const Mailbox);
+        Arc::from_raw(host as *const Mailbox)
+    };
+    let runtime = script_host.0.runtime.clone();
+    let seconds = if ms.is_finite() && ms > 0. {
+        ms / 1e3
+    } else {
+        0.
+    };
+    let period = Duration::from_secs_f64(seconds.min(zgx::timer::MAX_SLEEP.as_secs_f64()));
+    let stop = script_host.0.timers.start(period, repeat != 0, move || {
+        // (The whole `user`, not its pointer alone: the closure frees it as
+        // the timer ends.)
+        let user = &user;
+        let handle = Arc::as_ptr(&mailbox) as *mut c_void;
+        // SAFETY: The module's timer and its own `user`, alive with this
+        // closure; the handle lent.
+        runtime.batch(|| unsafe { fire(user.ptr, handle) }) != 0
+    });
+    Box::into_raw(Box::new(stop)) as *mut c_void
+}
+unsafe extern "C" fn timer_release(timer: *mut c_void, stop: u32) {
+    // SAFETY: A timer `after` made, let go of once.
+    let timer = *unsafe { Box::from_raw(timer as *mut crate::timers::Stop) };
+    if stop == 0 {
+        timer.detach();
+    }
+}
+
 /// What a script passed a module's function, as the values it is lent.
 /// Stated by count so no call allocates for them: a function of up to four
 /// arguments reads them off the script's stack.
@@ -871,7 +1092,10 @@ impl ScriptHost {
         manifest: &str,
         said: Manifest,
     ) -> Result<(), String> {
-        let loading = Loading::default();
+        let loading = Loading {
+            pending: RefCell::default(),
+            host: self.clone(),
+        };
         let registrar = Registrar {
             size: size_of::<Registrar>() as u32,
             host: std::ptr::from_ref(&loading) as *mut c_void,
@@ -879,6 +1103,7 @@ impl ScriptHost {
             function_taking: register_function_taking,
             action: register_action,
             state,
+            host_ref,
         };
         // SAFETY: The tables an entry is called with, `registrar` alive
         // through the call.
