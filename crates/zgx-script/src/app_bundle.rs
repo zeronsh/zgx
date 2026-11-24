@@ -109,6 +109,9 @@ pub struct Written {
     pub files: usize,
     /// The scripts among them.
     pub scripts: usize,
+    /// The app's files it doesn't hold, by their paths in `ui/`: not of a
+    /// kind a host reads, or hidden (a hidden folder as one, with a `/`).
+    pub left_out: Vec<String>,
     /// Its modules, each for each target: built now, or the cache's.
     pub modules: Vec<module_build::Built>,
     /// How long its `ui/` took: compiled (or, as source, parsed) and copied.
@@ -250,12 +253,13 @@ pub fn write(app: &Path, options: &Options) -> Result<Written, String> {
     }
     skip.push(partial.clone());
     let keep = match options.ui {
-        Ui::Bytecode => crate::bundle::build::Keep::Known,
+        Ui::Bytecode => crate::bundle::build::Keep::KnownAndLicences,
         Ui::Source => crate::bundle::build::Keep::Every {
             allow: &options.allow,
         },
     };
-    let sources = crate::bundle::build::sources_skipping(&app, &skip, false, keep)
+    let mut left_out = Vec::new();
+    let sources = crate::bundle::build::sources_skipping(&app, &skip, false, keep, &mut left_out)
         .map_err(|e| e.to_string())?;
     let mut sums = serde_json::Map::new();
     let mut scripts = 0;
@@ -328,6 +332,7 @@ pub fn write(app: &Path, options: &Options) -> Result<Written, String> {
         dir: out,
         files,
         scripts,
+        left_out,
         modules: built,
         ui_in,
     })

@@ -320,7 +320,7 @@ pub mod build {
     /// came from: `dir`'s own, and each package its `zgx.json` lists, under
     /// [`PACKAGES`]; the `.luaurc` aliases into a package name its copy.
     pub(crate) fn sources(dir: &Path) -> io::Result<Vec<(String, PathBuf, Vec<u8>)>> {
-        sources_skipping(dir, &[], true, Keep::Known)
+        sources_skipping(dir, &[], true, Keep::Known, &mut Vec::new())
     }
 
     /// Which of a folder's files are taken.
@@ -328,6 +328,9 @@ pub mod build {
     pub(crate) enum Keep<'a> {
         /// Those of the kinds a host reads, hidden ones but `.luaurc` out.
         Known,
+        /// Those, and the licences: what a bundle of them ships with.
+        #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+        KnownAndLicences,
         /// Every one, hidden or not, but what isn't the app's: `.git`,
         /// zgx's generated `.zgx` and macOS's `.DS_Store`. One that looks
         /// like a secret, a folder too, is an error unless `allow` names it
@@ -340,15 +343,18 @@ pub mod build {
     /// As `sources`, leaving out the folders in `skip` (an app's native
     /// modules' crates, whose `target/` holds files of the kinds kept),
     /// and telling cargo what to watch only for a build script (`cargo`).
+    /// The files not taken are told in `left`, by their paths in the bundle
+    /// (a hidden folder as one).
     pub(crate) fn sources_skipping(
         dir: &Path,
         skip: &[PathBuf],
         cargo: bool,
         keep: Keep<'_>,
+        left: &mut Vec<String>,
     ) -> io::Result<Vec<(String, PathBuf, Vec<u8>)>> {
         let read = |rel: String, path: PathBuf| Ok((rel, std::fs::read(&path)?, path));
         let mut rels = Vec::new();
-        collect(dir, "", dir, skip, keep, &mut rels)?;
+        collect(dir, "", dir, skip, keep, &mut rels, left)?;
         let mut files = rels
             .into_iter()
             .map(|rel| {
@@ -363,7 +369,7 @@ pub mod build {
             }
             let mut rels = Vec::new();
             let at = format!("{PACKAGES}/{name}/");
-            collect(folder, &at, folder, skip, keep, &mut rels)?;
+            collect(folder, &at, folder, skip, keep, &mut rels, left)?;
             for rel in rels {
                 let path = folder.join(&rel);
                 files.push(read(format!("{PACKAGES}/{name}/{rel}"), path)?);
@@ -385,6 +391,7 @@ pub mod build {
             luaurc.1 = repoint(dir, &luaurc.1, &packages)?;
         }
         files.sort_by(|a, b| a.0.cmp(&b.0));
+        left.sort();
         Ok(files
             .into_iter()
             .map(|(rel, bytes, path)| (rel, path, bytes))
@@ -469,6 +476,21 @@ pub mod build {
             || matches!(stem, "id_rsa" | "id_ed25519" | "id_ecdsa" | "id_dsa")
     }
 
+    /// Whether a file, or a folder of them, called `name` is licences by its
+    /// name, in any case: `LICENSE`, `NOTICE` and `COPYING`, alone or before
+    /// anything but more of a word (`LICENSE-MIT`, `licences/`, `NOTICE.txt`,
+    /// not `noticeboard`).
+    fn licence(name: &str) -> bool {
+        let name = name.to_lowercase();
+        ["license", "licence", "notice", "copying"]
+            .iter()
+            .filter_map(|word| name.strip_prefix(word))
+            .any(|rest| {
+                let rest = rest.strip_prefix('s').unwrap_or(rest);
+                !rest.starts_with(char::is_alphabetic)
+            })
+    }
+
     /// The files of `root` in `dir`, by their paths in `root`, which is at
     /// `at` in the bundle.
     fn collect(
@@ -478,6 +500,7 @@ pub mod build {
         skip: &[PathBuf],
         keep: Keep<'_>,
         out: &mut Vec<String>,
+        left: &mut Vec<String>,
     ) -> io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
@@ -485,11 +508,18 @@ pub mod build {
                 continue;
             }
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let out_of_it = match keep {
-                Keep::Known => name.starts_with('.') && name != ".luaurc",
-                Keep::Every { .. } => matches!(&*name, ".git" | ".zgx" | ".DS_Store"),
+            let shipped = || {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                format!("{at}{}", rel.to_string_lossy().replace('\\', "/"))
             };
-            if out_of_it {
+            // Not the app's, whatever is kept.
+            if matches!(&*name, ".git" | ".zgx" | ".DS_Store") {
+                continue;
+            }
+            let every = matches!(keep, Keep::Every { .. });
+            if !every && name.starts_with('.') && name != ".luaurc" {
+                let folder = if path.is_dir() { "/" } else { "" };
+                left.push(format!("{}{folder}", shipped()));
                 continue;
             }
             // A key or a password left in the folder would go to everyone
@@ -497,8 +527,7 @@ pub mod build {
             if let Keep::Every { allow } = keep
                 && secret(&name)
             {
-                let rel = path.strip_prefix(root).unwrap_or(&path);
-                let shipped = format!("{at}{}", rel.to_string_lossy().replace('\\', "/"));
+                let shipped = shipped();
                 if !allow.contains(&shipped) {
                     return Err(io::Error::other(format!(
                         "{}: looks like a secret, and every file of the folder ships: move it \
@@ -509,7 +538,6 @@ pub mod build {
             }
             // Taken as it is, a link would be another folder's file, or a
             // folder without end.
-            let every = matches!(keep, Keep::Every { .. });
             if every && path.is_symlink() && !(path.is_file() && crate::within(root, &path)) {
                 return Err(io::Error::other(format!(
                     "{}: a link to a folder, or out of the app's (copy what it names)",
@@ -517,7 +545,7 @@ pub mod build {
                 )));
             }
             if path.is_dir() {
-                collect(root, at, &path, skip, keep, out)?;
+                collect(root, at, &path, skip, keep, out, left)?;
                 continue;
             }
             let wanted = every
@@ -538,8 +566,16 @@ pub mod build {
                     )
                 )
                 || name == ".luaurc";
-            if wanted && let Ok(rel) = path.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            let wanted =
+                wanted || matches!(keep, Keep::KnownAndLicences) && rel.split('/').any(licence);
+            if wanted {
+                out.push(rel);
+            } else {
+                left.push(format!("{at}{rel}"));
             }
         }
         Ok(())
