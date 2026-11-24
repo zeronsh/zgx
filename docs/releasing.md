@@ -79,7 +79,7 @@ It never publishes. It doesn't run on pull requests: CI's time is unchanged. Loc
 Not automated, on purpose: publishing needs a crates.io token, and is done by hand, in this order, each after the release check passes on the tag:
 
 1. The forks that changed since they were last published, their versions bumped, `zgx-harfrust` and `zgx-swash` before `zgx-cosmic-text` (which depends on them): `cargo publish --manifest-path vendor/harfrust/Cargo.toml`, `vendor/swash`, `vendor/cosmic-text`, `vendor/taffy`, `vendor/mlua --features luau`, `vendor/zune-jpeg`, `vendor/vte`, `vendor/alacritty-terminal` (which depends on `zgx-vte`), `vendor/arboard`.
-2. The workspace: `cargo publish --workspace --locked` (it orders the crates itself).
+2. The workspace: `cargo publish --workspace --locked` (it orders the crates itself). With more than five names new to crates.io, one crate at a time instead: see [the next release's new names](#the-next-releases-new-names).
 
 `cargo publish --workspace` can stop part way with cargo's own error "no packages ready to publish but … remain in plan … awaiting confirmation" (cargo 1.96, at 0.1.0 and again at 0.1.2, each time after `zgx-gpu`; 0.1.1 went through): what it uploaded is published (check crates.io), and the rest publish one at a time in dependency order, each once the one before is in the index (`curl https://index.crates.io/zg/x-/zgx-gpu`): `cargo publish -p zgx-script --locked`, then `zgx-terminal` (before the desktop host, which depends on it), then `zgx-desktop`, then `zgx-run`.
 
@@ -88,3 +88,15 @@ crates.io's index can stop taking new versions for everyone while uploads still 
 Then tag the commit (`v<version>`), make a GitHub release from its changelog section (its links absolute, `https://github.com/zeronsh/zgx/blob/v<version>/…`: a release resolves no relative ones), and check a new project, with no lockfile, builds from crates.io alone and runs: `cargo add zgx zgx-desktop zgx-script zgx-run`, a `main` calling `zgx_run::run` on an `app.luau`, launched to its window. Building is not enough: 0.1.0 and 0.1.1 built in a new project and panicked as their first script loaded (luau0-src 0.22.1, resolved afresh; the release check's third step now runs one).
 
 A crate on crates.io can't be deleted, only yanked: a version published is published for good.
+
+### The next release's new names
+
+crates.io limits how fast one account publishes, new names apart from new versions: five new names at once, then one each 10 minutes; thirty new versions at once, then one a minute (the defaults in [crates.io's `rate_limiter.rs`](https://github.com/rust-lang/crates.io/blob/main/src/rate_limiter.rs), read 2026-11-24; an account can have limits of its own, so check it again). `cargo publish --workspace` orders crates by their dependencies, not by that limit, so a release with more than five new names publishes one crate at a time, each once the one before is in the index.
+
+The next release has nine names crates.io had none of on 2026-11-24 (`zgx-swash`, `zgx-vte`, `zgx-arboard`, `zgx-audio`, `zgx-module-macros`, `zgx-module`, `zgx-text`, `zgx-fx`, `zgx-video`). Nothing reserves them until they are published. In order, the new ones in bold:
+
+- [ ] Forks: `zgx-harfrust`, **`zgx-swash`**, `zgx-cosmic-text`, `zgx-taffy`, `zgx-mlua`, **`zgx-vte`**, `zgx-alacritty-terminal`, **`zgx-arboard`**. `zgx-zune-jpeg` is unchanged.
+- [ ] `zgx`, **`zgx-audio`**, **`zgx-module-macros`**: the first five new names.
+- [ ] **`zgx-module`**, once the limit lets a sixth through, then **`zgx-text`**, 10 minutes after it.
+- [ ] `zgx-gpu`, `zgx-components`, `zgx-3d`, `zgx-ghostty-sys`, `zgx-script`, `zgx-terminal`, `zgx-desktop`, `zgx-run`, each after the crates it depends on.
+- [ ] **`zgx-fx`** and **`zgx-video`**, 10 minutes apart, last: no published crate waits on them. They are the only two of the nine that can be held with `publish = false` alone. Holding `zgx-video` means changing what tells people to run `cargo install zgx-video` (`zgx video`'s error, in `crates/zgx-script/src/bin/zgx.rs`). The others can't be: Cargo needs every dependency on crates.io, optional ones too.
