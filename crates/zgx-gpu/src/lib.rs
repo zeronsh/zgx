@@ -21575,6 +21575,61 @@ pub fn plain_glyph_places(
         laid.key(),
     ))
 }
+/// `rich_glyph_places`: each glyph's key, pen position and run (for its
+/// colour), the decorations, and the prepared text's key when the prepared
+/// cache laid it out (for `trim_text`).
+#[doc(hidden)]
+pub type RichGlyphs = (
+    Vec<(CacheKey, f32, f32, usize)>,
+    Vec<text::RichDecoration>,
+    Option<u64>,
+);
+/// Rich text's glyphs as a renderer at `scale` places them: laid out as it
+/// lays them out (by `cache` where it prepares the text, else in a buffer of
+/// its own), each glyph's key, its pen position in device pixels from the
+/// text's origin and its run; then its decorations, in points from there.
+/// For the software raster, to draw rich text where and as the GPU does:
+/// laid out apart, in a font system of its own, its glyphs kept their
+/// fractions of a pixel and came out unlike the GPU's.
+#[doc(hidden)]
+pub fn rich_glyph_places(
+    fonts: &mut FontSystem,
+    cache: &mut prepared::TextCache,
+    rich: &zgx::rich_text::RichText,
+    wrap: f32,
+    height: f32,
+    scale: f32,
+) -> RichGlyphs {
+    let places = |glyphs: Vec<Glyph>| {
+        glyphs
+            .into_iter()
+            .map(|g| (g.key, g.x, g.y, g.run))
+            .collect()
+    };
+    if prepared::TextCache::handles(rich) {
+        let laid = cache.layout(fonts, rich, Some(wrap));
+        let starts = laid.line_starts();
+        let glyphs = glyphs_of(
+            Vec::new(),
+            laid.runs(Some(height)),
+            &starts,
+            Some(rich),
+            scale,
+        );
+        let decorations = text::rich_decorations_in(laid.runs(Some(height)), &starts, rich, fonts);
+        return (places(glyphs), decorations, Some(laid.key()));
+    }
+    let buffer = text::rich_buffer(fonts, rich, Some(wrap), Some(height));
+    let glyphs = glyphs_of(
+        Vec::new(),
+        buffer.layout_runs(),
+        &text::line_starts(&buffer),
+        Some(rich),
+        scale,
+    );
+    let decorations = text::rich_decorations(&buffer, rich, fonts);
+    (places(glyphs), decorations, None)
+}
 /// After a frame that laid text out from `fonts` and `cache` without a
 /// renderer (the software raster), what a renderer's frame trims: words
 /// unused a few shaping frames, and prepared text past what was `drawn`
