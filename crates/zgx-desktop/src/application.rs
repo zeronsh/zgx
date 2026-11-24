@@ -9126,9 +9126,20 @@ thread_local! {
 /// A caught panic's `message`, led by where it was (`src/app.rs:42: …`), as
 /// a script's error says where it failed: the site `note_panic_sites`
 /// noted, taken.
+/// A host callback a script called that the panic unwound through (an
+/// action, a function, the fetcher) is named after, with where it was
+/// registered: the panic may be deep in a library the callback used.
 pub(crate) fn with_panic_site(message: String) -> String {
-    match PANIC_SITE.with(|site| site.take()) {
+    let message = match PANIC_SITE.with(|site| site.take()) {
         Some(site) => format!("{site}: {message}"),
+        None => message,
+    };
+    match zgx::callback_site::take() {
+        Some((kind, at)) => format!(
+            "{message} (in {kind} registered at {}:{})",
+            at.file(),
+            at.line()
+        ),
         None => message,
     }
 }
@@ -9141,6 +9152,9 @@ pub(crate) fn note_panic_sites() {
     INSTALLED.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            // A site an earlier panic left (one caught elsewhere) is not
+            // this one's: what it unwinds through notes its own.
+            zgx::callback_site::clear();
             if let Some(at) = info.location() {
                 let site = format!("{}:{}", at.file(), at.line());
                 // A panic while the slot is borrowed (none is held across

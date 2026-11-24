@@ -3073,7 +3073,7 @@ impl ScriptHost {
     /// a place in the code it wasn't registered from before, that warns
     /// (stderr, [`warnings`](Self::warnings), the lint strip): use
     /// `replace_action` to replace one on purpose.
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[track_caller]
     pub fn action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
         let name = name.into();
         #[cfg(debug_assertions)]
@@ -3083,12 +3083,16 @@ impl ScriptHost {
             std::panic::Location::caller(),
             false,
         );
-        self.0.actions.borrow_mut().insert(name, Rc::new(action));
+        let at = std::panic::Location::caller();
+        self.0.actions.borrow_mut().insert(
+            name,
+            Rc::new(move |arg| zgx::callback_site::run(HOST_ACTION, at, || action(arg))),
+        );
     }
     /// `action`, replacing one already registered under `name` on
     /// purpose: never a warning.
     #[doc(hidden)]
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[track_caller]
     pub fn replace_action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
         let name = name.into();
         #[cfg(debug_assertions)]
@@ -3098,7 +3102,11 @@ impl ScriptHost {
             std::panic::Location::caller(),
             true,
         );
-        self.0.actions.borrow_mut().insert(name, Rc::new(action));
+        let at = std::panic::Location::caller();
+        self.0.actions.borrow_mut().insert(
+            name,
+            Rc::new(move |arg| zgx::callback_site::run(HOST_ACTION, at, || action(arg))),
+        );
     }
     /// Registers a Rust function scripts call for its value now, with
     /// `ui.call_sync(name, arg)`: a read of data the host keeps (the rows a
@@ -3107,7 +3115,7 @@ impl ScriptHost {
     /// quick (no I/O; `async_action` is for that). Plugins reach it as
     /// they reach actions (`expose_action`). A name registered twice warns
     /// as [`action`](Self::action)'s does (`replace_function` doesn't).
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[track_caller]
     pub fn function(&self, name: impl Into<String>, function: impl Fn(Value) -> Value + 'static) {
         let name = name.into();
         #[cfg(debug_assertions)]
@@ -3117,15 +3125,15 @@ impl ScriptHost {
             std::panic::Location::caller(),
             false,
         );
-        self.0
-            .functions
-            .borrow_mut()
-            .insert(name, Rc::new(function));
+        self.0.functions.borrow_mut().insert(
+            name,
+            sited_function(function, std::panic::Location::caller()),
+        );
     }
     /// `function`, replacing one already registered under `name` on
     /// purpose: never a warning.
     #[doc(hidden)]
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[track_caller]
     pub fn replace_function(
         &self,
         name: impl Into<String>,
@@ -3139,10 +3147,10 @@ impl ScriptHost {
             std::panic::Location::caller(),
             true,
         );
-        self.0
-            .functions
-            .borrow_mut()
-            .insert(name, Rc::new(function));
+        self.0.functions.borrow_mut().insert(
+            name,
+            sited_function(function, std::panic::Location::caller()),
+        );
     }
     /// Registers an async Rust function scripts call with `ui.call(name,
     /// arg)`, getting a promise of its result: `Ok` settles it with the
@@ -3151,7 +3159,7 @@ impl ScriptHost {
     /// what it waits for; hand blocking work to a thread and await its
     /// answer (`zgx::task::latest`). A name registered twice warns as
     /// [`action`](Self::action)'s does (`replace_async_action` doesn't).
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[track_caller]
     pub fn async_action<F, Fut>(&self, name: impl Into<String>, action: F)
     where
         F: Fn(Value) -> Fut + 'static,
@@ -3165,15 +3173,15 @@ impl ScriptHost {
             std::panic::Location::caller(),
             false,
         );
-        self.0.async_actions.borrow_mut().insert(
-            name,
-            Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
-        );
+        self.0
+            .async_actions
+            .borrow_mut()
+            .insert(name, sited_async(action, std::panic::Location::caller()));
     }
     /// `async_action`, replacing one already registered under `name` on
     /// purpose: never a warning.
     #[doc(hidden)]
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[track_caller]
     pub fn replace_async_action<F, Fut>(&self, name: impl Into<String>, action: F)
     where
         F: Fn(Value) -> Fut + 'static,
@@ -3187,10 +3195,10 @@ impl ScriptHost {
             std::panic::Location::caller(),
             true,
         );
-        self.0.async_actions.borrow_mut().insert(
-            name,
-            Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
-        );
+        self.0
+            .async_actions
+            .borrow_mut()
+            .insert(name, sited_async(action, std::panic::Location::caller()));
     }
     /// A debug build's record of `name` registered from `site`: from a site
     /// it wasn't registered from before, and not on purpose (`replace`),
@@ -3274,13 +3282,15 @@ impl ScriptHost {
     /// HTTP stack, headers and credentials (a token minted per request), and
     /// answers each `Request` with a `Response`, or an error message that
     /// rejects the script's promise. Without one, `ui.fetch` is an error.
+    #[track_caller]
     pub fn fetcher<F, Fut>(&self, fetch: F)
     where
         F: Fn(Request) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response, String>> + 'static,
     {
+        let at = std::panic::Location::caller();
         *self.0.fetcher.borrow_mut() = Some(Rc::new(move |request, _| -> calls::Fetch {
-            Box::pin(fetch(request))
+            Box::pin(Sited::new(FETCHER, at, || fetch(request)))
         }));
     }
     /// A transport that streams: `fetch` writes the response's body to
@@ -3290,13 +3300,15 @@ impl ScriptHost {
     /// reading the body whole gets it all. Once `Body::is_open` is false the
     /// script has cancelled (or reloaded): the future is dropped at its next
     /// await, and the transport may stop at once. It replaces `fetcher`.
+    #[track_caller]
     pub fn streaming_fetcher<F, Fut>(&self, fetch: F)
     where
         F: Fn(Request, Body) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response, String>> + 'static,
     {
+        let at = std::panic::Location::caller();
         *self.0.fetcher.borrow_mut() = Some(Rc::new(move |request, body| -> calls::Fetch {
-            Box::pin(fetch(request, body))
+            Box::pin(Sited::new(FETCHER, at, || fetch(request, body)))
         }));
     }
     /// The transport for `ui.socket`: a connection the script keeps open
@@ -5795,6 +5807,61 @@ pub(crate) fn test_dir(name: &str) -> PathBuf {
         .unwrap_or_else(PoisonError::into_inner)
         .push(dir.clone());
     dir
+}
+
+/// What a contained panic calls a host's callback by, with where it was
+/// registered (`zgx::callback_site`).
+const HOST_ACTION: &str = "a host action";
+const HOST_FUNCTION: &str = "a host function";
+const ASYNC_HOST_ACTION: &str = "an async host action";
+const FETCHER: &str = "the host's fetcher";
+
+/// `function`, noting `at` if it panics (`zgx::callback_site`).
+fn sited_function(
+    function: impl Fn(Value) -> Value + 'static,
+    at: &'static std::panic::Location<'static>,
+) -> Rc<dyn Fn(Value) -> Value> {
+    Rc::new(move |arg| zgx::callback_site::run(HOST_FUNCTION, at, || function(arg)))
+}
+/// `action`'s calls and futures, noting `at` if they panic.
+fn sited_async<F, Fut>(action: F, at: &'static std::panic::Location<'static>) -> calls::AsyncAction
+where
+    F: Fn(Value) -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+{
+    Rc::new(move |arg| -> calls::Call {
+        Box::pin(Sited::new(ASYNC_HOST_ACTION, at, || action(arg)))
+    })
+}
+
+/// A host's future, noting where it was registered if a poll of it (or
+/// the call that made it) panics.
+struct Sited<F> {
+    kind: &'static str,
+    at: &'static std::panic::Location<'static>,
+    inner: F,
+}
+impl<F> Sited<F> {
+    fn new(
+        kind: &'static str,
+        at: &'static std::panic::Location<'static>,
+        make: impl FnOnce() -> F,
+    ) -> Self {
+        let inner = zgx::callback_site::run(kind, at, make);
+        Self { kind, at, inner }
+    }
+}
+impl<F: std::future::Future> std::future::Future for Sited<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let (kind, at) = (self.kind, self.at);
+        // SAFETY: `inner` is pinned with `self`, never moved out of it.
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
+        zgx::callback_site::run(kind, at, || inner.poll(cx))
+    }
 }
 
 #[cfg(test)]

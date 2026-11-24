@@ -7,6 +7,8 @@
 mod app_plugins;
 #[path = "../build_rev.rs"]
 mod build_rev;
+#[path = "../callback_sites.rs"]
+mod callback_sites;
 #[path = "../check.rs"]
 mod check;
 #[path = "../diagnostics.rs"]
