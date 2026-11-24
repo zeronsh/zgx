@@ -334,6 +334,28 @@ mod placed {
         assert_eq!(order(&shared), "b x y c z q a");
     }
 
+    /// Rows that all stay are written as `upsert` writes them: in place,
+    /// the list held nowhere else.
+    #[test]
+    fn rows_that_stay_are_written_in_place() {
+        let app = app();
+        let shared = listed(&app, &["a", "b"]);
+        let list_of = |shared: &Shared| {
+            shared.signal().with_untracked(|v| match v {
+                Value::List(l) => l.as_ptr() as usize,
+                _ => 0,
+            })
+        };
+        let before = list_of(&shared);
+        assert!(
+            shared
+                .upsert_at("id", vec![(row("b", "B"), Place::Stay)])
+                .unwrap()
+        );
+        assert_eq!(list_of(&shared), before, "the same list");
+        assert_eq!(rows(&shared.get()), ["a:x", "b:B"]);
+    }
+
     /// A long burst of rows, each before the next, into a long list: one
     /// walk, and no stack for the chain.
     #[test]

@@ -2992,6 +2992,11 @@ pub(crate) fn place_rows(
     given: Vec<(Value, Place)>,
 ) -> Result<bool, String> {
     use rustc_hash::{FxHashMap, FxHashSet};
+    // Nothing placed (rows that changed where they are): `upsert`, which
+    // writes a list held nowhere else in place.
+    if given.iter().all(|(_, place)| *place == Place::Stay) {
+        return upsert_rows(signal, key, given.into_iter().map(|(row, _)| row).collect());
+    }
     // The rows by key, the last of a key kept (with its place), in the
     // order first given; `said` is the row's number as given.
     let mut ids: Vec<Str> = Vec::with_capacity(given.len());
