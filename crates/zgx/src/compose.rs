@@ -4532,6 +4532,18 @@ fn placed_as<K: Eq + std::hash::Hash>(
                 .is_some_and(|(.., placed)| placed.at == Some((*index, width.to_bits())))
         })
 }
+/// Tell each of a list's rows (`entries`, holding every key of `keys`) its
+/// index. A function of its own: in the pass's closure the loop shared
+/// registers with all the rest, and paid for it each row.
+#[inline(never)]
+fn index_rows<K: Eq + std::hash::Hash>(
+    entries: &HashMap<K, (NodeId, Signal<usize>, Placed), rustc_hash::FxBuildHasher>,
+    keys: &[(K, usize)],
+) {
+    for (key, index) in keys {
+        entries[key].1.set(*index);
+    }
+}
 /// Fixed-height keyed rows; only the visible range plus overscan is mounted.
 /// `count` and `key` track reactive reads. `build` runs once per mounted key;
 /// its index signal updates when that key moves. Offscreen rows are disposed,
@@ -4879,9 +4891,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             }
                         });
                     }
-                    for (key, index) in &keys {
-                        entries[key].1.set(*index);
-                    }
+                    index_rows(&entries, &keys);
                     {
                         let mut scene = ui.scene.borrow_mut();
                         // Scrolled with the view around it: as tall as its
