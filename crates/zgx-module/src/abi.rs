@@ -165,7 +165,53 @@ pub struct Api {
         init: unsafe extern "C" fn(state: *mut u8),
         free: unsafe extern "C" fn(state: *mut u8),
     ) -> *mut u8,
+    /// The host's shared state `key` (`ScriptHost::shared`, `ui.shared`:
+    /// the same one scripts and the host see), made with `initial` (taken)
+    /// if there is none yet: a handle, to let go with
+    /// [`shared_release`](Self::shared_release). Null once the host is gone.
+    pub shared: unsafe extern "C" fn(
+        host: *mut c_void,
+        key: *const u8,
+        len: usize,
+        initial: *mut Raw,
+    ) -> *mut c_void,
+    /// What it holds, owned (counted, not copied); `nil` once its host is
+    /// gone. Read inside a binding's call, it is followed as a script's
+    /// `get` is.
+    pub shared_get: unsafe extern "C" fn(shared: *const c_void, out: *mut Raw),
+    /// Sets it to `value` (taken), keeping the parts of what it held that
+    /// are equal (`Shared::set`): not 0 if anything changed.
+    pub shared_set: unsafe extern "C" fn(shared: *const c_void, value: *mut Raw) -> u32,
+    /// Adds `len` bytes of text (UTF-8) to the end of the string it holds,
+    /// as a script's `state:append`: [`DONE`], or [`FAILED`] with why
+    /// written to `out` (it holds something else).
+    pub shared_append: unsafe extern "C" fn(
+        shared: *const c_void,
+        text: *const u8,
+        len: usize,
+        out: *mut Raw,
+    ) -> u32,
+    /// Calls `call` each time what it holds changes, from now (not at
+    /// once), on the interface's thread after the batch that changed it:
+    /// a subscription, to let go with
+    /// [`shared_unobserve`](Self::shared_unobserve), `user` freed then.
+    /// Null once its host is gone (`free` called at once).
+    pub shared_observe: unsafe extern "C" fn(
+        shared: *const c_void,
+        call: Observe,
+        user: *mut c_void,
+        free: Free,
+    ) -> *mut c_void,
+    /// Lets go of a subscription, which is never called again.
+    pub shared_unobserve: unsafe extern "C" fn(subscription: *mut c_void),
+    /// Lets go of a shared state's handle (the state stays: it is the
+    /// host's).
+    pub shared_release: unsafe extern "C" fn(shared: *mut c_void),
 }
+
+/// A shared state's observer ([`Api::shared_observe`]): `value` is what it
+/// holds now, lent for the call; `host` the state's host handle, lent.
+pub type Observe = unsafe extern "C" fn(user: *mut c_void, host: *mut c_void, value: *const Raw);
 
 /// What [`Api::post`] returns when the job will run.
 pub const POSTED: u32 = 1;

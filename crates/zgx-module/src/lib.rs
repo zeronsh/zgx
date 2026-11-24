@@ -743,6 +743,23 @@ impl Host<'_> {
         // SAFETY: As `after`'s.
         Timer(unsafe { self.timer(period, true, call::<F>, user.cast(), free_box_of(user)) })
     }
+    /// The host's shared state `key`: the one scripts read with
+    /// `ui.shared(key)` and the host with `ScriptHost::shared(key, …)`,
+    /// made with `initial` if there is none yet. `None` once the host is
+    /// gone.
+    pub fn shared(&self, key: &str, initial: Value) -> Option<Shared> {
+        let mut initial = std::mem::ManuallyDrop::new(initial);
+        // SAFETY: A host handle, held; `initial` owned and given.
+        let at = unsafe {
+            (api().shared)(
+                self.handle(),
+                key.as_ptr(),
+                key.len(),
+                std::ptr::from_mut(&mut initial.raw),
+            )
+        };
+        (!at.is_null()).then_some(Shared(at))
+    }
     /// # Safety
     /// `fire`, `user` and `free` are a timer's, by [`abi::Fire`].
     unsafe fn timer(
@@ -1012,6 +1029,95 @@ impl Ui {
         // SAFETY: A host handle, held; `user` and its `free` the box's,
         // which may be sent (`J: Send`).
         unsafe { (api().post)(self.0, run::<J>, user.cast(), free_box_of(user)) == abi::POSTED }
+    }
+}
+
+/// A host's shared state ([`Host::shared`]): what a module publishes its
+/// model in, for scripts to read and follow, and what it hears scripts
+/// write. On the interface's thread (it is not `Send`): a module's thread
+/// sets it from a job it posts ([`Ui::post`]).
+pub struct Shared(*mut c_void);
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // SAFETY: The handle this one holds, let go of once.
+        unsafe { (api().shared_release)(self.0) }
+    }
+}
+impl Shared {
+    /// What it holds, counted, not copied (`nil` once its host is gone).
+    /// Read while a binding asks a module, it is followed as a script's
+    /// `get` is.
+    pub fn get(&self) -> Value {
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: A handle, held; the runtime writes `out`, owned.
+        unsafe {
+            (api().shared_get)(self.0, out.as_mut_ptr());
+            Value::owned(out.assume_init())
+        }
+    }
+    /// Sets it, keeping the parts of what it held that are equal (publish a
+    /// whole model each time: only what changed costs anything); whether
+    /// anything changed.
+    pub fn set(&self, value: Value) -> bool {
+        let mut value = std::mem::ManuallyDrop::new(value);
+        // SAFETY: A handle, held; `value` owned and given.
+        unsafe { (api().shared_set)(self.0, std::ptr::from_mut(&mut value.raw)) != 0 }
+    }
+    /// `text` added to the end of the string it holds, as a script's
+    /// `state:append(text)`: what follows a long one reads the edit alone.
+    /// An error if it holds something else.
+    pub fn append(&self, text: &str) -> Result<(), Failed> {
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: A handle, held; the runtime writes `out` only failing.
+        unsafe {
+            if (api().shared_append)(self.0, text.as_ptr(), text.len(), out.as_mut_ptr())
+                == abi::DONE
+            {
+                return Ok(());
+            }
+            let why = Value::owned(out.assume_init());
+            Err(Failed(
+                why.get().str().unwrap_or("can't be added to").to_owned(),
+            ))
+        }
+    }
+    /// Calls `observe` each time it changes, from now, on the interface's
+    /// thread after the batch that changed it, with what it holds (lent),
+    /// until the [`Observer`] is dropped.
+    pub fn observe<F: FnMut(&Host, Ref<'_>) + 'static>(&self, observe: F) -> Observer {
+        unsafe extern "C" fn call<F: FnMut(&Host, Ref<'_>)>(
+            user: *mut c_void,
+            host: *mut c_void,
+            value: *const Raw,
+        ) {
+            // SAFETY: `user` is the `F` boxed below, alive until its
+            // observer goes; `host` and `value` lent for the call.
+            (unsafe { &mut *(user as *mut F) })(
+                &Host::lent(host),
+                Ref {
+                    at: value,
+                    _of: PhantomData,
+                },
+            );
+        }
+        let user = Box::into_raw(Box::new(observe));
+        // SAFETY: A handle, held; `user` and its `free` the box's.
+        Observer(unsafe {
+            (api().shared_observe)(self.0, call::<F>, user.cast(), free_box_of(user))
+        })
+    }
+}
+
+/// A shared state's observer ([`Shared::observe`]): dropping it stops it.
+#[must_use = "an observer stops when dropped"]
+pub struct Observer(*mut c_void);
+impl Drop for Observer {
+    fn drop(&mut self) {
+        // (Null: its host was gone as it was made.)
+        if !self.0.is_null() {
+            // SAFETY: The subscription this one holds, let go of once.
+            unsafe { (api().shared_unobserve)(self.0) }
+        }
     }
 }
 

@@ -162,6 +162,18 @@ zgx_module::register!("feed", |host: &Host| {
 
 A `&Host` is how a module knows it is on the interface's thread: setup is lent one, and so is each job and each timer's call. `Host` isn't `Send`, so a value never leaves that thread by mistake. A job runs at the host's next turn, in the order posted, in one reactive batch (what it sets updates once); `post` wakes the host only as it posts, and a host whose module holds a handle costs nothing at rest. Once the host is gone, `post` returns false and the job is dropped unrun.
 
+### Shared state
+
+`host.shared(key, initial)` is the host's shared state `key`: the one scripts read with `ui.shared(key)` and the host with `ScriptHost::shared`, made with `initial` if there is none yet. A module publishes its model there, and scripts show it and follow it:
+
+```rust
+let feed = host.shared("chat.items", Value::NIL).unwrap();
+// …later, in a job a thread posted:
+feed.set(Value::list(rows));      // only what changed costs anything
+```
+
+`set` keeps the parts of what it held that are equal (publish a whole model each time), and says whether anything changed. `append(text)` adds to the end of a string, as a script's `state:append` does. `get` counts what it holds, copying nothing; read while a binding asks the module (`ui.call_sync` in a binding's function), it is followed as a script's `get` is. `observe(|host, now| …)` calls on the interface's thread each time it changes, from the next change on, until the `Observer` is dropped: how a module hears what scripts write. A handle is the interface thread's (`Shared` isn't `Send`); once its host is gone it holds `nil` and sets nothing.
+
 ### Timers
 
 `host.after(delay, |host| …)` calls once, `host.every(period, |host| …)` every period, on the interface's thread and on zgx's clock: a test's (its frames move it), devtools' frozen one, video's virtual one, else the wall's. Each returns a `Timer`, which stops it when dropped (`forget` lets it run on until its host goes). A module's state is reached from a job or a timer's call as from setup, `host.state::<T>()`.
