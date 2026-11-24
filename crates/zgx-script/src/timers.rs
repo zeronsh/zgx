@@ -118,6 +118,13 @@ impl Stop {
     pub fn done(&self) -> bool {
         !self.0.get()
     }
+    /// Lets its timer run on, unstopped, until it ends or its host goes.
+    #[cfg_attr(not(feature = "modules"), allow(dead_code))]
+    pub fn detach(self) {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: The one field, read out once from a value never dropped.
+        drop(unsafe { std::ptr::read(&this.0) });
+    }
 }
 impl Drop for Stop {
     fn drop(&mut self) {

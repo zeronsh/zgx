@@ -30,6 +30,10 @@ use crate::time::Instant;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use zgx::{
@@ -376,6 +380,9 @@ pub struct TestApp {
     pub natives: zgx::native_view::NativeViews,
     /// Its clipboard and file dialogs, made with [`TestApp::with_desktop`].
     pub desktop: Option<Rc<FakeDesktop>>,
+    /// How many times its tasks asked a window's event loop to wake
+    /// ([`TestApp::wakes`]).
+    wakes: Arc<AtomicU64>,
 }
 
 impl TestApp {
@@ -475,7 +482,12 @@ impl TestApp {
         // A lint finding never lies over what a test clicks.
         host.lint_strip(false);
         host.reload().map_err(|error| error.to_string())?;
-        let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+        // (Counted: what an app at rest asks of its window is nothing.)
+        let wakes = Arc::new(AtomicU64::new(0));
+        let woken = wakes.clone();
+        let executor = Rc::new(RefCell::new(LocalExecutor::with_wake(move || {
+            woken.fetch_add(1, Ordering::Relaxed);
+        })));
         let clock = FrameClock::new();
         let natives = zgx::native_view::NativeViews::new();
         let handle = ui.mount(provide(
@@ -496,6 +508,7 @@ impl TestApp {
             start: Instant::now(),
             natives,
             desktop: None,
+            wakes,
         };
         app.settle();
         // A window lays out before its first frame.
@@ -547,6 +560,7 @@ impl TestApp {
             start: self.start,
             natives,
             desktop: self.desktop.clone(),
+            wakes: self.wakes.clone(),
         };
         app.settle();
         app.lay_out();
@@ -576,6 +590,12 @@ impl TestApp {
         })
     }
 
+    /// How many times its tasks have asked a window's event loop to wake
+    /// so far (a task woken from another thread, a timer due): what an app
+    /// at rest asks is none.
+    pub fn wakes(&self) -> u64 {
+        self.wakes.load(Ordering::Relaxed)
+    }
     /// Run what is ready (handlers' tasks, settled host calls) until
     /// nothing is.
     pub fn settle(&self) {

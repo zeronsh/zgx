@@ -869,6 +869,12 @@ fn the_c_header_is_the_rust_interface() {
         ("zgx_api.release", offset_of!(Api, release)),
         ("zgx_api.open", offset_of!(Api, open)),
         ("zgx_api.flat", offset_of!(Api, flat)),
+        ("zgx_api.host_retain", offset_of!(Api, host_retain)),
+        ("zgx_api.host_release", offset_of!(Api, host_release)),
+        ("zgx_api.post", offset_of!(Api, post)),
+        ("zgx_api.after", offset_of!(Api, after)),
+        ("zgx_api.timer_release", offset_of!(Api, timer_release)),
+        ("zgx_api.state", offset_of!(Api, state)),
         ("sizeof(zgx_registrar)", size_of::<Registrar>()),
         ("zgx_registrar.size", offset_of!(Registrar, size)),
         ("zgx_registrar.host", offset_of!(Registrar, host)),
@@ -879,13 +885,14 @@ fn the_c_header_is_the_rust_interface() {
         ),
         ("zgx_registrar.action", offset_of!(Registrar, action)),
         ("zgx_registrar.state", offset_of!(Registrar, state)),
+        ("zgx_registrar.host_ref", offset_of!(Registrar, host_ref)),
     ];
     for (name, rust) in expected {
         assert_eq!(number(name), rust, "{name}");
     }
     // Every line the probe prints is held to something here: a field added
     // to the header is added to this test.
-    assert_eq!(c.len(), expected.len() + 2, "{printed}");
+    assert_eq!(c.len(), expected.len() + 3, "{printed}");
     let kinds = [
         abi::NIL,
         abi::BOOL,
@@ -903,6 +910,7 @@ fn the_c_header_is_the_rust_interface() {
         c["statuses"],
         format!("{} {} {}", abi::DONE, abi::FAILED, abi::REFUSED_ABI)
     );
+    assert_eq!(c["posted"], format!("{} {}", abi::POSTED, abi::GONE));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1461,4 +1469,251 @@ fn a_bundles_lent_package_is_its_bytecode_for_plugins_too() {
     assert_eq!(run.text("theirs"), "plugin calm");
     drop(run);
     std::fs::remove_dir_all(base).unwrap();
+}
+
+/// A module's reach into its host (stage 2): its threads post work to the
+/// interface's thread, and it keeps timers on zgx's clock. Linked in, as a
+/// module the test writes.
+mod reach {
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread::ThreadId,
+        time::Duration,
+    };
+    use zgx_module::{Host, State, Timer, Ui, Value};
+
+    /// What the module saw, on the interface's thread.
+    #[derive(Default)]
+    pub struct Seen {
+        pub thread: Option<ThreadId>,
+        /// Each job's number, in the order the jobs ran, and whether each
+        /// ran on the interface's thread.
+        pub jobs: Vec<(f64, bool)>,
+        /// What each timer's call said, and when (the test's time, by the
+        /// frames it was given).
+        pub fired: Vec<String>,
+        pub timers: Vec<Timer>,
+    }
+    /// A host handle kept past its host, for a test of a post after it.
+    pub static KEPT: Mutex<Option<Ui>> = Mutex::new(None);
+    /// How many jobs were dropped, run or not.
+    pub static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+    /// Dropped with its job.
+    pub struct Counted;
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            DROPPED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn seen(host: &Host) -> State<Seen> {
+        host.state::<Seen>()
+    }
+
+    zgx_module::register!("reach", |host: &Host| {
+        let state = seen(host);
+        state.with(|seen| seen.thread = Some(std::thread::current().id()));
+        let ui = host.ui();
+        // `n` jobs posted from a thread of the module's own, in order.
+        host.function("reach.post", move |n| {
+            let (n, ui) = (n.num().unwrap_or(0.), ui.clone());
+            std::thread::spawn(move || {
+                for i in 0..n as usize {
+                    let counted = Counted;
+                    ui.post(move |host| {
+                        let _counted = counted;
+                        seen(host).with(|seen| {
+                            let here = seen.thread == Some(std::thread::current().id());
+                            seen.jobs.push((i as f64, here));
+                        });
+                    });
+                }
+            })
+            .join()
+            .unwrap();
+            Value::NIL
+        });
+        // Each job's number, then whether all ran on the interface's thread.
+        host.function("reach.jobs", move |_| {
+            state.with(|seen| {
+                Value::list(
+                    seen.jobs
+                        .iter()
+                        .map(|(i, here)| Value::list([Value::from(*i), Value::from(*here)])),
+                )
+            })
+        });
+        // A timer once after `{ after = ms }`, one every `{ every = ms }`.
+        let kept = host.ui();
+        host.function("reach.timers", move |arg| {
+            let (after, every) = (
+                arg.field("after").and_then(|v| v.num()),
+                arg.field("every").and_then(|v| v.num()),
+            );
+            // (A job is the interface thread's: it makes them there.)
+            kept.post(move |host| {
+                let mut made = Vec::new();
+                if let Some(ms) = after {
+                    made.push(host.after(Duration::from_secs_f64(ms / 1e3), |host| {
+                        seen(host).with(|seen| seen.fired.push("after".into()));
+                    }));
+                }
+                if let Some(ms) = every {
+                    made.push(host.every(Duration::from_secs_f64(ms / 1e3), |host| {
+                        seen(host).with(|seen| seen.fired.push("every".into()));
+                    }));
+                }
+                seen(host).with(|seen| seen.timers.extend(made));
+            });
+            Value::NIL
+        });
+        // Its timers dropped, stopping them.
+        host.function("reach.stop", move |_| {
+            let timers = state.with(|seen| std::mem::take(&mut seen.timers));
+            drop(timers);
+            Value::NIL
+        });
+        host.function("reach.fired", move |_| {
+            state.with(|seen| Value::list(seen.fired.iter().map(|f| Value::from(f.as_str()))))
+        });
+        // A handle kept past the host.
+        let keep = host.ui();
+        host.function("reach.keep", move |_| {
+            *KEPT.lock().unwrap() = Some(keep.clone());
+            Value::NIL
+        });
+    });
+
+    /// Whether `post` from a thread after the host went was refused, with
+    /// its job dropped unrun.
+    pub fn post_after(ran: Arc<AtomicBool>) -> bool {
+        let ui = KEPT.lock().unwrap().take().expect("a kept handle");
+        std::thread::spawn(move || {
+            let counted = Counted;
+            ui.post(move |_| {
+                let _counted = counted;
+                ran.store(true, Ordering::SeqCst);
+            })
+        })
+        .join()
+        .unwrap()
+    }
+}
+
+/// An app with the `reach` module linked in.
+fn reaching() -> TestApp {
+    TestApp::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", "return ui.text { id = \"out\", \"x\" }");
+        // SAFETY: The test's own `register!` entry.
+        unsafe { host.enter_module(reach::zgx_module_v1, &reach::zgx_module_manifest) }.unwrap();
+        host
+    })
+}
+fn called(app: &TestApp, name: &str, arg: Value) -> Value {
+    app.host
+        .registered_function(name)
+        .unwrap_or_else(|| panic!("no {name}"))(arg)
+    .unwrap()
+}
+
+/// A module's thread posts jobs to its host: they run on the interface's
+/// thread, in the order posted, each freed after.
+#[test]
+fn a_modules_thread_posts_work_to_the_interfaces_thread() {
+    let mut app = reaching();
+    let dropped = reach::DROPPED.load(std::sync::atomic::Ordering::SeqCst);
+    called(&app, "reach.post", Value::Num(5.));
+    assert!(app.wait_until(|app| {
+        matches!(called(app, "reach.jobs", Value::Nil), Value::List(l) if l.len() == 5)
+    }));
+    let Value::List(jobs) = called(&app, "reach.jobs", Value::Nil) else {
+        unreachable!()
+    };
+    let jobs: Vec<String> = jobs.iter().map(|job| format!("{job:?}")).collect();
+    let want: Vec<String> = (0..5)
+        .map(|i| {
+            format!(
+                "{:?}",
+                Value::List(Slice::from(vec![
+                    Value::Num(f64::from(i)),
+                    Value::Bool(true)
+                ]))
+            )
+        })
+        .collect();
+    assert_eq!(jobs, want);
+    assert!(reach::DROPPED.load(std::sync::atomic::Ordering::SeqCst) >= dropped + 5);
+}
+
+/// A post to a host that is gone is refused, and its job dropped, unrun.
+#[test]
+fn a_post_after_its_host_is_gone_is_refused() {
+    let app = reaching();
+    called(&app, "reach.keep", Value::Nil);
+    drop(app);
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped = reach::DROPPED.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(!reach::post_after(ran.clone()), "refused");
+    assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        reach::DROPPED.load(std::sync::atomic::Ordering::SeqCst) > dropped,
+        "freed"
+    );
+}
+
+/// A module's timers keep zgx's clock (here a test's, moved by its frames):
+/// one after its delay, once; one every period, until it is dropped.
+#[test]
+fn a_modules_timers_keep_zgxs_clock() {
+    let app = reaching();
+    called(
+        &app,
+        "reach.timers",
+        Value::record([("after", Value::Num(100.)), ("every", Value::Num(70.))]),
+    );
+    app.settle();
+    let fired = |app: &TestApp| {
+        let Value::List(fired) = called(app, "reach.fired", Value::Nil) else {
+            unreachable!()
+        };
+        fired
+            .iter()
+            .filter_map(|f| match f {
+                Value::Str(f) => Some(f.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(fired(&app).is_empty());
+    // 8 frames, 133 ms: the one every 70 ms once, then the one after 100.
+    // (They're made a frame in at most, by a job: 17 ms.)
+    app.frames(8);
+    assert_eq!(fired(&app), ["every", "after"]);
+    called(&app, "reach.stop", Value::Nil);
+    app.frames(12);
+    assert_eq!(fired(&app), ["every", "after"], "stopped");
+}
+
+/// An app whose module holds a handle to its host asks its window for
+/// nothing at rest: no timer, no poll. One post wakes it once.
+#[test]
+fn a_module_holding_its_host_costs_an_idle_app_nothing() {
+    let app = reaching();
+    app.settle();
+    let at_rest = app.wakes();
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.settle();
+    }
+    assert_eq!(app.wakes(), at_rest, "no wakes at rest");
+    assert_eq!(app.executor.borrow_mut().tick(), 0, "nothing ready");
+    called(&app, "reach.post", Value::Num(1.));
+    assert_eq!(app.wakes(), at_rest + 1, "one post, one wake");
+    app.settle();
+    assert!(matches!(called(&app, "reach.jobs", Value::Nil), Value::List(l) if l.len() == 1));
+    assert_eq!(app.wakes(), at_rest + 1);
 }

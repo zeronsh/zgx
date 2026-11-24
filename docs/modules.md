@@ -144,7 +144,27 @@ Every host on a thread shares it; a host on another thread has its own. Reading 
 
 ### Threads
 
-Every call into a module is on the thread that loaded it (the interface's), and values are counted without atomics: a module keeps the values it is given on that thread. Work on other threads, and hand results back, is not in the interface yet.
+Every call into a module is on the thread that loaded it (the interface's), and values are counted without atomics: a value is made, read and kept on that thread only. A module's own threads reach the host through a `Ui`, a handle that is `Send`, and post jobs to it, which run on the interface's thread:
+
+```rust
+zgx_module::register!("feed", |host: &Host| {
+    let ui = host.ui();
+    std::thread::spawn(move || {
+        for line in lines_from_somewhere() {
+            // `line` is a `String`, which may cross threads; a value isn't.
+            ui.post(move |host: &Host| {
+                host.state::<Feed>().with(|feed| feed.push(Value::from(line.as_str())));
+            });
+        }
+    });
+});
+```
+
+A `&Host` is how a module knows it is on the interface's thread: setup is lent one, and so is each job and each timer's call. `Host` isn't `Send`, so a value never leaves that thread by mistake. A job runs at the host's next turn, in the order posted, in one reactive batch (what it sets updates once); `post` wakes the host only as it posts, and a host whose module holds a handle costs nothing at rest. Once the host is gone, `post` returns false and the job is dropped unrun.
+
+### Timers
+
+`host.after(delay, |host| …)` calls once, `host.every(period, |host| …)` every period, on the interface's thread and on zgx's clock: a test's (its frames move it), devtools' frozen one, video's virtual one, else the wall's. Each returns a `Timer`, which stops it when dropped (`forget` lets it run on until its host goes). A module's state is reached from a job or a timer's call as from setup, `host.state::<T>()`.
 
 ## Loading one
 
