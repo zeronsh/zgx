@@ -16090,6 +16090,16 @@ impl Scene {
         self.repaints_read.set(true);
         (self.repaints_from..=self.repaint_flushes, &self.repaints)
     }
+    /// Whether nodes were added or removed, or composite otherwise, since the
+    /// last flush: what [`repaint::CHILDREN`] and [`repaint::COMPOSITE`]
+    /// will say at the next. What knows the tree by its flushes
+    /// (`repaints`) and looks between two asks this first.
+    #[doc(hidden)]
+    pub fn restructured_since_flush(&self) -> bool {
+        self.dirty.iter().any(|id| {
+            !self.contains(*id) || self.tree_node(*id).dirty & (CHILDREN | COMPOSITE) != 0
+        })
+    }
     /// The nodes removed in the flushes given (every flush counted, as
     /// [`Scene::repaints`]), and since: each node of a subtree removed, so a
     /// renderer keeping something by node lets go of those rather than look

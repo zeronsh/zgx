@@ -348,6 +348,10 @@ impl AccessibilityTree {
             || walk.scale != scale
             || scene.has_inert()
             || semantics.has_errors()
+            // Between flushes (a held update falling due after a handler
+            // unmounted something): no flush has said so yet, and what they
+            // said moved may be gone.
+            || scene.restructured_since_flush()
         {
             return None;
         }
@@ -3117,6 +3121,64 @@ mod projection_key_tests {
                 .update(&scene, &semantics, None, "Test", 1.)
                 .nodes
                 .is_empty()
+        );
+    }
+
+    /// An update between flushes (a held geometry change falling due after a
+    /// handler unmounted something) tells what went and looks at nothing
+    /// gone, though the last flush moved it.
+    #[test]
+    fn an_update_between_flushes_drops_what_moved_and_then_went() {
+        let mut scene = Scene::new(400., 300.);
+        let mut semantics = Semantics::new();
+        let rows: Vec<NodeId> = (0..8)
+            .map(|i| {
+                let row = scene.append(
+                    scene.root(),
+                    NodeKind::Container(Layout::Column),
+                    fixed(100., 20.),
+                );
+                semantics.set(
+                    row,
+                    zgx::semantics::SemanticNode::new(Role::Group, format!("Row {i}")),
+                );
+                row
+            })
+            .collect();
+        // What moves says nothing of its own: the row around it is looked at.
+        let inside = scene.append(
+            rows[0],
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            fixed(10., 10.),
+        );
+        let mut tree = AccessibilityTree::new();
+        for _ in 0..2 {
+            scene.flush();
+            tree.note_flush(&scene);
+            tree.update(&scene, &semantics, None, "Test", 1.);
+        }
+        let gone = tree.ids[&rows[0]];
+        scene.set_style(inside, fixed(30., 10.));
+        scene.flush();
+        tree.note_flush(&scene);
+        assert!(
+            !tree.changes.structure && tree.changes.moved.contains(&inside),
+            "the flush moved it and changed nothing else"
+        );
+        // A row goes, and what stays says so (a toggle's state, a count).
+        scene.remove(rows[0]);
+        semantics.remove(rows[0]);
+        semantics.set(
+            rows[5],
+            zgx::semantics::SemanticNode::new(Role::Group, "Seven rows"),
+        );
+        let update = tree.update(&scene, &semantics, None, "Test", 1.);
+        assert!(!tree.ids.contains_key(&rows[0]));
+        let root = tree.ids[&scene.root()];
+        let window = update.nodes.iter().find(|(id, _)| *id == root);
+        assert!(
+            window.is_some_and(|(_, node)| !node.children().contains(&gone)),
+            "the window no longer holds it"
         );
     }
 
