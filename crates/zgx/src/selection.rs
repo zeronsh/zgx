@@ -1532,7 +1532,8 @@ impl Ui {
         if !moving {
             state.scroll = None;
         } else if state.scroll.is_none() {
-            let now = Instant::now();
+            // On the interface's clock, as the steps that scroll it are.
+            let now = crate::clock::now();
             state.scroll = Some((now + Duration::from_millis(16), now));
         }
     }

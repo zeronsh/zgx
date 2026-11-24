@@ -464,6 +464,57 @@ fn springs_set_their_own_duration_and_settle() {
     assert!(!h.clock.wants_frame());
 }
 
+/// A draggable's throw is timed on the interface's clock: the same drag,
+/// its moves a frame apart on a test's clock, lands in the same place
+/// however long the wall clock takes between them (a loaded machine).
+#[test]
+fn a_throw_is_timed_on_the_interfaces_clock() {
+    use zgx::input::PointerButton::Primary;
+    let throw = |stall: std::time::Duration| {
+        let clock = zgx::clock::VirtualClock::new();
+        let mut h = Harness::inline(
+            r##"anime.createDraggable("#knob", { y = false, snap = 10, container = { 0, 2000, 0, 0 } })
+            return ui.column { ui.div { id = "knob", w = 20, h = 20 } }"##,
+        );
+        let node = h.find("knob").unwrap();
+        let b = h.ui.scene.borrow().bounds(node);
+        let (x, y) = (b.x + 10., b.y + 10.);
+        h.ui.dispatch(InputEvent::PointerDown {
+            x,
+            y,
+            button: Primary,
+        });
+        for step in 1..=2_u32 {
+            std::thread::sleep(stall);
+            clock.advance(
+                std::time::Duration::from_millis(16 * u64::from(step)),
+                || {},
+            );
+            h.ui.dispatch(InputEvent::PointerMove {
+                x: x + 16. * step as f32,
+                y,
+            });
+        }
+        h.ui.dispatch(InputEvent::PointerUp {
+            x: x + 32.,
+            y,
+            button: Primary,
+        });
+        // Its throw plays out, the clock stepped with the frames.
+        for step in 0..90_u64 {
+            clock.advance(std::time::Duration::from_millis(32 + 17 * step), || {});
+            h.run_ms(17.);
+        }
+        h.x("knob")
+    };
+    let (quick, stalled) = (
+        throw(std::time::Duration::ZERO),
+        throw(std::time::Duration::from_millis(40)),
+    );
+    assert!(quick > 32., "thrown past where it was let go: {quick}");
+    assert_eq!(stalled, quick, "the wall clock's stall moves nothing");
+}
+
 #[test]
 fn draggables_follow_the_pointer_then_snap_and_settle() {
     let mut h = Harness::inline(

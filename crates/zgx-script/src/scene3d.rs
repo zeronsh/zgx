@@ -1359,7 +1359,9 @@ pub(crate) fn lower(
             // Where it is now, as the camera's effect last set it (a target
             // the script moves included).
             controls.orbit = orbit.with_untracked(|o| *o);
-            let answer = controls.handle(&event.event, modifiers, crate::time::Instant::now());
+            // On the interface's clock: a flick's speed and whether it was
+            // held still before letting go, as its coast runs on frames.
+            let answer = controls.handle(&event.event, modifiers, zgx::clock::now());
             if answer.moved {
                 orbit.set(controls.orbit);
             }

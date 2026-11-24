@@ -658,6 +658,34 @@ fn a_selection_outlives_virtual_rows_recycled_out_of_view() {
     assert!(ui.selected_text().ends_with("Row 1\nRo"));
 }
 
+/// A drag's autoscroll steps on the interface's clock: on a test's own,
+/// wall time passing before the drag (a loaded machine) neither stalls it
+/// nor speeds it, and it scrolls as far as the interface's time says.
+#[test]
+fn a_drag_past_an_edge_scrolls_on_the_interfaces_clock() {
+    let clock = zgx::clock::VirtualClock::new();
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let _view = rows(&mut ui, offset.clone());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    press(&mut ui, 0., 30., false);
+    move_to(&mut ui, 40., 160.);
+    let deadline = ui
+        .next_interaction_deadline()
+        .expect("autoscroll scheduled");
+    assert_eq!(
+        deadline,
+        clock.now() + std::time::Duration::from_millis(16),
+        "its first step a refresh on, on the interface's clock"
+    );
+    for step in 1..=5 {
+        clock.advance(std::time::Duration::from_millis(16 * step), || {});
+        ui.advance_interactions(clock.now()).unwrap();
+    }
+    assert!(offset.get() > 0., "scrolled in 80 ms: {}", offset.get());
+    release(&mut ui, 40., 160.);
+}
+
 #[test]
 fn a_drag_held_past_a_scroll_viewport_scrolls_it_and_extends() {
     let mut ui = Ui::new(400., 300.);

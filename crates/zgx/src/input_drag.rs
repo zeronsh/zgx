@@ -651,9 +651,11 @@ impl InputDispatcher {
     fn arm_spring(&self, destination: Option<NodeId>) {
         let mut state = self.state.borrow_mut();
         if state.spring.map(|arm| arm.node) != destination {
+            // On the interface's clock (`clock`): what the delay is
+            // compared with (`advance_interactions`) is its time.
             state.spring = destination.map(|node| SpringArm {
                 node,
-                since: Instant::now(),
+                since: crate::clock::now(),
                 fired: false,
             });
         }
