@@ -6,6 +6,8 @@ license.workspace = true
 repository.workspace = true
 readme = "README.md"
 rust-version.workspace = true
+# Held from crates.io for now: used from the repository (docs/releasing.md).
+publish = false
 description = "Ready-made visual effects for zgx: glows, ripples, lenses, fills and more, made only with zgx's public API. Optional: an app that doesn't depend on it pays nothing."
 keywords = ["gui", "ui", "effects", "shaders", "wgsl"]
 categories = ["gui", "rendering"]

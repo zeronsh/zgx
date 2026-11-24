@@ -2,7 +2,7 @@
 
 `zgx-video` turns a zgx interface into a video. A composition is an ordinary view: its layout, text, shaders, blur, glass, images, canvas, lists and every animation system work in it unchanged. `zgx video render` draws it offscreen one frame at a time, with no window and no browser, and writes it as H.264, HEVC, ProRes 4444 with alpha, a PNG for each frame, or a GIF.
 
-It is a crate of its own, and an app that doesn't depend on it doesn't link it. The only thing it adds to the engine is `zgx::clock`, below.
+It is a crate of its own, and an app that doesn't depend on it doesn't link it. The only thing it adds to the engine is `zgx::clock`, below. It isn't on crates.io yet: the commands here run from a checkout of the repository, and an app using it as a library takes every zgx crate from the same revision.
 
 ```sh
 cargo install --path crates/zgx-video          # the `zgx-video` binary; `zgx video` hands off to it

@@ -13,7 +13,7 @@ zgx is a retained-mode GUI framework in Rust for macOS, Windows and Linux. Compo
 - **The platform:** native menus and dialogs, multiple windows, system notifications and icon badges, the clipboard and primary selection, drag and drop, touch and pen, the system's accent, appearance, text size, reduced motion, contrast and transparency, and the user's language direction.
 - **Accessibility** through AccessKit (VoiceOver, Narrator, Orca): roles, headings, live regions, selection and keyboard-only use, with focus groups as ARIA's composite widgets.
 - **The browser** (`zgx-dom`, new): Rust-composed views as real DOM from WebAssembly, the browser laying them out and each signal write touching only its nodes ([dom](docs/dom.md)); Luau and GPU content don't run there yet.
-- **Video** (`zgx-video`): an interface rendered offscreen a frame at a time to H.264, ProRes or GIF, on a virtual clock that every animation, timer and shader follows, with a studio to preview it ([video](docs/video.md)).
+- **Video** (`zgx-video`, from the repository): an interface rendered offscreen a frame at a time to H.264, ProRes or GIF, on a virtual clock that every animation, timer and shader follows, with a studio to preview it ([video](docs/video.md)).
 - **Scripting:** Luau with types, a linter, hot reload that keeps state, anime.js-style animation, routing, data loading and live connections, localized messages, sandboxed plugins, and `zgx new`, `zgx test` and `zgx-run` to start, test and run an app. Release builds carry scripts compiled into the binary.
 
 ## Quick start
