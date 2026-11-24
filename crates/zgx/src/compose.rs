@@ -1177,7 +1177,8 @@ impl View {
     }
     /// Runs as the person closes a modal (Escape, or a press on the
     /// backdrop), after it has closed: for what a closing owes the app when
-    /// its `open` is a plain signal the app also sets.
+    /// its `open` is a plain signal the app also sets. Any other view ignores
+    /// it (a debug build says so, once).
     #[doc(hidden)]
     pub fn on_dismiss(mut self, handler: impl Fn() + 'static) -> Self {
         self.rare_mut().on_dismiss = Some(Rc::new(handler));
@@ -6809,10 +6810,15 @@ fn mount_element(
         rare.as_ref().is_none_or(|r| r.dismiss_backdrop.is_none()),
         "dismiss_on_backdrop is only supported on modal and popover views"
     );
-    assert!(
-        rare.as_ref().is_none_or(|r| r.on_dismiss.is_none()),
-        "on_dismiss is only supported on modal and popover views"
-    );
+    // An app can set it on any view (`View::on_dismiss` is public): it is
+    // heard on modals and popovers only, and a debug build says so, once.
+    #[cfg(debug_assertions)]
+    if rare.as_ref().is_some_and(|r| r.on_dismiss.is_some()) {
+        static TOLD: std::sync::Once = std::sync::Once::new();
+        TOLD.call_once(|| {
+            eprintln!("zgx: on_dismiss is only heard on modal and popover views; others ignore it");
+        });
+    }
     assert!(
         rare.as_ref()
             .is_none_or(|r| r.keyboard_navigation.is_none())
