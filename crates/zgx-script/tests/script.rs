@@ -206,21 +206,50 @@ fn runaway_scripts_hit_their_time_budget() {
 #[test]
 fn a_script_short_of_its_budget_is_never_stopped() {
     // Budgets start from a CPU reading up to 1 ms old, so a script is
-    // stopped up to 1 ms short of its budget at most: one running 5 ms
-    // short finishes, every time.
+    // stopped up to 1 ms short of its budget at most: one whose load uses
+    // 2 ms less CPU than its budget finishes, every time. The budget counts
+    // the whole load's CPU, not only the script's loop, and an unoptimized
+    // build on a busy machine spends milliseconds of it outside the loop:
+    // so the load is first measured with no spin (the most any round has
+    // taken), and the script spins on the thread's CPU clock, not
+    // `os.clock`'s wall, for the rest of the budget less 2 ms.
     let runtime = Runtime::new();
+    let budget = Duration::from_millis(30);
     let limits = Limits {
-        load: Duration::from_millis(30),
+        load: budget,
         ..Limits::default()
     };
+    let mut overhead = Duration::ZERO;
     for _ in 0..10 {
+        let spin = Rc::new(std::cell::Cell::new(0.));
         let host = ScriptHost::inline(
             &runtime,
             "busy",
-            "local start = os.clock() while os.clock() - start < 0.025 do end return ui.text { 'done' }",
+            "local cpu = function() return ui.call_sync('cpu') end \
+             local start, spin = cpu(), ui.call_sync('spin') \
+             while cpu() - start < spin do end \
+             return ui.text { 'done' }",
         )
         .limits(limits);
-        host.reload().expect("25 ms of a 30 ms budget");
+        host.function("cpu", |_| {
+            Value::Num(zgx_script::thread_cpu_time().as_secs_f64())
+        });
+        host.function("spin", {
+            let spin = spin.clone();
+            move |_| Value::Num(spin.get())
+        });
+        host.reload().expect("a load with no spin");
+        let started = zgx_script::thread_cpu_time();
+        host.reload().expect("a load with no spin");
+        overhead = overhead.max(zgx_script::thread_cpu_time() - started);
+        let short = budget
+            .checked_sub(overhead + Duration::from_millis(2))
+            .filter(|spun| *spun >= Duration::from_millis(10))
+            .unwrap_or_else(|| panic!("a load takes {overhead:?} of a {budget:?} budget"));
+        spin.set(short.as_secs_f64());
+        host.reload().unwrap_or_else(|error| {
+            panic!("{short:?} spun, {overhead:?} more to load, of a {budget:?} budget: {error}")
+        });
     }
 }
 
