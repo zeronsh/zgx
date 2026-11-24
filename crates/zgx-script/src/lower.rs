@@ -6594,6 +6594,104 @@ fn line_insets_of(
         inset
     }
 }
+/// A textarea's `line_marks` as its lines' marks: asked once for each line
+/// text and state (the state `highlight` was given for it) while the
+/// theme's tokens stay the same, and kept.
+fn line_marks_of<C: Fn(&str) -> Option<zgx::scene::Color> + 'static>(
+    marks: mlua::Function,
+    vm: Rc<Vm>,
+    states: Rc<std::cell::RefCell<LineStates>>,
+    color_of: Rc<C>,
+    theme: Rc<zgx::theme::ThemeScope>,
+) -> impl Fn(usize, &str, u32) -> Vec<zgx::widgets::LineMark> + 'static {
+    /// Line texts and states kept, at most: about a long note's lines.
+    const KEPT_MARKS: usize = 4096;
+    // By state, then text; how many, and the theme's revision they're of.
+    type Known = HashMap<u32, HashMap<Box<str>, Rc<[zgx::widgets::LineMark]>>>;
+    type Kept = std::cell::RefCell<(Known, usize, u64)>;
+    let known: Kept = Kept::default();
+    move |_, line, state| {
+        {
+            let mut known = known.borrow_mut();
+            if known.2 != theme.revision() {
+                *known = (HashMap::new(), 0, theme.revision());
+            } else if let Some(marks) = known.0.get(&state).and_then(|by| by.get(line)) {
+                return marks.to_vec();
+            }
+        }
+        let called = if state & KEPT == 0 {
+            vm.call::<Option<mlua::Table>>(&marks, (line, state))
+        } else {
+            let before = states.borrow().value(state);
+            vm.call::<Option<mlua::Table>>(&marks, (line, before))
+        };
+        let list = match called {
+            Ok(list) => list,
+            Err(error) => {
+                vm.report(error);
+                None
+            }
+        };
+        let mut out = Vec::new();
+        for mark in (list.iter())
+            .flat_map(|list| list.sequence_values::<mlua::Table>())
+            .flatten()
+        {
+            let number = |key: &str, none: f32| {
+                mark.raw_get::<Option<f64>>(key)
+                    .ok()
+                    .flatten()
+                    .filter(|v| !v.is_nan())
+                    .map_or(none, |v| v as f32)
+            };
+            let yes = |key: &str| mark.raw_get::<Option<bool>>(key).ok().flatten() == Some(true);
+            let color = |key: &str| {
+                mark.raw_get::<Option<mlua::LuaString>>(key)
+                    .ok()
+                    .flatten()
+                    .and_then(|text| text.to_str().ok().and_then(|text| color_of(&text[..])))
+            };
+            let clear = zgx::scene::Color(0, 0, 0, 0);
+            // `w` or `h` "fill": to the area's right edge, the line's bottom.
+            let length = |key: &str| match mark.raw_get::<mlua::Value>(key) {
+                Ok(mlua::Value::String(text)) if text.as_bytes() == b"fill" => f32::INFINITY,
+                _ => number(key, 0.).max(0.),
+            };
+            let mut made = zgx::widgets::LineMark::new(
+                number("x", 0.),
+                number("y", 0.),
+                length("w"),
+                length("h"),
+                color("fill").unwrap_or(clear),
+            );
+            made.bottom = number("bottom", 0.);
+            made.radius = number("radius", 0.).max(0.);
+            made.border_color = color("border_color").unwrap_or(clear);
+            made.border_width = number("border_width", 0.).max(0.);
+            made.from_right = yes("from_right");
+            made.mono = yes("mono");
+            made.tabular = yes("tabular");
+            made.over_text = yes("over_text");
+            if let Ok(Some(label)) = mark.raw_get::<Option<String>>("label") {
+                made.label = Some((
+                    std::sync::Arc::from(label),
+                    color("label_color").unwrap_or(zgx::scene::Color(0, 0, 0, 255)),
+                    number("label_size", 13.).clamp(1., 512.),
+                ));
+            }
+            out.push(made);
+        }
+        let mut known = known.borrow_mut();
+        if known.1 >= KEPT_MARKS {
+            known.0.clear();
+            known.1 = 0;
+        }
+        known.1 += 1;
+        let kept: Rc<[zgx::widgets::LineMark]> = out.clone().into();
+        known.0.entry(state).or_default().insert(line.into(), kept);
+        out
+    }
+}
 /// What a `highlight` leaves the next line, read where it lies: a whole
 /// number (most highlighters' states) as itself, with no `Value` made.
 enum Next {
@@ -6838,6 +6936,15 @@ fn code_editor(
             line_insets.clone(),
             vm.clone(),
             states.clone(),
+        ));
+    }
+    if let Some(line_marks) = &code.line_marks {
+        view = view.line_marks(line_marks_of(
+            line_marks.clone(),
+            vm.clone(),
+            states.clone(),
+            color_of.clone(),
+            theme.clone(),
         ));
     }
     if let Some(highlight) = &code.highlight {

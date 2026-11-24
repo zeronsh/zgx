@@ -552,6 +552,8 @@ pub(crate) struct CodeOptions {
     highlighter: Option<crate::widgets::SpanHighlighter>,
     /// `line_insets`: each line's room (`EditorHandle::set_line_insets`).
     line_insets: Option<crate::widgets::LineInsets>,
+    /// `line_marks`: each line's marks (`EditorHandle::set_line_marks`).
+    line_marks: Option<crate::widgets::LineMarks>,
     decorations: Option<Box<dyn FnMut() -> Decorations>>,
     underlines: Option<Box<dyn FnMut() -> Underlines>>,
     current_line: Option<Box<dyn FnMut() -> Option<crate::scene::Color>>>,
@@ -2045,6 +2047,18 @@ impl View {
         insets: impl Fn(usize, &str, u32) -> crate::widgets::LineInset + 'static,
     ) -> Self {
         self.code_mut().line_insets = Some(std::rc::Rc::new(insets));
+        self
+    }
+    /// Shapes beside each line of a text area (a list item's number, a
+    /// quote's rule, a code block's wash; `EditorHandle::set_line_marks`),
+    /// given the line's index, its text and what the line before left its
+    /// highlighter. It must depend on nothing but its arguments.
+    #[doc(hidden)]
+    pub fn line_marks(
+        mut self,
+        marks: impl Fn(usize, &str, u32) -> Vec<crate::widgets::LineMark> + 'static,
+    ) -> Self {
+        self.code_mut().line_marks = Some(std::rc::Rc::new(marks));
         self
     }
     /// Ranges of a text area's text (UTF-8 byte ranges) marked with a colour
@@ -7723,6 +7737,7 @@ fn open_element(
             let CodeOptions {
                 highlighter,
                 line_insets,
+                line_marks,
                 decorations,
                 underlines,
                 current_line,
@@ -7738,6 +7753,9 @@ fn open_element(
             } = *code;
             if line_insets.is_some() {
                 editor.set_line_insets(line_insets);
+            }
+            if line_marks.is_some() {
+                editor.set_line_marks(line_marks);
             }
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);

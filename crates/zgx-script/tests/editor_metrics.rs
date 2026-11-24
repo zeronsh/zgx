@@ -226,3 +226,39 @@ fn line_insets_give_lines_room_by_their_text_and_state() {
     // closing fence.
     assert_eq!(height(&h), 120.);
 }
+
+/// `line_marks` draws shapes beside lines, given each line's text and the
+/// state `highlight` was given for it: a fenced block's lines, inside it by
+/// their state, each take a numbered label.
+#[test]
+fn line_marks_draw_beside_lines_by_their_text_and_state() {
+    let mut h = Harness::inline(
+        r##"
+        return ui.textarea { value = ui.state("text", "a\n```\nb\nc\n```\nd"),
+            w = 300, h = 200, text_size = 10, line_height = 20,
+            highlight = function(line, state)
+                if line == "```" then
+                    return {}, if state == "code" then 0 else "code"
+                end
+                return {}, state
+            end,
+            line_marks = function(line, state)
+                if state == "code" and line ~= "```" then
+                    return { { x = 0, w = "fill", h = "fill", fill = "#eeeeee",
+                        label = "#" .. line, label_color = "#112233", label_size = 10,
+                        mono = true } }
+                end
+                return nil
+            end }
+    "##,
+    );
+    h.frames(4);
+    assert_eq!(h.error(), None);
+    let texts = h.texts();
+    assert!(texts.iter().any(|t| t == "#b"), "b's label: {texts:?}");
+    assert!(texts.iter().any(|t| t == "#c"), "c's label: {texts:?}");
+    assert!(
+        !texts.iter().any(|t| t == "#a" || t == "#d"),
+        "outside: {texts:?}"
+    );
+}

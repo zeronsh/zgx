@@ -207,6 +207,20 @@ impl FontFeatures {
     pub fn settings(&self) -> &[([u8; 4], u32)] {
         self.0.as_deref().unwrap_or(&[])
     }
+    /// These features with `tag` set to `value`, in place of any it had.
+    #[doc(hidden)]
+    #[cold]
+    #[inline(never)]
+    pub fn with_feature(&self, tag: [u8; 4], value: u32) -> Self {
+        // Sorted and each tag once, as `settled` keeps them; made here, so
+        // the paths that make features don't change for this one.
+        let mut settings = self.settings().to_vec();
+        match settings.binary_search_by_key(&tag, |(t, _)| *t) {
+            Ok(at) => settings[at].1 = value,
+            Err(at) => settings.insert(at, (tag, value)),
+        }
+        Self(Some(settings.into()))
+    }
     /// zgx's own tag for hyphenation (`_hyp`: no font's feature can have it,
     /// registered tags being lowercase letters and digits and font vendors'
     /// private ones uppercase letters, OpenType's two tag spaces, neither

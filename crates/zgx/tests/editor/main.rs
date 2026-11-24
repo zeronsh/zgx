@@ -58,6 +58,8 @@ mod editor_ingress_normalization;
 mod editor_input_mode;
 #[path = "../editor_layer_scroll.rs"]
 mod editor_layer_scroll;
+#[path = "../editor_line_marks.rs"]
+mod editor_line_marks;
 #[path = "../editor_long_documents.rs"]
 mod editor_long_documents;
 #[path = "../editor_model_normalization.rs"]

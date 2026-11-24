@@ -160,6 +160,25 @@ return ui.textarea {
 }
 ```
 
+### Line marks
+
+`line_marks = function(line, state) return { { x, y, w, h, fill, … } } end` draws shapes beside a textarea's line: a quote's rule, the wash behind a code block's line, a horizontal rule, a list item's number. Each is a box in points from the line's left edge (`from_right = true`: its right edge from the area's right edge) and from the top of its text, under any room above it; `w = "fill"` reaches the area's right edge and `h = "fill"` the line's bottom, its wrapped rows and room below included (less `bottom`). It takes `fill`, `radius`, `border_color` and `border_width`, and a `label` (`label_color`, `label_size`; `mono` for the monospaced font, `tabular` for figures of one width, so a list's numbers line up). Marks scroll with their lines, under the text (`over_text = true`: over it). Like `line_insets`, it's given the state `highlight` was given for the line, asked once for each line text and state, and must depend on nothing but its arguments. A textarea without it draws as before. In the browser, lines show no marks yet ([zgx-dom](../dom.md#what-doesnt-map)).
+
+```lua
+return ui.textarea {
+	value = ui.state("note", "> quoted\n---\nplain"),
+	wrap = true,
+	line_marks = function(line, state)
+		if string.sub(line, 1, 2) == "> " then
+			return { { x = 0, w = 3, h = "fill", fill = "$border.strong" } }
+		elseif line == "---" then
+			return { { x = 0, y = 9, w = "fill", h = 1, fill = "$border" } }
+		end
+		return nil
+	end,
+}
+```
+
 ## checkbox
 
 A toggle drawn as the platform draws one, a rounded 16-point box beside its label, bound to a boolean state: outlined while off; filled with the accent while on, its checkmark drawing on; a dash while `mixed`. A click on either, or Space, toggles it; Enter goes on to the form (its default action), as a browser's checkbox and AppKit's do. Its colours are the theme's `$accent`, `$accent.text`, `$input.bg` and `$border.strong`, so the system's accent shows where the host gives it. Disabled, it dims.
