@@ -233,6 +233,20 @@ A canvas's `draw` runs again when a state it reads changes: have it read one the
 
 A file that is not a font rejects the promise (`kind` `"io"`), as do one that can't be read and text that isn't base64. A plugin's fonts come from its directory or below (or a file the user picked), and only with `Capability::Fonts` (`fonts` in `zgx.json`): a loaded font is the app's too, so the host decides.
 
+## Measuring text
+
+`ui.measure_text(text, style?) -> { w, h }` gives the points `text` takes, as the app lays it out, without mounting anything: a table's column fitted to its widest cell on a header's double-click, or a label's room. `style` takes a canvas text's font options (`size`, 14 by default as a `ui.text`'s, `font`, `weight`, `italic`, `tabular`, `line_height`, `letter_spacing`), and `max_w` wraps it to lines at most that wide (`h` is then the paragraph's height, `w` its widest line).
+
+```luau
+local widest = 0
+for _, row in rows:peek() do
+	widest = math.max(widest, ui.measure_text(row.name, { size = 13 }).w)
+end
+width:set(widest + 16)
+```
+
+On the desktop it measures in the app's fonts (the system's and its own, as `ui.render_canvas` does); in the browser, as the page lays the text out, once a view is mounted (before then it raises an error). Inside a canvas's `draw`, `c:measure_text` measures as that canvas draws.
+
 ## Selectable text
 
 Text is not selectable unless asked, as in native apps. `selectable = true` on any node makes the text in it and everything it holds selectable as a web page's is: one selection runs across its texts, paragraphs, list rows and spans in document order. Drag to select; a double press selects a word and a triple press a paragraph, and dragging after either extends by words or paragraphs; Shift extends; ⌘A / Ctrl+A selects it all and ⌘C / Ctrl+C copies plain text (a tab between texts side by side, a blank line between blocks set apart). A secondary press on selected text offers Copy and Select All. Links and buttons inside still click; a drag that starts on one selects. Holding a drag past a scroll viewport's edge scrolls it, and a selection in `ui.list`'s rows outlives the rows it recycles. `selectable = false` keeps a part out (a toolbar, a timestamp). `ui.markdown_view` is selectable already; drawing `ui.markdown`'s blocks yourself, put `selectable = true` on the node you draw them in, as above. [crates/zgx-script/examples/selectable](../../crates/zgx-script/examples/selectable/app.luau) draws a whole document (`cargo run -p zgx-script --example selectable`). The highlight follows CSS's `::selection`. `selection_color` and `selected_text_color` on the selectable node set its background and the selected glyphs' colour (a colour, a `"$token"`, a state or a function). The tokens `$selection`, `$selection.inactive` (window at the back), `$selection.text` and `$selection.text.inactive` (transparent, the default, keeps the glyphs' colours) and `$selection.radius` style it per subtree through `theme`: `ui.column { selectable = true, theme = { ["selection.text"] = "#ffffff", ["selection.radius"] = 3 }, … }`. Prose the examples ship (the agent trace, the streaming transcript, the notes preview) is selectable, as a browser's would be; controls and chrome are not.
