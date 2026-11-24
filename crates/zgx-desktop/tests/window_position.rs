@@ -10,12 +10,12 @@
 //! It makes its windows straight from winit, so `ZGX_OFFSCREEN` cannot hide
 //! them: with it set the test is skipped, and puts nothing on the screen.
 fn main() {
-    if std::env::var_os("ZGX_OFFSCREEN").is_some_and(|v| !v.is_empty() && v != "0") {
+    let offscreen = std::env::var_os("ZGX_OFFSCREEN").is_some_and(|v| !v.is_empty() && v != "0");
+    if offscreen {
         println!("window_position: skipped, ZGX_OFFSCREEN is set (its windows are real ones)");
-        return;
     }
     #[cfg(target_os = "macos")]
-    {
+    if !offscreen {
         use winit::{
             application::ApplicationHandler,
             dpi::{PhysicalPosition, PhysicalSize},
