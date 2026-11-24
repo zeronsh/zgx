@@ -6457,7 +6457,12 @@ fn run(
                                 vm.report(error);
                             }
                         }
-                        Some(action) => action(arg.clone()),
+                        Some(action) => {
+                            action(arg.clone());
+                            if let Some(error) = crate::modules::failure() {
+                                vm.report(error);
+                            }
+                        }
                         None => vm.report(mlua::Error::runtime(format!(
                             "no host action named `{name}`"
                         ))),

@@ -45,6 +45,7 @@ export const internal = [
   // Native modules and the value layout they read: unstable before 1.0,
   // then pages beside the Luau set's.
   'docs/value-types.md',
+  'docs/modules.md',
 ];
 
 export const sets = [

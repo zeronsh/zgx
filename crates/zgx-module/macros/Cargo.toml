@@ -1,0 +1,19 @@
+[package]
+name = "zgx-module-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "The macros of zgx-module: a native module's functions as plain Rust functions, and its manifest."
+keywords = ["gui", "luau", "plugin", "macros"]
+categories = ["gui"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

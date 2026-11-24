@@ -1,8 +1,7 @@
 //! What a [`Value`](crate::Value) holds its strings, lists and maps in, laid
-//! out as zgx says and not as the compiler chooses: code built apart from
-//! zgx (native modules, docs/design/runtime.md) is to read values where
-//! they are, and what it reads has to stay where it is from one compiler to
-//! the next.
+//! out as zgx says and not as the compiler chooses: native modules read
+//! values where they are (`modules.rs`, `zgx_module::abi`), and what they
+//! read has to stay where it is from one compiler to the next.
 //!
 //! [`Slice`] is a counted slice of zgx's own, as `Rc<[T]>` is but with its
 //! counts and items at stated places: a list's ([`List`]) and a map's
