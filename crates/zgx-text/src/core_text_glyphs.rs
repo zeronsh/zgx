@@ -205,6 +205,14 @@ impl Canvas {
         }
     }
 }
+/// The fonts and canvas kept between glyphs let go, for an app at rest:
+/// Core Text keeps each font's glyphs while the font lives (some 40 MB after
+/// a page of CJK text read through at three sizes). The faces' descriptors
+/// stay: letting them go gave nothing back.
+pub(crate) fn rest() {
+    CACHE.with_borrow_mut(|cache| cache.fonts.clear());
+    CANVAS.with_borrow_mut(|canvas| *canvas = None);
+}
 /// The largest canvas kept between glyphs, a side in pixels: a glyph past
 /// it (a heading zoomed far in) draws in one of its own, let go after.
 const KEPT_CANVAS: usize = 256;

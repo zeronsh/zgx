@@ -17,7 +17,7 @@ mod compile;
 mod composition;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
-pub use zgx_text::{core_text_advance, install_core_text_fallback};
+pub use zgx_text::{core_text_advance, install_core_text_fallback, rest_core_text_glyphs};
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(target_os = "linux")]
@@ -18109,6 +18109,9 @@ impl GpuRenderer {
             fonts.shape_run_cache = Default::default();
             fonts.rest();
         }
+        // Core Text's fonts, and the glyphs it keeps with them.
+        #[cfg(target_os = "macos")]
+        zgx_text::rest_core_text_glyphs();
         self.text_cache
             .borrow_mut()
             .rest(self.shapes.values().filter_map(|shaped| shaped.prepared));

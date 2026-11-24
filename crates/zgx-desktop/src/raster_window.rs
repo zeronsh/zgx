@@ -126,6 +126,12 @@ impl RasterWindow {
         self.services.text_cache().borrow_mut().clear();
         self.raster.fonts_replaced();
     }
+    /// At rest: the fonts Core Text drew glyphs with go, and the glyphs it
+    /// keeps with them, as the GPU renderer's trim lets them go.
+    pub(crate) fn trim(&mut self) {
+        #[cfg(target_os = "macos")]
+        zgx_gpu::rest_core_text_glyphs();
+    }
     /// The colour its frames clear to.
     pub(crate) fn set_background(&mut self, color: Color) {
         self.raster
