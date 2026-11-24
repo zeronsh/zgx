@@ -933,7 +933,10 @@ fn the_c_header_is_the_rust_interface() {
         c["statuses"],
         format!("{} {} {}", abi::DONE, abi::FAILED, abi::REFUSED_ABI)
     );
-    assert_eq!(c["posted"], format!("{} {}", abi::POSTED, abi::GONE));
+    assert_eq!(
+        c["posted"],
+        format!("{} {} {}", abi::POSTED, abi::GONE, abi::HOST_GONE)
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1671,7 +1674,8 @@ mod reach {
                             ("id", Value::from(i as f64)),
                             ("title", Value::from("row")),
                         ])
-                    })));
+                    })))
+                    .unwrap();
                 });
             })
             .join()
@@ -1706,7 +1710,7 @@ mod reach {
                         ])
                     });
                     feed.upsert("id", rows).unwrap();
-                    feed.remove("id", gone.iter().map(String::as_str));
+                    feed.remove("id", gone.iter().map(String::as_str)).unwrap();
                 });
             })
             .join()
@@ -1755,7 +1759,7 @@ mod reach {
         let feed = host.shared("feed", Value::NIL).unwrap();
         host.function("reach.republish", move |_| {
             let same = feed.get().get().to_owned();
-            Value::from(feed.set(same))
+            Value::from(feed.set(same).unwrap())
         });
         // How many rows the feed holds, read in a binding.
         let counted = host.shared("feed", Value::NIL).unwrap();
@@ -2196,7 +2200,20 @@ fn a_shared_handle_past_its_host_holds_nothing() {
     drop(app);
     let kept = reach::KEPT_SHARED.lock().unwrap().take().unwrap().0;
     assert!(kept.get().get().is_nil());
-    assert!(!kept.set(zgx_module::Value::from("late")));
+    // Every write fails, saying its host is gone: none is told as done, nor
+    // as a count of nothing changed.
+    let gone = |write: Result<(), zgx_module::Failed>| match write {
+        Err(why) => why.0,
+        Ok(()) => "done".into(),
+    };
+    let row = || zgx_module::Value::record([("id", zgx_module::Value::from("r"))]);
+    assert_eq!(
+        gone(kept.set(zgx_module::Value::from("late")).map(drop)),
+        "its host is gone"
+    );
+    assert_eq!(gone(kept.append("late")), "its host is gone");
+    assert_eq!(gone(kept.upsert("id", [row()])), "its host is gone");
+    assert_eq!(gone(kept.remove("id", ["r"]).map(drop)), "its host is gone");
 }
 
 /// A module's async action settles later, from a thread of its own: the

@@ -35,7 +35,7 @@ mod reach {
         let n = host.shared("n", Value::from(0.)).unwrap();
         host.function("bench.set", move |count| {
             for i in 0..count.num().unwrap_or(0.) as usize {
-                n.set(Value::from(i as f64 + 1.));
+                n.set(Value::from(i as f64 + 1.)).unwrap();
             }
             Value::NIL
         });

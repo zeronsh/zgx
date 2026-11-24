@@ -108,6 +108,10 @@ typedef void (*zgx_observe)(void *user, void *host, const zgx_value *value);
 /* What zgx_api.post returns: the job will run, or the host is gone. */
 #define ZGX_POSTED 1u
 #define ZGX_GONE 0u
+/* What shared_set and shared_remove return once the state's host is gone,
+ * nothing written: not a count, so told from one. (The writes that return
+ * ZGX_DONE or ZGX_FAILED fail then, saying so.) */
+#define ZGX_HOST_GONE 0xFFFFFFFFu
 
 typedef struct zgx_api {
     uint32_t abi;  /* ZGX_MODULE_ABI */
@@ -159,11 +163,12 @@ typedef struct zgx_api {
     void *(*shared)(void *host, const uint8_t *key, size_t len, zgx_value *initial);
     /* What it holds, owned; `nil` once its host is gone. */
     void (*shared_get)(const void *shared, zgx_value *out);
-    /* Sets it to `value` (taken), keeping the parts that are equal: not 0
-     * if anything changed. */
+    /* Sets it to `value` (taken), keeping the parts that are equal: 1 if
+     * anything changed, 0 if not; ZGX_HOST_GONE once its host is gone
+     * (nothing set). */
     uint32_t (*shared_set)(const void *shared, zgx_value *value);
     /* Adds text to the string it holds: ZGX_DONE, or ZGX_FAILED with why in
-     * `out`. */
+     * `out` (it holds something else, or its host is gone). */
     uint32_t (*shared_append)(const void *shared, const uint8_t *text, size_t len,
                               zgx_value *out);
     /* Calls `call` each time it changes, from now: a subscription, NULL
@@ -190,13 +195,13 @@ typedef struct zgx_api {
      * over the list, the rows not given kept as they are; a state holding
      * nothing (`nil`) yet becomes a list of them. ZGX_DONE, or ZGX_FAILED
      * with why in `out` (a row with no string at `key`, `rows` not a list,
-     * or the state holding something not a list), nothing written. ZGX_DONE
-     * once its host is gone. */
+     * the state holding something not a list, or its host gone), nothing
+     * written. */
     uint32_t (*shared_upsert)(const void *shared, const uint8_t *key, size_t key_len,
                               zgx_value *rows, zgx_value *out);
     /* Removes the rows of the list a shared state holds whose string field
-     * `key` is one of `keys` (`len` of them, lent): every such row. Not 0
-     * if any was. */
+     * `key` is one of `keys` (`len` of them, lent): every such row. 1 if
+     * any was, 0 if none; ZGX_HOST_GONE once its host is gone. */
     uint32_t (*shared_remove)(const void *shared, const uint8_t *key, size_t key_len,
                               const zgx_bytes *keys, size_t len);
     /* Images by name. A picture is RGBA8: four bytes a pixel (red, green,
