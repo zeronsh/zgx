@@ -177,10 +177,10 @@ fn only_what_the_script_requires_is_compiled_ahead() {
     );
     let hits = compile_ahead_counts().3;
     compile_ahead(&dir.join("app.luau"), &[("ds", &lent)]);
-    // Another window's script joins the session (b again: found once).
+    // Another window's script joins the session (b again: compiled once).
     compile_ahead(&dir.join("other.luau"), &[]);
-    // app, a, b, util, button, big; other, b: huge is over the cap.
-    finished(8);
+    // app, a, b, util, button, big; other: huge is over the cap.
+    finished(7);
     let mut test =
         TestApp::new(|runtime| ScriptHost::new(runtime, dir.join("app.luau")).package("ds", &lent));
     assert_eq!(test.host.error().get(), None);
@@ -200,6 +200,177 @@ fn only_what_the_script_requires_is_compiled_ahead() {
     for d in [&dir, &lent] {
         let _ = std::fs::remove_dir_all(d);
     }
+}
+
+/// A string that names a module under a known alias leads to it, however
+/// it is required: `pcall(require, …)`, a cast, a function of the script's
+/// own, a list. Not one in a comment, one naming no file or an alias there
+/// isn't, and none that would lead out of the script's folder: by `..`, by a
+/// link, or by an alias `require` refuses.
+#[test]
+fn a_string_that_names_a_module_is_compiled_ahead() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let base = common::temp_dir("compile-ahead-strings");
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("app");
+    let put = |path: std::path::PathBuf, code: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, code).unwrap();
+    };
+    put(
+        dir.join(".luaurc"),
+        r#"{ "aliases": { "lib": "./lib", "away": "../away" } }"#,
+    );
+    put(
+        dir.join("app.luau"),
+        "local ok, caught = pcall(require, \"@app/mods/caught\")\n\
+         local cast = (require :: any)('@app/mods/cast')\n\
+         local function load(name) return (require :: any)(name) end\n\
+         local all = {}\n\
+         for _, name in { \"@app/mods/listed\", \"@lib/folder\" } do table.insert(all, load(name)) end\n\
+         -- load(\"@app/mods/commented\")\n\
+         local words = { \"@app/none\", \"@nope/mods/cast\", \"@app/../outside\", \"@away/there\", \"@app/link\", \"me@app/mods/never\", \"@app/mods/never here\" }\n\
+         return ui.text { caught .. cast .. table.concat(all) .. #words, id = \"t\" }\n",
+    );
+    for (name, says) in [
+        ("mods/caught", "a"),
+        ("mods/cast", "b"),
+        ("mods/listed", "c"),
+        ("lib/folder/init", "d"),
+        ("mods/commented", "never"),
+        ("mods/never", "never"),
+    ] {
+        put(
+            dir.join(format!("{name}.luau")),
+            &format!("return \"{says}\"\n"),
+        );
+    }
+    put(base.join("outside.luau"), "return \"out\"\n");
+    put(base.join("away/there.luau"), "return \"out\"\n");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(base.join("outside.luau"), dir.join("link.luau")).unwrap();
+    let app = dir.join("app.luau");
+    let hits = compile_ahead_counts().3;
+    compile_ahead(&app, &[]);
+    // app, caught, cast, listed and folder/init.
+    finished(5);
+    let mut test = TestApp::new(|runtime| ScriptHost::new(runtime, &app));
+    assert_eq!(test.host.error().get(), None);
+    assert_eq!(test.text("t"), "abcd7");
+    let (_, _, open, now, held) = compile_ahead_counts();
+    assert_eq!(now - hits, 5, "each found compiled ahead");
+    assert!(!open);
+    assert_eq!(held, 0);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Live bytes of every allocation, for what a load leaves.
+struct Counting;
+static LIVE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+// SAFETY: The system's, counted.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        LIVE.fetch_add(layout.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: As asked.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
+        LIVE.fetch_sub(layout.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: As asked.
+        unsafe { std::alloc::System.dealloc(at, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// The ahead workers of this process.
+#[cfg(target_os = "linux")]
+fn workers() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .flatten()
+        .filter(|task| {
+            std::fs::read_to_string(task.path().join("comm"))
+                .is_ok_and(|name| name.trim() == "zgx-luau-ahead")
+        })
+        .count()
+}
+
+/// Several workers compile a script's files, each file once, and after the
+/// load neither they nor what they compiled is left: modules named and never
+/// required among it.
+#[test]
+fn workers_and_what_no_load_took_go_as_the_load_ends() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = common::temp_dir("compile-ahead-many");
+    let _ = std::fs::remove_dir_all(&dir);
+    const MODULES: usize = 120;
+    write(&dir, MODULES, "one");
+    // As many again, named and never required.
+    for i in 0..MODULES {
+        std::fs::write(
+            dir.join(format!("mods/unused{i}.luau")),
+            format!(
+                "return {{ {} }}\n",
+                "\"a string of some length\", ".repeat(400)
+            ),
+        )
+        .unwrap();
+    }
+    let names: String = (0..MODULES)
+        .map(|i| format!("\"@app/mods/unused{i}\", "))
+        .collect();
+    let body = std::fs::read_to_string(dir.join("app.luau")).unwrap();
+    std::fs::write(
+        dir.join("app.luau"),
+        format!("local names = {{ {names} }}\n{body}"),
+    )
+    .unwrap();
+    let app = dir.join("app.luau");
+    let settled = |ahead: bool| {
+        if ahead {
+            compile_ahead(&app, &[]);
+            finished(1 + 2 * MODULES);
+        }
+        let before = LIVE.load(std::sync::atomic::Ordering::Relaxed);
+        let mut test = TestApp::new(|runtime| ScriptHost::new(runtime, &app));
+        assert_eq!(test.host.error().get(), None);
+        assert_eq!(test.text("m3"), "m3 one");
+        assert_eq!(compile_ahead_counts().4, 0, "nothing held");
+        #[cfg(target_os = "linux")]
+        for _ in 0..500 {
+            if workers() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        #[cfg(target_os = "linux")]
+        assert_eq!(workers(), 0, "no worker left");
+        #[cfg(not(target_os = "linux"))]
+        std::thread::sleep(Duration::from_millis(500));
+        let after = LIVE.load(std::sync::atomic::Ordering::Relaxed);
+        drop(test);
+        (before, after)
+    };
+    // (A first of each, for what is made once.)
+    settled(false);
+    settled(true);
+    let (_, without) = settled(false);
+    let gone = LIVE.load(std::sync::atomic::Ordering::Relaxed);
+    let (_, with) = settled(true);
+    let left = LIVE.load(std::sync::atomic::Ordering::Relaxed);
+    // What it compiled is megabytes; what a load leaves varies by some KB.
+    assert!(
+        (with - without).abs() < 64 << 10 && (left - gone).abs() < 64 << 10,
+        "compiled ahead, a load leaves {} bytes more, and {} once its app is gone",
+        with - without,
+        left - gone
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A data module of megabytes (a feed in a string) is compiled ahead, and

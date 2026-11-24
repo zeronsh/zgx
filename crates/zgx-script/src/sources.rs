@@ -281,12 +281,14 @@ type Ready = (Key, Box<[u8]>, Option<Box<[u8]>>, Home);
 
 /// What [`prefetch`] compiled ahead and the loading thread hasn't taken
 /// yet: one session at a time, open from the first `prefetch` until a load
-/// ends; another `prefetch` meanwhile (a second directory) joins it.
+/// ends; another `prefetch` meanwhile (a second script) joins it.
 struct Ahead {
     generation: u64,
     /// Sources and their bytecode, waiting for the loading thread's table.
     ready: Vec<Ready>,
-    /// Files compiled in this session, and its workers still walking.
+    /// What is left to compile, while the session is open.
+    work: Option<Work>,
+    /// Files compiled in this session, and its workers still compiling.
     compiled: usize,
     workers: usize,
     /// Until the first load after it ends ([`release_prefetched`]).
@@ -295,10 +297,90 @@ struct Ahead {
 static AHEAD: std::sync::Mutex<Ahead> = std::sync::Mutex::new(Ahead {
     generation: 0,
     ready: Vec::new(),
+    work: None,
     compiled: 0,
     workers: 0,
     open: false,
 });
+/// Told as a file's requires are put in `Work::todo`, or the last worker on
+/// one leaves it with none.
+static MORE: std::sync::Condvar = std::sync::Condvar::new();
+
+/// What a session's workers have left to do.
+#[derive(Default)]
+struct Work {
+    /// Files to compile, the next one last: what a file names goes over what
+    /// was there, its first on top, so files are taken about in the order a
+    /// load requires them (a file, its first require and all below that,
+    /// then its second).
+    todo: Vec<Todo>,
+    /// Whose names led to what: a file is looked at once a script.
+    seen: HashSet<(usize, std::path::PathBuf)>,
+    /// Files compiled or being: one two scripts reach compiles once.
+    taken: HashSet<std::path::PathBuf>,
+    /// Files and bytes read.
+    files: usize,
+    bytes: usize,
+    /// Workers on a file, which may put more on `todo`.
+    busy: usize,
+}
+enum Todo {
+    /// A script [`prefetch`] was asked for, and the packages its host lends.
+    Script(std::path::PathBuf, Vec<(String, std::path::PathBuf)>),
+    /// A file it leads to.
+    File(std::path::PathBuf, std::sync::Arc<Roots>),
+}
+/// Where a script's modules are.
+struct Roots {
+    /// This script's, of all asked for: no other's, gone or not.
+    id: usize,
+    /// The script's folder, and `.luaurc`'s aliases and the packages lent,
+    /// by name.
+    root: std::path::PathBuf,
+    aliases: HashMap<String, std::path::PathBuf>,
+    /// The folders `require` takes modules from (the script's, each
+    /// package's) where they really are.
+    real: Vec<std::path::PathBuf>,
+}
+impl Roots {
+    fn of(entry: &Path, packages: Vec<(String, std::path::PathBuf)>) -> Self {
+        let root = entry.parent().unwrap_or(Path::new(".")).to_owned();
+        let mut aliases = luaurc_aliases(&root);
+        let real = std::iter::once(&root)
+            .chain(packages.iter().map(|(_, dir)| dir))
+            .filter_map(|dir| dir.canonicalize().ok())
+            .collect();
+        for (name, dir) in packages {
+            aliases.entry(name.to_lowercase()).or_insert(dir);
+        }
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        Self {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            root,
+            aliases,
+            real,
+        }
+    }
+    /// Whether `path` is a file a `require` may read: really in one of the
+    /// folders it takes modules from (not through a link out of it).
+    fn hold(&self, path: &Path) -> bool {
+        path.canonicalize()
+            .is_ok_and(|path| self.real.iter().any(|root| path.starts_with(root)))
+    }
+}
+
+/// At most this many workers compile ahead, and at most half the machine's
+/// processors (one, where it has two): the app starts much else as it
+/// launches, its window, the GPU, perhaps a process of its own.
+const PREFETCH_WORKERS: usize = 4;
+fn most_workers() -> usize {
+    static MOST: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MOST.get_or_init(|| {
+        let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+        (processors / 2).clamp(1, PREFETCH_WORKERS)
+    })
+}
+
 /// Whether anything was ever compiled ahead: until then a `require` pays
 /// one atomic load for it, a host that never asks nothing more.
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -326,10 +408,10 @@ fn ahead() -> std::sync::MutexGuard<'static, Ahead> {
 }
 
 /// The names `code` requires with a string literal (`require("./x")`,
-/// `require "@ds/button"`), in order: what the worker follows. One on a
-/// line after `--` is a comment's; a name built at run time isn't seen (it
-/// compiles at `require`).
-fn required_names(code: &[u8]) -> Vec<String> {
+/// `require "@ds/button"`), and where each is: what the workers follow. One
+/// on a line after `--` is a comment's; a name built at run time isn't seen
+/// (it compiles at `require`).
+fn required_names(code: &[u8]) -> Vec<(usize, String)> {
     let mut names = Vec::new();
     let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     // A data module of megabytes is searched at memory speed, not a
@@ -373,9 +455,56 @@ fn required_names(code: &[u8]) -> Vec<String> {
         if rest[end] == quote
             && let Ok(name) = std::str::from_utf8(&rest[..end])
         {
-            names.push(name.to_owned());
+            names.push((start, name.to_owned()));
         }
         i = j + 1 + end;
+    }
+    names
+}
+
+/// The strings of `code` that name a module under an alias (`"@app/page"`),
+/// and where each is: what a script requires by another way than
+/// `require("…")` (`pcall(require, "@app/theme")`, a function of its own that
+/// requires what it is given, a list of its screens). `known` says whether
+/// an alias is one; a string that names no file costs finding that out.
+fn module_strings(code: &[u8], known: impl Fn(&str) -> bool) -> Vec<(usize, String)> {
+    let mut names = Vec::new();
+    for at in memchr::memchr_iter(b'@', code) {
+        let Some(&quote) = at.checked_sub(1).and_then(|before| code.get(before)) else {
+            continue;
+        };
+        if quote != b'"' && quote != b'\'' {
+            continue;
+        }
+        let part = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/');
+        let len = code[at + 1..].iter().take_while(|b| part(b)).count();
+        let rest = &code[at + 1..at + 1 + len];
+        if code.get(at + 1 + len) != Some(&quote) {
+            continue;
+        }
+        let Ok(name) = std::str::from_utf8(rest) else {
+            continue;
+        };
+        let Some((alias, inside)) = name.split_once('/') else {
+            continue;
+        };
+        if inside.is_empty()
+            || inside.split('/').any(|part| part == "..")
+            || !known(&alias.to_lowercase())
+        {
+            continue;
+        }
+        // In a comment (a line of a data module is megabytes: not looked
+        // through for one).
+        let near = at.saturating_sub(1024);
+        let line = code[near..at]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(near, |n| near + n + 1);
+        if code[line..at].windows(2).any(|w| w == b"--") {
+            continue;
+        }
+        names.push((at, format!("@{name}")));
     }
     names
 }
@@ -441,112 +570,246 @@ fn luaurc_aliases(root: &Path) -> HashMap<String, std::path::PathBuf> {
         .collect()
 }
 
-/// Compile `entry` and what it requires, and what those require, on a worker
-/// thread while the app's window and GPU are set up, so that the first
+/// Compile `entry` and what it requires, and what those require, on worker
+/// threads while the app's window and GPU are set up, so that the first
 /// load's `require`s find their bytecode compiled ([`prefetched`]). Only
-/// what the entry reaches by a string literal: a test, a type file or a
-/// module no one requires isn't read. Compiled from the text read, in
+/// what the entry reaches by a string that names a module: a test, a type
+/// file or a module no one names isn't read. Compiled from the text read, in
 /// memory: the same as compiling it at `require`, which still reads the file
 /// and uses the bytecode only for the same bytes. A file not ready in time
-/// compiles at `require` as it always has; nothing waits for the worker.
+/// compiles at `require` as it always has; nothing waits for the workers.
 pub(crate) fn prefetch(entry: &Path, packages: Vec<(String, std::path::PathBuf)>) {
-    let generation = {
+    let (generation, start) = {
         let mut ahead = ahead();
         if !ahead.open {
             ahead.generation += 1;
             ahead.ready = Vec::new();
+            ahead.work = Some(Work::default());
             ahead.compiled = 0;
             // An earlier session's workers stop on their own.
             ahead.workers = 0;
             ahead.open = true;
         }
-        ahead.workers += 1;
-        ahead.generation
+        // After what an earlier script of the session leads to.
+        let work = ahead.work.get_or_insert_default();
+        work.todo
+            .insert(0, Todo::Script(crate::normalize(entry), packages));
+        let start = ahead.workers < most_workers();
+        ahead.workers += usize::from(start);
+        (ahead.generation, start)
     };
     STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
-    let entry = crate::normalize(entry);
-    let worker = move || {
-        let (home, returned) = std::sync::mpsc::channel();
-        let current = || {
-            let ahead = ahead();
-            ahead.generation == generation && ahead.open
-        };
-        let root = entry.parent().unwrap_or(Path::new(".")).to_owned();
-        let mut aliases = luaurc_aliases(&root);
-        for (name, dir) in packages {
-            aliases.entry(name.to_lowercase()).or_insert(dir);
+    MORE.notify_one();
+    if start {
+        start_worker(generation);
+    }
+}
+
+/// One more worker of the session `generation`, already counted.
+fn start_worker(generation: u64) {
+    if std::thread::Builder::new()
+        .name("zgx-luau-ahead".into())
+        .spawn(move || compile_files(generation))
+        .is_err()
+    {
+        let mut ahead = ahead();
+        if ahead.generation == generation {
+            ahead.workers -= 1;
         }
-        let mut queue = std::collections::VecDeque::from([entry]);
-        let mut seen = HashSet::new();
-        let (mut files, mut bytes) = (0, 0);
-        while let Some(path) = queue.pop_front() {
-            if !seen.insert(path.clone())
-                || std::fs::metadata(&path)
-                    .map_or(true, |m| !m.is_file() || m.len() > PREFETCH_FILE)
-            {
-                continue;
-            }
-            while PAUSED.load(std::sync::atomic::Ordering::Relaxed) {
-                if !current() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            let Ok(code) = std::fs::read(&path) else {
-                continue;
-            };
-            files += 1;
-            bytes += code.len();
-            if files > PREFETCH_FILES || bytes > PREFETCH_BYTES {
-                break;
-            }
-            for name in required_names(&code) {
-                if let Some(next) = required_path(&name, &path, &root, &aliases) {
-                    queue.push_back(next);
-                }
-            }
-            let bytecode = mlua::chunk::Compiler::new()
-                .compile(&code)
-                .ok()
-                .map(Into::into);
+    }
+}
+
+/// A worker, while it is counted in `Ahead::workers`: one that panics is
+/// taken off, as one with nothing left takes itself off.
+struct Counted(u64);
+impl Drop for Counted {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
             let mut ahead = ahead();
-            if ahead.generation != generation || !ahead.open {
-                break;
+            if ahead.generation == self.0 {
+                ahead.workers = ahead.workers.saturating_sub(1);
             }
+        }
+    }
+}
+/// A worker on a file, while it may put more on `todo` (`Work::busy`); gone
+/// once it has, or as it panics, so no other waits for it.
+struct OnFile(u64);
+impl Drop for OnFile {
+    fn drop(&mut self) {
+        {
+            let mut ahead = ahead();
+            if ahead.generation == self.0
+                && let Some(work) = ahead.work.as_mut()
+            {
+                work.busy = work.busy.saturating_sub(1);
+            }
+        }
+        MORE.notify_all();
+    }
+}
+
+/// The next file for a worker of the session `generation`: waits while
+/// another worker is on one that may name more. None once there is nothing
+/// left, or the session ended, and the worker isn't counted any more.
+fn next_file(generation: u64) -> Option<Todo> {
+    let mut ahead = ahead();
+    loop {
+        if ahead.generation != generation {
+            return None;
+        }
+        let open = ahead.open;
+        if let Some(work) = ahead.work.as_mut().filter(|_| open) {
+            if let Some(todo) = work.todo.pop() {
+                work.busy += 1;
+                return Some(todo);
+            }
+            if work.busy > 0 {
+                ahead = MORE
+                    .wait(ahead)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                continue;
+            }
+        }
+        ahead.workers -= 1;
+        return None;
+    }
+}
+
+/// A worker: compiles files until the session has none left.
+fn compile_files(generation: u64) {
+    let (home, returned) = std::sync::mpsc::channel();
+    let counted = Counted(generation);
+    while let Some(todo) = next_file(generation) {
+        let on_file = OnFile(generation);
+        let (path, roots) = match todo {
+            Todo::File(path, roots) => (path, roots),
+            Todo::Script(entry, packages) => {
+                let roots = Roots::of(&entry, packages);
+                (entry, std::sync::Arc::new(roots))
+            }
+        };
+        let read = read_file(generation, &path, &roots);
+        let mut found = Vec::new();
+        if let Some((code, _)) = &read {
+            for name in names_in(code, &roots) {
+                if let Some(next) = required_path(&name, &path, &roots.root, &roots.aliases) {
+                    found.push(next);
+                }
+            }
+        }
+        // What it names, its first on top, before it compiles: the other
+        // workers take them meanwhile.
+        let start = put_found(generation, found, &roots);
+        drop(on_file);
+        for _ in 0..start {
+            start_worker(generation);
+        }
+        // (A file another script's names led to has compiled, or will.)
+        let Some((code, true)) = read else {
+            continue;
+        };
+        let bytecode = mlua::chunk::Compiler::new()
+            .compile(&code)
+            .ok()
+            .map(Into::into);
+        let mut ahead = ahead();
+        if ahead.generation == generation && ahead.open {
             ahead
                 .ready
                 .push((Key::of(&code), code.into(), bytecode, home.clone()));
             ahead.compiled += 1;
         }
-        {
-            let mut ahead = ahead();
-            if ahead.generation == generation {
-                ahead.workers -= 1;
-            }
-        }
-        // What it made comes back as each entry goes (most as their
-        // `require`s load them, the rest as the load ends), freed here.
-        // Every entry gone, the channel closes; one kept past the bound
-        // frees where it drops.
-        drop(home);
-        // What comes back, freed here and given back to the system
-        // (`zgx::image::rest_thread`): the allocator keeps a thread's freed
-        // pages until that thread collects them.
-        while let Ok(back) = returned.recv_timeout(std::time::Duration::from_secs(30)) {
-            drop(back);
-            while let Ok(more) = returned.try_recv() {
-                drop(more);
-            }
-            zgx::image::rest_thread();
-        }
-    };
-    if std::thread::Builder::new()
-        .name("zgx-luau-ahead".into())
-        .spawn(worker)
-        .is_err()
-    {
-        ahead().workers -= 1;
     }
+    drop(counted);
+    // What it made comes back as each entry goes (most as their `require`s
+    // load them, the rest as the load ends), freed here. Every entry gone,
+    // the channel closes; one kept past the bound frees where it drops.
+    drop(home);
+    // What comes back, freed here and given back to the system
+    // (`zgx::image::rest_thread`): the allocator keeps a thread's freed
+    // pages until that thread collects them.
+    while let Ok(back) = returned.recv_timeout(std::time::Duration::from_secs(30)) {
+        drop(back);
+        while let Ok(more) = returned.try_recv() {
+            drop(more);
+        }
+        zgx::image::rest_thread();
+    }
+}
+
+/// Puts what a worker's file names on the session's `todo`; how many more
+/// workers there are files for, counted.
+fn put_found(
+    generation: u64,
+    found: Vec<std::path::PathBuf>,
+    roots: &std::sync::Arc<Roots>,
+) -> usize {
+    let mut ahead = ahead();
+    if ahead.generation != generation {
+        return 0;
+    }
+    let most = most_workers().saturating_sub(ahead.workers);
+    let mut start = 0;
+    if let Some(work) = ahead.work.as_mut() {
+        for next in found.into_iter().rev() {
+            if work.seen.insert((roots.id, next.clone())) {
+                work.todo.push(Todo::File(next, roots.clone()));
+            }
+        }
+        // (This worker compiles its file first.)
+        start = work.todo.len().min(most);
+    }
+    ahead.workers += start;
+    start
+}
+
+/// The file at `path`, and whether it is this session's first time there.
+/// None where it isn't one `require` would take, or is past what a session
+/// reads.
+fn read_file(generation: u64, path: &Path, roots: &Roots) -> Option<(Vec<u8>, bool)> {
+    let current = || {
+        let ahead = ahead();
+        ahead.generation == generation && ahead.open
+    };
+    // (A string for no file ends here.)
+    let file = std::fs::metadata(path).ok()?;
+    if !file.is_file() || file.len() > PREFETCH_FILE || !roots.hold(path) {
+        return None;
+    }
+    while PAUSED.load(std::sync::atomic::Ordering::Relaxed) && current() {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    #[cfg(test)]
+    assert!(
+        !path.ends_with("panics.luau"),
+        "a test's worker panics here"
+    );
+    let code = std::fs::read(path).ok()?;
+    let mut ahead = ahead();
+    if ahead.generation != generation || !ahead.open {
+        return None;
+    }
+    let work = ahead.work.as_mut()?;
+    work.files += 1;
+    work.bytes += code.len();
+    if work.files > PREFETCH_FILES || work.bytes > PREFETCH_BYTES {
+        work.todo.clear();
+        return None;
+    }
+    let first = work.taken.insert(path.to_owned());
+    Some((code, first))
+}
+
+/// The module names in `code`, in order: what it requires by literal, and
+/// the strings that name one.
+fn names_in(code: &[u8], roots: &Roots) -> Vec<String> {
+    let mut names = required_names(code);
+    names.extend(module_strings(code, |alias| {
+        matches!(alias, "app" | "self") || roots.aliases.contains_key(alias)
+    }));
+    names.sort();
+    names.into_iter().map(|(_, name)| name).collect()
 }
 
 /// Hold the ahead workers before their next file, or let them go (tests).
@@ -607,7 +870,10 @@ pub(crate) fn release_prefetched() {
         }
         ahead.open = false;
         ahead.ready = Vec::new();
+        ahead.work = None;
     }
+    // Workers waiting for more leave.
+    MORE.notify_all();
     HELD.with_borrow_mut(|held| *held = Vec::new());
     SHARED.with_borrow_mut(|shared| {
         shared.retain(|_, entries| {
@@ -680,5 +946,62 @@ mod tests {
                 .unwrap();
             assert_eq!(value, label);
         }
+    }
+}
+
+#[cfg(test)]
+mod ahead_tests {
+    use super::*;
+
+    // (`cfg(test)`'s panic is this binary's alone, so the test is here and not
+    // with the others in tests/compile_ahead.rs.)
+    /// A worker that panics on a file leaves the others to what is left:
+    /// they take it, and go, rather than waiting for a file that puts up no
+    /// more.
+    #[test]
+    fn a_worker_that_panics_leaves_no_other_waiting() {
+        // In a process of its own: the session is the process's, and any
+        // other test's load ends it.
+        const ALONE: &str = "ZGX_TEST_AHEAD_PANIC_ALONE";
+        if std::env::var_os(ALONE).is_none() {
+            let run = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "--test-threads=1"])
+                .arg("sources::ahead_tests::a_worker_that_panics_leaves_no_other_waiting")
+                .env(ALONE, "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&run.stdout);
+            assert!(
+                run.status.success() && said.contains("1 passed"),
+                "{said}\n{}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("zgx-ahead-panics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = String::from("local a = require(\"./panics\")\n");
+        std::fs::write(dir.join("panics.luau"), "return 1\n").unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("m{i}.luau")), "return 1\n").unwrap();
+            app += &format!("local m{i} = require(\"./m{i}\")\n");
+        }
+        std::fs::write(dir.join("app.luau"), app).unwrap();
+        prefetch(&dir.join("app.luau"), Vec::new());
+        let started = std::time::Instant::now();
+        while ahead_counts().0 < 41 && most_workers() > 1 || !ahead_counts().1 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "workers wait for one that panicked: {:?}",
+                ahead_counts()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // (One worker alone compiles the script and no more.)
+        let compiled = ahead_counts().0;
+        assert_eq!(compiled, if most_workers() > 1 { 41 } else { 1 });
+        release_prefetched();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

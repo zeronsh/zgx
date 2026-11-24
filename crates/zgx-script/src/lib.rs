@@ -2019,19 +2019,23 @@ fn tracking(host: &Rc<Inner>) -> Option<Rc<reloads::Tracker>> {
 }
 
 /// Compile `script` (an app's `app.luau`, or its directory) and the modules
-/// it requires, on a worker thread, before a [`ScriptHost`] loads it: call
+/// it requires, on worker threads, before a [`ScriptHost`] loads it: call
 /// it first thing, before the app's window is made, and the first load's
 /// `require`s find them compiled rather than compiling each on the main
 /// thread. `packages` are the packages the host will lend (`@name/…`), as
 /// `ScriptHost::package` takes them; `.luaurc` aliases are read. Call it
 /// again for another window's script: it joins the same session.
 ///
-/// Only what the script reaches by `require` with a string literal is read
-/// (no tests, type files or unused modules), files of at most 16 MB.
-/// Compiled from the text, in memory, and used only for the very bytes
-/// `require` reads; no bytecode is written or read from a file. A file not
-/// ready in time compiles as it always has, and nothing waits for the
-/// worker; what no load used goes as the first load ends.
+/// Only what the script reaches is read, files of at most 16 MB: what it
+/// requires with a string literal, and what a string in it names under an
+/// alias (`"@app/page"`, however it is then required), in the folders
+/// `require` takes modules from. (No tests, type files or modules nothing
+/// names.) Compiled from the text, in memory, and used only for the very
+/// bytes `require` reads; no bytecode is written or read from a file. Up to
+/// four workers, at most half the machine's processors, take the files about
+/// in the order the load requires them. A file not ready in time compiles as
+/// it always has, and nothing waits for a worker; they go, and what no load
+/// used, as the first load ends.
 pub fn compile_ahead(script: &std::path::Path, packages: &[(&str, &std::path::Path)]) {
     let entry = if script.is_dir() {
         script.join("app.luau")
