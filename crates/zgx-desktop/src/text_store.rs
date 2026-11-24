@@ -55,6 +55,10 @@ pub(crate) struct TextStore {
     /// once it moves, the editor dropped it.
     cancels: u64,
     seen: Option<Seen>,
+    /// The UTF-16 document contents last known to the input method, used to
+    /// report minimal incremental `TS_TEXTCHANGE` ranges instead of whole-buffer
+    /// replacements.
+    last_text: Vec<u16>,
 }
 
 impl TextStore {
@@ -66,6 +70,7 @@ impl TextStore {
             reconverting: None,
             cancels: 0,
             seen: None,
+            last_text: Vec::new(),
         }
     }
     /// The editor the document is now; `None` while no editor that takes an
@@ -76,7 +81,13 @@ impl TextStore {
             self.end_composition();
             self.editor = editor;
             self.seen = self.editor.as_ref().map(seen);
+            self.last_text = self.snapshot_text();
         }
+    }
+
+    fn snapshot_text(&self) -> Vec<u16> {
+        let len = self.len();
+        self.text(0, len)
     }
     pub(crate) fn editor(&self) -> Option<&EditorHandle> {
         self.editor.as_ref()
@@ -288,6 +299,7 @@ impl TextStore {
             self.composing = preedit;
             self.composition = Some(composition.start..composition.start + units.len());
             self.seen = Some(seen(&editor));
+            self.last_text = self.snapshot_text();
             return Some(composition.start + a..composition.start + a + text.len());
         }
         let (from, to, selection) = {
@@ -305,6 +317,7 @@ impl TextStore {
             editor.replace_text(from..to, &new);
         }
         self.seen = Some(seen(&editor));
+        self.last_text = self.snapshot_text();
         // What went in, as the editor took it: a field drops line breaks, a
         // text area makes "\r\n" one.
         let inserted = (self.len() + (end - start)).saturating_sub(before);
@@ -344,6 +357,7 @@ impl TextStore {
         self.composing = text.clone();
         self.reconverting = Some(text);
         self.seen = Some(seen(&editor));
+        self.last_text = self.snapshot_text();
     }
     /// Whether the editor dropped the open composition (the app set its text
     /// or its selection, or made it read-only): then it is the store's no
@@ -414,12 +428,13 @@ impl TextStore {
             _ => editor.cancel_composition(),
         }
         self.seen = Some(seen(&editor));
+        self.last_text = self.snapshot_text();
     }
     /// What changed in the editor since the input method last heard, from
     /// edits it didn't make (typing, the app writing its value, undo): to
-    /// tell it (`OnTextChange`, `OnSelectionChange`). The whole text, once,
-    /// for a text change: Windows takes a wider range than changed.
-    pub(crate) fn changes(&mut self, old_len: usize) -> Vec<Change> {
+    /// tell it (`OnTextChange`, `OnSelectionChange`) with a minimal UTF-16
+    /// diff so input methods keep incremental typing context.
+    pub(crate) fn changes(&mut self, _old_len: usize) -> Vec<Change> {
         let cancelled = self.drop_cancelled();
         let Some(editor) = &self.editor else {
             return Vec::new();
@@ -435,11 +450,15 @@ impl TextStore {
         };
         let mut changes = Vec::new();
         if before.revision != now.revision || before.preedit != now.preedit {
-            changes.push(Change::Text {
-                start: 0,
-                old_end: old_len,
-                new_end: self.len(),
-            });
+            let new_text = self.snapshot_text();
+            let old_text = std::mem::replace(&mut self.last_text, new_text.clone());
+            if let Some((start, old_end, new_end)) = utf16_diff(&old_text, &new_text) {
+                changes.push(Change::Text {
+                    start,
+                    old_end,
+                    new_end,
+                });
+            }
         }
         if before.selection != now.selection || before.preedit != now.preedit {
             changes.push(Change::Selection);
@@ -528,6 +547,26 @@ impl Seen {
                 _ => false,
             }
     }
+}
+
+/// Minimal UTF-16 `(start, old_end, new_end)` diff between `old` and `new`,
+/// or `None` when identical.
+fn utf16_diff(old: &[u16], new: &[u16]) -> Option<(usize, usize, usize)> {
+    let min_len = old.len().min(new.len());
+    let mut start = 0;
+    while start < min_len && old[start] == new[start] {
+        start += 1;
+    }
+    if start == old.len() && start == new.len() {
+        return None;
+    }
+    let mut old_end = old.len();
+    let mut new_end = new.len();
+    while old_end > start && new_end > start && old[old_end - 1] == new[new_end - 1] {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    Some((start, old_end, new_end))
 }
 
 fn seen(editor: &EditorHandle) -> Seen {
@@ -928,7 +967,7 @@ mod tests {
             store.changes(len),
             [
                 Change::Text {
-                    start: 0,
+                    start: 2,
                     old_end: 2,
                     new_end: 3
                 },
@@ -936,6 +975,33 @@ mod tests {
             ]
         );
         assert!(store.changes(3).is_empty());
+        // Middle insertion and deletion report minimal incremental ranges.
+        store.editor().unwrap().set_selection(1, 1);
+        store.changes(3);
+        store.editor().unwrap().paste("1");
+        assert_eq!(
+            store.changes(3),
+            [
+                Change::Text {
+                    start: 1,
+                    old_end: 1,
+                    new_end: 2
+                },
+                Change::Selection
+            ]
+        );
+        store.editor().unwrap().replace_text(1..2, "");
+        assert_eq!(
+            store.changes(4),
+            [
+                Change::Text {
+                    start: 1,
+                    old_end: 2,
+                    new_end: 1
+                },
+                Change::Selection
+            ]
+        );
     }
 
     #[test]

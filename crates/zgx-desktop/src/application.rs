@@ -6108,6 +6108,11 @@ impl Host {
             _ => {}
         }
 
+        #[cfg(windows)]
+        if self.window.is_some() {
+            self.sync_ime_cancellation();
+        }
+
         Ok(())
     }
     /// A key from the window: to the page whose box has focus first, unless

@@ -40,10 +40,12 @@ use windows::{
                 ITfTextEditSink_Impl, ITfThreadMgr, InputScope, TEXT_STORE_LOCK_FLAGS,
                 TEXT_STORE_TEXT_CHANGE_FLAGS, TF_ATTR_CONVERTED, TF_ATTR_FIXEDCONVERTED,
                 TF_ATTR_TARGET_CONVERTED, TF_ATTR_TARGET_NOTCONVERTED, TF_DISPLAYATTRIBUTE,
-                TF_IAS_QUERYONLY, TS_AE_END, TS_AE_START, TS_ATTRVAL, TS_DEFAULT_SELECTION,
-                TS_E_NOLOCK, TS_E_SYNCHRONOUS, TS_LC_CHANGE, TS_LF_READ, TS_LF_READWRITE,
-                TS_LF_SYNC, TS_RT_PLAIN, TS_RUNINFO, TS_S_ASYNC, TS_SELECTION_ACP,
-                TS_SELECTIONSTYLE, TS_SS_NOHIDDENTEXT, TS_STATUS, TS_TEXTCHANGE,
+                TF_IAS_QUERYONLY, TS_AE_END, TS_AE_START, TS_AS_ATTR_CHANGE,
+                TS_AS_LAYOUT_CHANGE, TS_AS_SEL_CHANGE, TS_AS_TEXT_CHANGE, TS_ATTRVAL,
+                TS_DEFAULT_SELECTION, TS_E_INVALIDPOS, TS_E_NOLOCK, TS_E_SYNCHRONOUS,
+                TS_LC_CHANGE, TS_LF_READ, TS_LF_READWRITE, TS_LF_SYNC, TS_RT_PLAIN, TS_RUNINFO,
+                TS_S_ASYNC, TS_SELECTION_ACP, TS_SELECTIONSTYLE, TS_SS_NOHIDDENTEXT, TS_STATUS,
+                TS_TEXTCHANGE,
             },
             WindowsAndMessaging::GetClientRect,
         },
@@ -59,6 +61,8 @@ const VIEW: u32 = 1;
 struct Shared {
     store: TextStore,
     sink: Option<ITextStoreACPSink>,
+    /// AdviseSink notification mask (`TS_AS_*`).
+    sink_mask: u32,
     /// The lock held now (`TS_LF_READ` or `TS_LF_READWRITE` bits), if any.
     lock: u32,
     /// A lock asked for while one couldn't be granted, granted after.
@@ -124,6 +128,7 @@ impl Tsf {
             let shared = Rc::new(RefCell::new(Shared {
                 store: TextStore::new(),
                 sink: None,
+                sink_mask: 0,
                 lock: 0,
                 pending: None,
                 hwnd,
@@ -213,7 +218,7 @@ impl Tsf {
         }
         // The focused editor's input mode set while it has focus.
         retell_scope(&self.shared);
-        let (sink, changes, layout) = {
+        let (sink, mask, changes, layout) = {
             let mut shared = self.shared.borrow_mut();
             if shared.lock != 0 {
                 return;
@@ -228,7 +233,7 @@ impl Tsf {
             if changes.is_empty() && !layout && shared.pending.is_none() {
                 return;
             }
-            (shared.sink.clone(), changes, layout)
+            (shared.sink.clone(), shared.sink_mask, changes, layout)
         };
         let mut cancelled = false;
         if let Some(sink) = &sink {
@@ -241,20 +246,24 @@ impl Tsf {
                             old_end,
                             new_end,
                         } => {
-                            let change = TS_TEXTCHANGE {
-                                acpStart: acp(start),
-                                acpOldEnd: acp(old_end),
-                                acpNewEnd: acp(new_end),
-                            };
-                            let _ = sink.OnTextChange(TEXT_STORE_TEXT_CHANGE_FLAGS(0), &change);
+                            if mask & TS_AS_TEXT_CHANGE != 0 {
+                                let change = TS_TEXTCHANGE {
+                                    acpStart: acp(start),
+                                    acpOldEnd: acp(old_end),
+                                    acpNewEnd: acp(new_end),
+                                };
+                                let _ = sink.OnTextChange(TEXT_STORE_TEXT_CHANGE_FLAGS(0), &change);
+                            }
                         }
                         Change::Selection => {
-                            let _ = sink.OnSelectionChange();
+                            if mask & TS_AS_SEL_CHANGE != 0 {
+                                let _ = sink.OnSelectionChange();
+                            }
                         }
                         Change::CompositionCancelled => cancelled = true,
                     }
                 }
-                if layout {
+                if layout && mask & TS_AS_LAYOUT_CHANGE != 0 {
                     let _ = sink.OnLayoutChange(TS_LC_CHANGE, VIEW);
                 }
             }
@@ -311,16 +320,18 @@ fn guard<T>(body: impl FnOnce() -> Result<T>) -> Result<T> {
 /// only when told. (Nothing is borrowed across the call: the framework asks
 /// for a lock in it.)
 fn retell_scope(shared: &Rc<RefCell<Shared>>) {
-    let (sink, len) = {
+    let (sink, mask, len) = {
         let mut s = shared.borrow_mut();
         let scope = s.store.input_scope();
         if scope == s.told_scope {
             return;
         }
         s.told_scope = scope;
-        (s.sink.clone(), s.store.len())
+        (s.sink.clone(), s.sink_mask, s.store.len())
     };
-    if let Some(sink) = sink {
+    if let Some(sink) = sink
+        && mask & TS_AS_ATTR_CHANGE != 0
+    {
         // SAFETY: the sink is alive while advised; no lock is held.
         let _ = unsafe { sink.OnAttrsChange(0, acp(len), &[GUID_PROP_INPUTSCOPE]) };
     }
@@ -399,17 +410,21 @@ impl Store {
 }
 
 impl ITextStoreACP2_Impl for Store_Impl {
-    fn AdviseSink(&self, riid: *const GUID, punk: Ref<IUnknown>, _mask: u32) -> Result<()> {
+    fn AdviseSink(&self, riid: *const GUID, punk: Ref<IUnknown>, mask: u32) -> Result<()> {
         // SAFETY: `riid` is a valid GUID from the caller.
         if unsafe { *riid } != ITextStoreACPSink::IID {
             return Err(E_INVALIDARG.into());
         }
         let sink: ITextStoreACPSink = punk.ok()?.cast()?;
-        self.0.borrow_mut().sink = Some(sink);
+        let mut shared = self.0.borrow_mut();
+        shared.sink = Some(sink);
+        shared.sink_mask = mask;
         Ok(())
     }
     fn UnadviseSink(&self, _punk: Ref<IUnknown>) -> Result<()> {
-        self.0.borrow_mut().sink = None;
+        let mut shared = self.0.borrow_mut();
+        shared.sink = None;
+        shared.sink_mask = 0;
         Ok(())
     }
     fn RequestLock(&self, flags: u32) -> Result<HRESULT> {
@@ -445,12 +460,22 @@ impl ITextStoreACP2_Impl for Store_Impl {
         result_start: *mut i32,
         result_end: *mut i32,
     ) -> Result<()> {
-        // SAFETY: the caller's out pointers.
-        unsafe {
-            *result_start = start;
-            *result_end = end;
-        }
-        Ok(())
+        guard(|| {
+            let len = self.0.borrow().store.len();
+            if start < 0 || start > end || at(end) > len {
+                return Err(E_INVALIDARG.into());
+            }
+            // SAFETY: the caller's out pointers, each checked for null.
+            unsafe {
+                if !result_start.is_null() {
+                    *result_start = start;
+                }
+                if !result_end.is_null() {
+                    *result_end = end;
+                }
+            }
+            Ok(())
+        })
     }
     fn GetSelection(
         &self,
@@ -511,25 +536,43 @@ impl ITextStoreACP2_Impl for Store_Impl {
         guard(|| {
             let shared = self.read()?;
             let len = shared.store.len();
-            let end = if end < 0 { len } else { at(end).min(len) };
-            let units = shared.store.text(at(start), end);
+            if start < 0 || at(start) > len || (end >= 0 && (end < start || at(end) > len)) {
+                return Err(TS_E_INVALIDPOS.into());
+            }
+            let start_u = at(start);
+            let end_u = if end < 0 { len } else { at(end) };
+            let units = shared.store.text(start_u, end_u);
             let n = units.len().min(text_wanted as usize);
+            let run_count = if text_wanted > 0 { n } else { units.len() };
+            let advance = if text_wanted > 0 {
+                n
+            } else if runs_wanted > 0 {
+                run_count
+            } else {
+                0
+            };
             // SAFETY: the caller's buffers, `text_wanted` and `runs_wanted` long.
             unsafe {
                 if !text.is_null() && n > 0 {
                     std::ptr::copy_nonoverlapping(units.as_ptr(), text.0, n);
                 }
-                *text_given = n as u32;
-                if runs_wanted > 0 && !runs.is_null() && n > 0 {
+                if !text_given.is_null() {
+                    *text_given = n as u32;
+                }
+                if runs_wanted > 0 && !runs.is_null() && run_count > 0 {
                     *runs = TS_RUNINFO {
-                        uCount: n as u32,
+                        uCount: run_count as u32,
                         r#type: TS_RT_PLAIN,
                     };
-                    *runs_given = 1;
+                    if !runs_given.is_null() {
+                        *runs_given = 1;
+                    }
                 } else if !runs_given.is_null() {
                     *runs_given = 0;
                 }
-                *next = acp(at(start) + n);
+                if !next.is_null() {
+                    *next = acp(start_u + advance);
+                }
             }
             Ok(())
         })
@@ -590,9 +633,14 @@ impl ITextStoreACP2_Impl for Store_Impl {
         change: *mut TS_TEXTCHANGE,
     ) -> Result<()> {
         guard(|| {
-            let mut shared = self.write()?;
+            let query_only = flags & TF_IAS_QUERYONLY.0 != 0;
+            let mut shared = if query_only {
+                self.read()?
+            } else {
+                self.write()?
+            };
             let (start, end, _) = shared.store.selection();
-            let range = if flags & TF_IAS_QUERYONLY.0 != 0 {
+            let range = if query_only {
                 start..end
             } else {
                 // SAFETY: `cch` units at `text`, from the caller.
@@ -1098,6 +1146,7 @@ mod tests {
         let shared = Rc::new(RefCell::new(Shared {
             store: TextStore::new(),
             sink: Some(sink),
+            sink_mask: TS_AS_ATTR_CHANGE,
             lock: 0,
             pending: None,
             hwnd: HWND::default(),
@@ -1158,6 +1207,7 @@ mod tests {
         let shared = Rc::new(RefCell::new(Shared {
             store: TextStore::new(),
             sink: None,
+            sink_mask: 0,
             lock: 0,
             pending: None,
             hwnd: HWND::default(),
@@ -1203,6 +1253,7 @@ mod tests {
         let shared = RefCell::new(Shared {
             store: TextStore::new(),
             sink: None,
+            sink_mask: 0,
             lock: 0,
             pending: None,
             hwnd: HWND::default(),
@@ -1439,5 +1490,81 @@ mod tests {
         drop(tsf);
         // SAFETY: the window made above.
         let _ = unsafe { DestroyWindow(hwnd) };
+    }
+
+    #[test]
+    fn query_only_insert_and_get_text_runs_obey_tsf_contract() {
+        let mut ui = Ui::new(400., 200.);
+        let value = ui.signal(String::from("12"));
+        let view = ui.mount(column().child(text_input("Name", value).id("name")));
+        ui.prepare_frame();
+        let shared = Rc::new(RefCell::new(Shared {
+            store: TextStore::new(),
+            sink: None,
+            sink_mask: 0,
+            lock: TS_LF_READ.0,
+            pending: None,
+            hwnd: HWND::default(),
+            scale: 1.,
+            told_len: 0,
+            layout_changed: false,
+            attributes: None,
+            scope_asked: false,
+            told_scope: 0,
+        }));
+        let store: ITextStoreACP2 = Store(shared.clone()).into();
+        ui.input.focus(&ui.scene, view.find("name"));
+        shared.borrow_mut().store.focus(ui.focused_editor());
+        unsafe {
+            // TF_IAS_QUERYONLY succeeds under a read-only lock.
+            let (mut s, mut e) = (-1, -1);
+            let mut change = TS_TEXTCHANGE::default();
+            store
+                .InsertTextAtSelection(TF_IAS_QUERYONLY.0, &[], &mut s, &mut e, &mut change)
+                .unwrap();
+            assert_eq!((s, e), (2, 2));
+
+            // GetText runs-only call reports the plain run length and advances next.
+            let mut runs = [TS_RUNINFO::default()];
+            let mut text_given = 99;
+            let mut runs_given = 0;
+            let mut next = 0;
+            store
+                .GetText(
+                    0,
+                    -1,
+                    &mut [],
+                    &mut text_given,
+                    &mut runs,
+                    &mut runs_given,
+                    &mut next,
+                )
+                .unwrap();
+            assert_eq!(text_given, 0);
+            assert_eq!(runs_given, 1);
+            assert_eq!(runs[0].uCount, 2);
+            assert_eq!(next, 2);
+
+            // Out-of-bounds GetText and QueryInsert return TSF errors.
+            assert_eq!(
+                store
+                    .GetText(
+                        5,
+                        -1,
+                        &mut [],
+                        &mut text_given,
+                        &mut [],
+                        &mut runs_given,
+                        &mut next,
+                    )
+                    .unwrap_err()
+                    .code(),
+                TS_E_INVALIDPOS
+            );
+            assert_eq!(
+                store.QueryInsert(0, 99, 1, &mut s, &mut e).unwrap_err().code(),
+                E_INVALIDARG
+            );
+        }
     }
 }
