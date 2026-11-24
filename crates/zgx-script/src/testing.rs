@@ -188,6 +188,19 @@ impl FakeDesktop {
         *self.files.borrow_mut() = files;
     }
 }
+/// `png` decoded, as a desktop's clipboard holds a copied image: by zgx-gpu,
+/// which a browser build doesn't link (none there: its copy is refused).
+fn decoded(png: &[u8]) -> Option<std::sync::Arc<zgx::image::ImageData>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        zgx_gpu::assets::decode_image(png).ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = png;
+        None
+    }
+}
 impl zgx::platform::Platform for FakeDesktop {
     fn open_url(&self, url: &str) -> bool {
         self.opened.borrow_mut().push(url.to_string());
@@ -264,7 +277,7 @@ impl zgx::platform::Platform for FakeDesktop {
         png: std::sync::Arc<[u8]>,
     ) -> zgx::platform::Pending<bool> {
         // The text, HTML, types and image of one copy, side by side.
-        let Ok(image) = zgx_gpu::assets::decode_image(&png) else {
+        let Some(image) = decoded(&png) else {
             return Box::pin(async { false });
         };
         self.copy_typed(text, html, types.to_vec());
