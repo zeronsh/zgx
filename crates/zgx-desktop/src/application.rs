@@ -2138,6 +2138,9 @@ struct Host {
     popup_revisions: u64,
     /// Geometry alone reaches assistive technology at most every 100 ms.
     accessibility_pacer: crate::accessibility::GeometryPacer,
+    /// What a client was sent, for a test standing in for one.
+    #[cfg(test)]
+    accessibility_read: Option<Vec<accesskit::TreeUpdate>>,
     /// The display text selection last published as the primary selection.
     #[cfg(target_os = "linux")]
     primary_revision: u64,
@@ -2577,6 +2580,8 @@ impl Host {
             accessibility_revealed: false,
             popup_revisions: 0,
             accessibility_pacer: Default::default(),
+            #[cfg(test)]
+            accessibility_read: None,
             #[cfg(target_os = "linux")]
             primary_revision: 0,
             native_cursor: None,
@@ -2790,22 +2795,23 @@ impl Host {
         }
         if let (Some(adapter), Some(_)) = (&mut self.adapter, &self.window) {
             let ui = &self.context.ui;
-            adapter.update_if_active(|| {
+            let (tree, scale) = (&mut self.tree, self.scale_factor);
+            let title = &self.options.title;
+            let update = || {
                 let (scene, semantics) = (ui.scene.borrow(), ui.semantics.borrow());
-                let (focused, title) = (ui.input.focused(), &self.options.title);
+                let focused = ui.input.focused();
                 match full {
-                    true => self
-                        .tree
-                        .update(&scene, &semantics, focused, title, self.scale_factor),
-                    false => self.tree.update_names(
-                        &scene,
-                        &semantics,
-                        focused,
-                        title,
-                        self.scale_factor,
-                    ),
+                    true => tree.update(&scene, &semantics, focused, title, scale),
+                    false => tree.update_names(&scene, &semantics, focused, title, scale),
                 }
-            });
+            };
+            #[cfg(test)]
+            match &mut self.accessibility_read {
+                Some(read) => read.extend(std::iter::once_with(update)),
+                None => adapter.update_if_active(update),
+            }
+            #[cfg(not(test))]
+            adapter.update_if_active(update);
         }
         // Pages focus entered send what they held, after the focus above.
         #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
@@ -11446,6 +11452,142 @@ mod tests {
             40. + step
         );
         assert_eq!(probe.clicks, 1, "the pointer tape pressed the button once");
+    }
+
+    /// A geometry change held for pacing falls due in the event loop's turn
+    /// after a handler unmounted part of the window, before the frame that
+    /// shows it: the client is sent the tree without it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires an owned X11 display and GPU; run alone with --test-threads=1"]
+    fn a_held_accessibility_update_due_before_the_frame_drops_what_unmounted() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        use zgx::compose::prelude::*;
+        struct Probe {
+            factory: WindowFactory,
+            completed: bool,
+        }
+        impl ApplicationHandler<Event> for Probe {
+            fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+                let handle = self.factory.allocate();
+                let mut host = Host::new(WindowOptions::default(), handle, self.factory.clone());
+                let ui = &mut host.context.ui;
+                ui.set_assistive_technology(true);
+                let (open, wide) = (ui.signal(true), ui.signal(20.));
+                let (shown, name, width) = (open.clone(), open.clone(), wide.clone());
+                let _view = ui.mount(
+                    row().w(400.).h(300.).children([
+                        switch_or_none(
+                            move || shown.get(),
+                            move |open, _| {
+                                let width = width.clone();
+                                open.then(|| {
+                                    div()
+                                        .w(200.)
+                                        .h(300.)
+                                        .role(Role::Group)
+                                        .accessible_label("Sidebar")
+                                        .child(div().h(20.).reactive_style(move || {
+                                            Styles::new().w(width.get()).bg(rgb(0x808080))
+                                        }))
+                                })
+                            },
+                        ),
+                        // What says the sidebar went, and enough beside it
+                        // that an update looks at what changed alone.
+                        column().children(
+                            std::iter::once(div().h(20.).role(Role::Group).accessible_label_when(
+                                move || {
+                                    match name.get() {
+                                        true => "Hide",
+                                        false => "Show",
+                                    }
+                                    .into()
+                                },
+                            ))
+                            .chain((0..10).map(|i| {
+                                div()
+                                    .h(20.)
+                                    .role(Role::Group)
+                                    .accessible_label(format!("Row {i}"))
+                            })),
+                        ),
+                    ]),
+                );
+                host.create_window(event_loop).unwrap();
+                host.accessibility_read = Some(Vec::new());
+                // Not mapped yet, as the loop begins: drawn all the same.
+                host.draw_hidden = true;
+                // The first tree, and quiet.
+                for _ in 0..3 {
+                    host.force = true;
+                    host.draw().unwrap();
+                    std::thread::sleep(crate::accessibility::GEOMETRY_EVERY);
+                    host.update().unwrap();
+                }
+                // One move goes out at once, and the next is held.
+                for width in [30., 40.] {
+                    wide.set(width);
+                    host.draw().unwrap();
+                }
+                let due = host.accessibility_pacer.deadline().expect("held");
+                let sent = host.accessibility_read.as_ref().unwrap().len();
+                // A handler closes the sidebar; its frame is yet to come as
+                // the held update falls due.
+                open.set(false);
+                std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+                host.update().unwrap();
+                let read = host.accessibility_read.as_ref().unwrap();
+                // The held update, sent before the turn went on to draw.
+                let held = read.get(sent).expect("the held update went out");
+                let sidebar = read[..sent]
+                    .iter()
+                    .flat_map(|update| &update.nodes)
+                    .find(|(_, node)| node.label() == Some("Sidebar"))
+                    .expect("told of the sidebar")
+                    .0;
+                let root = held.tree.as_ref().unwrap().root;
+                let window = held.nodes.iter().find(|(id, _)| *id == root);
+                assert!(
+                    window.is_some_and(|(_, node)| !node.children().contains(&sidebar)),
+                    "the window is told it no longer holds the sidebar"
+                );
+                self.completed = true;
+                host.suspend();
+                event_loop.exit();
+            }
+            fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        }
+        let event_loop = EventLoop::<Event>::with_user_event()
+            .with_x11()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let factory = WindowFactory {
+            fonts: Default::default(),
+            text_language: Default::default(),
+            file_routes: Default::default(),
+            application_id: None,
+            activation: Rc::default(),
+            menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
+            reserved: Rc::default(),
+            pending: Rc::new(RefCell::new(VecDeque::new())),
+            next: Rc::new(Cell::new(1)),
+            alive: Rc::new(Cell::new(true)),
+            clipboard: Rc::new(RefCell::new(None)),
+            gpu_contexts: Rc::new(RefCell::new(Vec::new())),
+            #[cfg(any(target_os = "macos", windows))]
+            early_gpu: Rc::default(),
+            proxy: event_loop.create_proxy(),
+            runtime: zgx::reactive::Runtime::new(),
+        };
+        let mut probe = Probe {
+            factory,
+            completed: false,
+        };
+        event_loop.run_app(&mut probe).unwrap();
+        assert!(probe.completed);
     }
 
     #[cfg(target_os = "linux")]
