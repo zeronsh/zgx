@@ -7517,7 +7517,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let vm = env.vm.clone();
                 let done = std::cell::RefCell::new(done);
                 let elapsed_cell = std::cell::Cell::new(0f64);
-                let began = crate::time::Instant::now();
+                // The interface's clock (`zgx::clock`): a window's is the
+                // wall clock; a test's or an offline render's, its own.
+                let began = zgx::clock::now();
                 let (speed_from, shown_from) = (
                     velocity.get(),
                     state
@@ -7540,7 +7542,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     // and `delay` is how long after the call it starts, as UIKit's do.
                     // (A test's clock runs ahead of it.)
                     elapsed_cell.set(
-                        (elapsed_cell.get() + dt_ms / 1000.).max(began.elapsed().as_secs_f64()),
+                        (elapsed_cell.get() + dt_ms / 1000.)
+                            .max(zgx::clock::now().duration_since(began).as_secs_f64()),
                     );
                     // Where the spring is at this time, whatever the frames: the same
                     // curve on any display, and through a late one.
