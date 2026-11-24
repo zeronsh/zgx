@@ -755,6 +755,42 @@ impl Host<'_> {
         };
         (!at.is_null()).then_some(Shared(at))
     }
+    /// Shows `pixels` as the image `host:<name>` (`ui.image { src =
+    /// "host:words.cover" }`, `bg_image`), replacing what was there: its
+    /// bytes become the image's, not copied. `name` is `<module>.<name>`.
+    /// An image a module sets goes with its host, or as the module is
+    /// loaded into it again. An error saying why if `name` isn't so, or
+    /// the host is gone.
+    pub fn image(&self, name: &str, pixels: ImageBuffer) -> Result<(), Failed> {
+        let pixels = std::mem::ManuallyDrop::new(pixels);
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: A host handle, held; the buffer given (taken either way);
+        // `out` written only failing.
+        unsafe {
+            if (api().image_set)(
+                self.handle(),
+                name.as_ptr(),
+                name.len(),
+                pixels.width,
+                pixels.height,
+                pixels.handle,
+                out.as_mut_ptr(),
+            ) == abi::DONE
+            {
+                return Ok(());
+            }
+            let why = Value::owned(out.assume_init());
+            Err(Failed(
+                why.get().str().unwrap_or("couldn't be set").to_owned(),
+            ))
+        }
+    }
+    /// Removes the image `host:<name>` this module set: whether there was
+    /// one.
+    pub fn remove_image(&self, name: &str) -> bool {
+        // SAFETY: A host handle, held.
+        unsafe { (api().image_remove)(self.handle(), name.as_ptr(), name.len()) != 0 }
+    }
     /// # Safety
     /// `fire`, `user` and `free` are a timer's, by [`abi::Fire`].
     unsafe fn timer(
@@ -1311,6 +1347,65 @@ fn free_box_of<F>(_: *mut F) -> abi::Free {
         drop(unsafe { Box::from_raw(user as *mut F) });
     }
     free::<F>
+}
+
+/// An image's pixels, written by the module on any thread and given to
+/// [`Host::image`]: `width` by `height` RGBA8, straight alpha, rows top to
+/// bottom with no gap between them (a row is `width * 4` bytes). Its bytes
+/// are allocated as what the image keeps, so showing it copies nothing.
+/// It starts all 0 (transparent).
+pub struct ImageBuffer {
+    handle: *mut c_void,
+    bytes: *mut u8,
+    width: u32,
+    height: u32,
+}
+// SAFETY: Its bytes are its own until it is given up: written from one
+// thread at a time (`&mut self`), from any.
+unsafe impl Send for ImageBuffer {}
+impl ImageBuffer {
+    /// A buffer for a `width` by `height` picture; `None` if either is 0 or
+    /// it would be larger than an image can be.
+    pub fn new(width: u32, height: u32) -> Option<ImageBuffer> {
+        let len = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        let mut bytes = std::ptr::null_mut();
+        // SAFETY: `bytes` takes where its bytes are.
+        let handle = unsafe { (api().image_buffer)(len, &mut bytes) };
+        (!handle.is_null()).then_some(ImageBuffer {
+            handle,
+            bytes,
+            width,
+            height,
+        })
+    }
+    /// Its width, in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    /// Its height, in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    /// Its bytes, to write: `width * height * 4`, a pixel's red, green, blue
+    /// and alpha in turn.
+    pub fn pixels(&mut self) -> &mut [u8] {
+        // SAFETY: Its own `width * height * 4` bytes, all initialized,
+        // borrowed as it is.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.bytes,
+                self.width as usize * self.height as usize * 4,
+            )
+        }
+    }
+}
+impl Drop for ImageBuffer {
+    fn drop(&mut self) {
+        // SAFETY: Its handle, not given to `image_set`: let go of once.
+        unsafe { (api().image_drop)(self.handle) };
+    }
 }
 
 /// Why a call failed: what a function or an action returns as `Err`, raised

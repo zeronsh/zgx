@@ -173,6 +173,10 @@ static API: Api = Api {
     promise_host,
     shared_upsert,
     shared_remove,
+    image_buffer,
+    image_set,
+    image_drop,
+    image_remove,
 };
 
 /// A registration's `user`, freed with the host's hold on it.
@@ -1054,6 +1058,146 @@ unsafe extern "C" fn shared_release(shared: *mut c_void) {
     drop(unsafe { Box::from_raw(shared as *mut SharedHandle) });
 }
 
+/// An image's pixels as a module writes them (`Api::image_buffer`): made
+/// as the `Arc` the image shares, so setting it copies nothing.
+type Buffer = Arc<[u8]>;
+thread_local! {
+    /// The images modules set on this thread's hosts, by name: what goes
+    /// as a module is loaded into its host again (the host's own go with
+    /// it). Made the first time one is set.
+    static IMAGES: RefCell<Vec<(Weak<crate::Inner>, std::collections::HashSet<String>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+/// The images a module named `module` set on `host`, removed: as it is
+/// loaded into it again.
+fn remove_images_of(host: &ScriptHost, module: &str) {
+    let gone: Vec<String> = IMAGES.with_borrow_mut(|all| {
+        all.retain(|(host, _)| host.strong_count() > 0);
+        let Some((_, names)) = all
+            .iter_mut()
+            .find(|(of, _)| std::ptr::eq(of.as_ptr(), Rc::as_ptr(&host.0)))
+        else {
+            return Vec::new();
+        };
+        let of = |name: &String| name.split_once('.').is_some_and(|(m, _)| m == module);
+        let gone = names.iter().filter(|n| of(n)).cloned().collect();
+        names.retain(|n| !of(n));
+        gone
+    });
+    for name in gone {
+        host.image(&name, None);
+    }
+}
+unsafe extern "C" fn image_buffer(len: usize, data: *mut *mut u8) -> *mut c_void {
+    if len == 0 || len > isize::MAX as usize / 2 {
+        return std::ptr::null_mut();
+    }
+    // Zeroed as it is allocated (a large one's pages come zeroed), so a
+    // module that writes some of it leaves nothing undefined.
+    // SAFETY: All 0, so every byte a `u8`.
+    let mut pixels: Box<Buffer> =
+        Box::new(unsafe { Arc::<[u8]>::new_zeroed_slice(len).assume_init() });
+    let bytes = Arc::get_mut(&mut pixels)
+        .expect("made just now")
+        .as_mut_ptr();
+    // SAFETY: `data` takes where its bytes are.
+    unsafe { data.write(bytes) };
+    Box::into_raw(pixels) as *mut c_void
+}
+unsafe extern "C" fn image_drop(buffer: *mut c_void) {
+    // SAFETY: A buffer `image_buffer` made, let go of once.
+    drop(unsafe { Box::from_raw(buffer as *mut Buffer) });
+}
+unsafe extern "C" fn image_set(
+    host: *mut c_void,
+    name: *const u8,
+    len: usize,
+    width: u32,
+    height: u32,
+    buffer: *mut c_void,
+    out: *mut Raw,
+) -> u32 {
+    // SAFETY: A buffer `image_buffer` made, taken; the module's `&str`;
+    // a host handle, held.
+    let (pixels, name, mailbox) = unsafe {
+        (
+            *Box::from_raw(buffer as *mut Buffer),
+            name_of(name, len),
+            &*(host as *const Mailbox),
+        )
+    };
+    let failed = |why: String| {
+        // SAFETY: `out` takes why.
+        unsafe { out.cast::<Value>().write(Value::from(why.as_str())) };
+        abi::FAILED
+    };
+    if mailbox.thread != std::thread::current().id() {
+        // (`nil`: no value is made off the interface's thread.)
+        // SAFETY: `out` takes it.
+        unsafe { out.cast::<Value>().write(Value::Nil) };
+        return abi::FAILED;
+    }
+    if !name
+        .split_once('.')
+        .is_some_and(|(module, rest)| !module.is_empty() && !rest.is_empty())
+    {
+        return failed(format!(
+            "an image a module sets is named `<module>.<name>`, not `{name}`"
+        ));
+    }
+    let wanted = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4));
+    if width == 0 || height == 0 {
+        return failed(format!(
+            "`{name}` is {width}×{height}: an image is at least 1×1"
+        ));
+    }
+    if wanted != Some(pixels.len()) {
+        return failed(format!(
+            "`{name}` is {width}×{height}, so {} bytes of RGBA8 (a row {} bytes), not {}",
+            wanted.map_or("too many".into(), |n| n.to_string()),
+            width as usize * 4,
+            pixels.len()
+        ));
+    }
+    // SAFETY: On the handle's thread, as checked.
+    let Some(host) = (unsafe { host_of(host) }) else {
+        return failed(format!("`{name}` wasn't set: its host is gone"));
+    };
+    let image = match zgx::image::ImageData::new(width, height, pixels) {
+        Ok(image) => image,
+        Err(why) => return failed(format!("`{name}`: {why}")),
+    };
+    IMAGES.with_borrow_mut(|all| {
+        all.retain(|(host, _)| host.strong_count() > 0);
+        match all
+            .iter_mut()
+            .find(|(of, _)| std::ptr::eq(of.as_ptr(), Rc::as_ptr(&host.0)))
+        {
+            Some((_, names)) => drop(names.insert(name.clone())),
+            None => all.push((Rc::downgrade(&host.0), [name.clone()].into())),
+        }
+    });
+    host.image(&name, Some(Arc::new(image)));
+    abi::DONE
+}
+unsafe extern "C" fn image_remove(host: *mut c_void, name: *const u8, len: usize) -> u32 {
+    // SAFETY: A host handle, held; the module's `&str`.
+    let (Some(host), name) = (unsafe { (host_of(host), name_of(name, len)) }) else {
+        return 0;
+    };
+    let was = IMAGES.with_borrow_mut(|all| {
+        all.iter_mut()
+            .find(|(of, _)| std::ptr::eq(of.as_ptr(), Rc::as_ptr(&host.0)))
+            .is_some_and(|(_, names)| names.remove(&name))
+    });
+    if was {
+        host.image(&name, None);
+    }
+    u32::from(was)
+}
+
 /// A module's promise, as a script holds it (`ui.call`): settled by the
 /// module (`Api::settle`) or rejected as it is let go of unsettled.
 #[derive(Default)]
@@ -1481,6 +1625,8 @@ impl ScriptHost {
         manifest: &str,
         said: Manifest,
     ) -> Result<(), String> {
+        // Loaded into this host again: what it set before goes first.
+        remove_images_of(self, &said.name);
         let loading = Loading {
             pending: RefCell::default(),
             host: self.clone(),

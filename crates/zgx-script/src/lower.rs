@@ -315,6 +315,13 @@ impl Assets {
         let version = self.hosted(&src, runtime);
         version.update(|v| *v = v.wrapping_add(1));
     }
+    /// The image `host:<name>` is now, if the host (or a module) set one.
+    pub(crate) fn hosted_image(&self, name: &str) -> Option<Arc<ImageData>> {
+        self.images
+            .borrow()
+            .get(&format!("host:{name}"))
+            .map(|cached| cached.value.clone())
+    }
     /// The host sets (or, with None, clears) the frame `host:<name>`
     /// shows as it is.
     #[cfg(target_os = "macos")]

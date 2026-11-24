@@ -890,6 +890,10 @@ fn the_c_header_is_the_rust_interface() {
         ("zgx_api.promise_host", offset_of!(Api, promise_host)),
         ("zgx_api.shared_upsert", offset_of!(Api, shared_upsert)),
         ("zgx_api.shared_remove", offset_of!(Api, shared_remove)),
+        ("zgx_api.image_buffer", offset_of!(Api, image_buffer)),
+        ("zgx_api.image_set", offset_of!(Api, image_set)),
+        ("zgx_api.image_drop", offset_of!(Api, image_drop)),
+        ("zgx_api.image_remove", offset_of!(Api, image_remove)),
         ("sizeof(zgx_registrar)", size_of::<Registrar>()),
         ("zgx_registrar.size", offset_of!(Registrar, size)),
         ("zgx_registrar.host", offset_of!(Registrar, host)),
@@ -941,7 +945,7 @@ fn the_c_header_is_the_rust_interface() {
 fn a_module_written_in_c_answers_scripts() {
     use zgx_module::abi;
     let dir = c_out("words");
-    let json = r#"{"zgx_module":1,"abi":1,"name":"cwords","version":"1.0.0","records":{"Row":{"id":"string","n":{"optional":"number"}}},"functions":{"cwords.count":{"args":[["text","string"]],"returns":"number"},"cwords.total":{"args":[["numbers",{"list":"number"}],["scale",{"optional":"number"}]],"returns":"number"},"cwords.describe":{"args":[["row",{"record":"Row"}]],"returns":{"map":"any"}},"cwords.kept":{"args":[],"returns":"any"}},"actions":{"cwords.keep":{"args":[["value","any"]]}}}"#;
+    let json = r#"{"zgx_module":1,"abi":1,"name":"cwords","version":"1.0.0","records":{"Row":{"id":"string","n":{"optional":"number"}}},"functions":{"cwords.count":{"args":[["text","string"]],"returns":"number"},"cwords.total":{"args":[["numbers",{"list":"number"}],["scale",{"optional":"number"}]],"returns":"number"},"cwords.describe":{"args":[["row",{"record":"Row"}]],"returns":{"map":"any"}},"cwords.kept":{"args":[],"returns":"any"},"cwords.dot":{"args":[["width","number"],["height","number"],["len","number"]],"returns":"string"},"cwords.dot_off_thread":{"args":[],"returns":"string"}},"actions":{"cwords.keep":{"args":[["value","any"]]}}}"#;
     // (What a tool of the author's would write: the manifest's bytes as a C
     // array.)
     let bytes: Vec<String> = abi::manifest_bytes(json)
@@ -958,7 +962,7 @@ fn a_module_written_in_c_answers_scripts() {
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     ));
-    compiled("words.c", &library, &["-shared", "-fPIC"]);
+    compiled("words.c", &library, &["-shared", "-fPIC", "-pthread"]);
     let load = {
         let library = library.clone();
         move |host: &ScriptHost| {
@@ -983,6 +987,7 @@ fn a_module_written_in_c_answers_scripts() {
         local held = { "kept", "by C" }
         ui.invoke("cwords.keep", held)
         local failed = select(2, pcall(words.count, 5))
+        local short = select(2, pcall(words.dot, 2, 2, 15))
         return ui.column {
             ui.text { id = "count", show(words.count("a module  in C")) },
             ui.text { id = "name", show(ui.call_sync("cwords.count", "by name")) },
@@ -990,6 +995,8 @@ fn a_module_written_in_c_answers_scripts() {
             ui.text { id = "describe", show(words.describe({ id = "r1", n = 41, zzz = true })) },
             ui.text { id = "kept", show(words.kept()) },
             ui.text { id = "failed", (string.gsub(string.match(tostring(failed), "[^\n]*"), "[{}]", "")) },
+            ui.text { id = "short", (string.gsub(string.match(tostring(short), "[^\n]*"), "[{}]", "")) },
+            ui.text { id = "dot", words.dot(2, 2, 16) },
         }
     "#;
     let mut app = TestApp::new(move |runtime| {
@@ -1009,7 +1016,42 @@ fn a_module_written_in_c_answers_scripts() {
         "{}",
         app.text("failed")
     );
+    // An image by name, its bytes the module's: one of another length is
+    // refused, saying what it should be.
+    assert_eq!(app.text("dot"), "set");
+    let dot = app.host.hosted_image("cwords.dot").expect("set");
+    assert_eq!((dot.width(), dot.height()), (2, 2));
+    assert!(dot.pixels().iter().all(|b| *b == 0x7f));
+    assert!(
+        app.text("short")
+            .ends_with("`cwords.dot` is 2×2, so 16 bytes of RGBA8 (a row 8 bytes), not 15"),
+        "{}",
+        app.text("short")
+    );
+    // Set from another thread: refused, `out` left nil, and nothing changes.
+    let off = app
+        .host
+        .registered_function("cwords.dot_off_thread")
+        .unwrap()(Value::Nil)
+    .unwrap();
+    assert!(
+        matches!(&off, Value::Str(s) if &**s == "refused"),
+        "{off:?}"
+    );
+    let still = app.host.hosted_image("cwords.dot").expect("still there");
+    assert!(std::sync::Arc::ptr_eq(&still, &dot), "the same image");
+    drop((still, dot));
+    // Set once its host is gone: refused, saying so, the buffer freed and
+    // nothing to crash.
     drop(app);
+    // SAFETY: The library this test built and loaded, still loaded; its
+    // own exported function, by the type it is written with.
+    unsafe {
+        let library = libloading::Library::new(&library).unwrap();
+        let past: libloading::Symbol<unsafe extern "C" fn() -> u32> =
+            library.get(b"cwords_dot_past_host").unwrap();
+        assert_eq!(past(), 1, "refused: its host is gone");
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1502,7 +1544,7 @@ mod reach {
         thread::ThreadId,
         time::Duration,
     };
-    use zgx_module::{Host, Observer, Ref, State, Timer, Ui, Value};
+    use zgx_module::{Host, ImageBuffer, Observer, Ref, State, Timer, Ui, Value};
 
     /// What the module saw, on the interface's thread.
     #[derive(Default)]
@@ -1671,6 +1713,38 @@ mod reach {
             .unwrap();
             Value::NIL
         });
+        // A `{ name, w, h, shade }` picture written on a thread, set by a
+        // job it posts: what setting it said, and where its bytes were.
+        let painter = host.ui();
+        host.function("reach.paint", move |arg| {
+            let name = arg
+                .field("name")
+                .and_then(|n| n.str())
+                .unwrap_or("")
+                .to_owned();
+            let num = |k: &str| arg.field(k).and_then(|n| n.num()).unwrap_or(0.);
+            let (w, h, shade) = (num("w") as u32, num("h") as u32, num("shade") as u8);
+            let ui = painter.clone();
+            std::thread::spawn(move || {
+                let mut pixels = ImageBuffer::new(w, h).unwrap();
+                pixels.pixels().fill(shade);
+                *PAINTED.lock().unwrap() = pixels.pixels().as_ptr() as usize;
+                ui.post(move |host| {
+                    *IMAGE_SAID.lock().unwrap() =
+                        Some(host.image(&name, pixels).err().map(|f| f.0));
+                });
+            })
+            .join()
+            .unwrap();
+            Value::NIL
+        });
+        // `name`'s image removed, by a job: whether there was one.
+        let remover = host.ui();
+        host.function("reach.unpaint", move |name| {
+            let name = name.str().unwrap_or("").to_owned();
+            remover.post(move |host| *UNPAINTED.lock().unwrap() = Some(host.remove_image(&name)));
+            Value::NIL
+        });
         // A row with no `id`: refused, saying why.
         let unkeyed = host.shared("feed", Value::NIL).unwrap();
         host.function("reach.patch_unkeyed", move |_| {
@@ -1740,6 +1814,13 @@ mod reach {
             Value::NIL
         });
     });
+
+    /// Where the last picture `reach.paint` wrote was, and what setting
+    /// it said (`Some(None)`: set).
+    pub static PAINTED: Mutex<usize> = Mutex::new(0);
+    pub static IMAGE_SAID: Mutex<Option<Option<String>>> = Mutex::new(None);
+    /// Whether `reach.unpaint` removed one.
+    pub static UNPAINTED: Mutex<Option<bool>> = Mutex::new(None);
 
     /// Whether `post` from a thread after the host went was refused, with
     /// its job dropped unrun.
@@ -1980,6 +2061,95 @@ fn a_module_patches_a_shared_list_by_key() {
         matches!(&refused, Value::Str(why) if &**why == "row 1 has no string `id`"),
         "{refused:?}"
     );
+}
+
+/// The tests that paint, one at a time: they read what the module's
+/// statics say.
+static PAINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn paint(app: &TestApp, name: &str, w: f64, h: f64, shade: f64) -> Option<String> {
+    *reach::IMAGE_SAID.lock().unwrap() = None;
+    let arg = Value::record([
+        ("name", Value::from(name)),
+        ("w", Value::Num(w)),
+        ("h", Value::Num(h)),
+        ("shade", Value::Num(shade)),
+    ]);
+    called(app, "reach.paint", arg);
+    app.settle();
+    reach::IMAGE_SAID
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the job ran")
+}
+
+/// A picture a module's thread writes shows by name, its bytes the very
+/// ones written (not copied); a name not the module's is refused; removed,
+/// it goes.
+#[test]
+fn a_modules_picture_shows_by_name_uncopied() {
+    let _one = PAINTING.lock().unwrap_or_else(|e| e.into_inner());
+    let app = reaching();
+    assert_eq!(paint(&app, "reach.cover", 3., 2., 200.), None);
+    let cover = app.host.hosted_image("reach.cover").expect("set");
+    assert_eq!((cover.width(), cover.height()), (3, 2));
+    assert_eq!(cover.pixels().len(), 24);
+    assert!(cover.pixels().iter().all(|b| *b == 200));
+    assert_eq!(
+        cover.pixels().as_ptr() as usize,
+        *reach::PAINTED.lock().unwrap(),
+        "not copied"
+    );
+    let refused = paint(&app, "cover", 1., 1., 0.).expect("refused");
+    assert_eq!(
+        refused,
+        "an image a module sets is named `<module>.<name>`, not `cover`"
+    );
+    assert!(app.host.hosted_image("cover").is_none());
+    let unpainted = |app: &TestApp, name: &str| {
+        called(app, "reach.unpaint", Value::from(name));
+        app.settle();
+        reach::UNPAINTED
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the job ran")
+    };
+    assert!(unpainted(&app, "reach.cover"));
+    assert!(app.host.hosted_image("reach.cover").is_none());
+    assert!(!unpainted(&app, "reach.cover"), "gone already");
+}
+
+/// What a module sets goes with its host; loaded into its host again, the
+/// images its last load set go (the host's own stay).
+#[test]
+fn a_modules_pictures_go_with_its_host_and_its_reload() {
+    let _one = PAINTING.lock().unwrap_or_else(|e| e.into_inner());
+    let app = reaching();
+    assert_eq!(paint(&app, "reach.cover", 2., 2., 9.), None);
+    let held = std::sync::Arc::downgrade(&app.host.hosted_image("reach.cover").unwrap());
+    app.host.image(
+        "art",
+        Some(std::sync::Arc::new(
+            zgx::image::ImageData::new(1, 1, vec![1; 4]).unwrap(),
+        )),
+    );
+    // SAFETY: The test's own `register!` entry, loaded again.
+    unsafe {
+        app.host
+            .enter_module(reach::zgx_module_v1, &reach::zgx_module_manifest)
+    }
+    .unwrap();
+    assert!(
+        app.host.hosted_image("reach.cover").is_none(),
+        "its last load's"
+    );
+    assert!(held.upgrade().is_none(), "freed");
+    assert!(app.host.hosted_image("art").is_some(), "the host's own");
+    assert_eq!(paint(&app, "reach.cover", 2., 2., 9.), None);
+    let held = std::sync::Arc::downgrade(&app.host.hosted_image("reach.cover").unwrap());
+    drop(app);
+    assert!(held.upgrade().is_none(), "gone with its host");
 }
 
 /// Text added to a shared string shows; added to a list, it is refused.

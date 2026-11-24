@@ -2865,6 +2865,12 @@ impl ScriptHost {
     pub fn image(&self, name: &str, image: Option<std::sync::Arc<zgx::image::ImageData>>) {
         self.0.assets.set_hosted(name, image, &self.0.runtime);
     }
+    /// The image `host:<name>` shows now ([`ScriptHost::image`]'s, or a
+    /// native module's), if any.
+    #[doc(hidden)]
+    pub fn hosted_image(&self, name: &str) -> Option<std::sync::Arc<zgx::image::ImageData>> {
+        self.0.assets.hosted_image(name)
+    }
     /// A frame the app shows as it is (a video's, as its decoder or
     /// renderer made it), for `ui.image { src = "host:<name>" }`: drawn
     /// from its own storage, with no bytes read back or uploaded, and
