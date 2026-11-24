@@ -19,7 +19,7 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
+    GroupFrame, Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
     SpanHighlighter, SpanStyle, SpanText,
 };
 
@@ -689,6 +689,9 @@ struct CodeHint {
     /// layers under and over the lines' (`LineMark::over_text`), and their
     /// nodes. Made when the first mark shows.
     marks_drawn: RefCell<Option<Box<MarksDrawn>>>,
+    /// Its scroll groups' layers (`LineInset::scroll_group`) and their
+    /// scrollbar (`View::group_scrollbar`), made as the first shows.
+    groups_drawn: RefCell<Option<Box<GroupsDrawn>>>,
     /// Its scrollbar (`View::scrollbar`), if it has one.
     scrollbar: RefCell<Option<Box<EditorScrollbar>>>,
     /// The lines last given assistive technology (`Semantics::set_text_lines`).
@@ -814,12 +817,44 @@ impl EditorHint {
             theme_watch: Cell::default(),
         }
     }
+    /// Tell its scroll groups' scrollbar what the last draw showed (after
+    /// the draw, as `publish_scroll`): nothing while no group shown moved.
+    #[cold]
+    #[inline(never)]
+    fn publish_group_bar(&self, code: &CodeHint) {
+        let (offset, size, extent, shown) = {
+            let drawn = code.groups_drawn.borrow();
+            let Some(bar) = drawn.as_ref().and_then(|drawn| drawn.bar.as_ref()) else {
+                return;
+            };
+            (
+                bar.offset.clone(),
+                bar.size.clone(),
+                bar.extent.clone(),
+                bar.shown.get(),
+            )
+        };
+        match shown {
+            Some((_, frame, content, at)) => {
+                size.set(frame);
+                extent.set(content);
+                offset.set(at);
+            }
+            // Nothing to scroll: no bar.
+            None => {
+                extent.set(0.);
+            }
+        }
+    }
     /// Tell its scrollbar what the last draw scrolled (after the draw:
     /// nothing is borrowed, and what follows the signals may draw).
     fn publish_scroll(&self, scene: &RefCell<Scene>) {
         let Some(code) = self.code() else {
             return;
         };
+        if code.groups_drawn.borrow().is_some() {
+            self.publish_group_bar(code);
+        }
         let (offset, size, extent, drawn) = {
             let bar = code.scrollbar.borrow();
             let Some(bar) = bar.as_ref() else {
@@ -1731,6 +1766,69 @@ impl EditorHandle {
         });
         self.refresh();
     }
+    /// Show its scroll groups' scrollbar (`View::group_scrollbar`): the one
+    /// scroll views show, across the bottom of the group that moved last (a
+    /// code block's), over its lines; its drag scrolls the group.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn mount_group_scrollbar(&self, ui: &mut Ui) {
+        let mounted = (self.hint.code()).is_some_and(|code| {
+            (code.groups_drawn.borrow().as_ref()).is_some_and(|d| d.bar.is_some())
+        });
+        if !self.multiline || mounted {
+            return;
+        }
+        let Some(viewport) = self.scene.borrow().parent(self.text) else {
+            return;
+        };
+        let mut style = fixed(0., 0.);
+        style.absolute = true;
+        let holder = ui.container(viewport, Layout::Overlay, style);
+        let (offset, size, extent) = (
+            ui.signal(0_f32),
+            ui.signal((0_f32, 0_f32)),
+            ui.signal(0_f32),
+        );
+        let bar = GroupBar {
+            offset: offset.clone(),
+            size: size.clone(),
+            extent: extent.clone(),
+            holder,
+            shown: Cell::new(None),
+        };
+        self.hint
+            .code_made()
+            .groups_drawn
+            .borrow_mut()
+            .get_or_insert_default()
+            .bar = Some(Box::new(bar));
+        crate::compose_scrollbar::mount(ui, holder, offset.clone(), size, extent, true);
+        // The bar's drag, its track's press and its keys write the offset:
+        // the group shown follows.
+        let (editor, runtime) = (self.clone(), ui.runtime.clone());
+        ui.bind(self.node, move || {
+            let wanted = offset.get();
+            runtime.untracked(|| {
+                let group = (editor.hint.code())
+                    .and_then(|code| {
+                        code.groups_drawn
+                            .borrow()
+                            .as_ref()?
+                            .bar
+                            .as_ref()?
+                            .shown
+                            .get()
+                    })
+                    .map(|(group, ..)| group);
+                if let Some(group) = group
+                    && editor.group_scroll(group) != wanted
+                {
+                    editor.set_group_scroll(group, wanted);
+                }
+            });
+        });
+        self.refresh();
+    }
     /// Keep a wheel gesture that starts over it at its edges, as CSS's
     /// `overscroll-behavior: contain`: the scroll views around it don't
     /// take what it can't scroll (`View::overscroll_contain`).
@@ -1827,6 +1925,83 @@ impl EditorHandle {
             return;
         }
         self.hint.line_cache().set_marks(marks);
+        self.refresh();
+    }
+    /// Scroll the lines of scroll group `group` (`LineInset::scroll_group`)
+    /// sideways to `x`, clamped to 0 through how far its lines reach past
+    /// its frame (`group_extent`). Nothing is laid out again: its lines move
+    /// as they are. Its listener hears of a move (`on_group_scroll`).
+    #[doc(hidden)]
+    pub fn set_group_scroll(&self, group: u32, x: f32) {
+        if !self.multiline {
+            return;
+        }
+        let lines = self.hint.line_cache();
+        let limit = lines
+            .last_layout()
+            .and_then(|layout| layout.group(group))
+            .map_or(f32::INFINITY, |frame| frame.limit());
+        let x = if x.is_finite() {
+            x.clamp(0., limit)
+        } else {
+            0.
+        };
+        if lines.set_group_scroll(group, x) {
+            self.hint.hold.set(true);
+            self.refresh();
+        }
+    }
+    /// How far scroll group `group` is scrolled sideways (`set_group_scroll`).
+    #[doc(hidden)]
+    pub fn group_scroll(&self, group: u32) -> f32 {
+        match self
+            .hint
+            .code()
+            .and_then(|code| code.lines.borrow().clone())
+        {
+            Some(lines) => lines.group_scroll(group),
+            None => 0.,
+        }
+    }
+    /// Scroll group `group`'s width shown and its lines' width, from its
+    /// frame's left (for a scrollbar the app draws), once laid out; none
+    /// before, or with no line in it.
+    #[doc(hidden)]
+    pub fn group_extent(&self, group: u32) -> Option<(f32, f32)> {
+        let lines = self.hint.code()?.lines.borrow().clone()?;
+        let frame = lines.last_layout()?.group(group)?;
+        Some((frame.view, frame.content))
+    }
+    /// Be told each time a scroll group moves (`set_group_scroll`, a
+    /// sideways wheel over it, a caret revealed in it): its id and offset.
+    #[doc(hidden)]
+    pub fn on_group_scroll(&self, listener: impl Fn(u32, f32) + 'static) {
+        if !self.multiline {
+            return;
+        }
+        self.hint
+            .line_cache()
+            .on_group_scroll(Some(Rc::new(listener)));
+    }
+    /// Set scroll group `group`'s frame (`GroupFrame`): where it starts, how
+    /// wide it shows and how far its lines reach, each part `None` as its
+    /// lines say. It applies at once, laying nothing out again, and an
+    /// offset past its new limit is brought back to it (its listener hears).
+    #[doc(hidden)]
+    pub fn set_group_frame(&self, group: u32, frame: GroupFrame) {
+        if !self.multiline {
+            return;
+        }
+        let lines = self.hint.line_cache();
+        lines.set_group_frame(group, frame);
+        if let Some(limit) = lines
+            .last_layout()
+            .and_then(|layout| layout.group(group))
+            .map(|frame| frame.limit())
+            && lines.group_scroll(group) > limit
+        {
+            lines.set_group_scroll(group, limit);
+        }
         self.refresh();
     }
     /// The caret's colour (`None`: the text's, as by default) and width in
@@ -7651,7 +7826,18 @@ impl Ui {
                         affinity: TextAffinity::After,
                     }
                 };
-            let caret_rect = layout.caret_position(caret_position);
+            let mut caret_rect = layout.caret_position(caret_position);
+            // In a scroll group (`LineInset::scroll_group`): the group moves
+            // to show a caret moved into what its frame cuts, and one
+            // scrolled out of it is hidden. Out of line: one without groups
+            // asks one flag.
+            let mut caret_clipped = false;
+            if let Some(lines) = long_lines.as_ref().filter(|lines| lines.grouped()) {
+                let reveal =
+                    *focus.borrow() && !draw_hint.hold.get() && draw_gesture.mode.get().is_none();
+                (caret_rect, caret_clipped) =
+                    caret_in_group(lines, caret_position, caret_rect, reveal);
+            }
             // At a gap (`EditorHandle::set_gaps`): a short bar along it;
             // else a hair inside or outside a span's edge (`set_caret_edges`).
             let gap_at = draw_hint.gap().and_then(|gap| gap.at.get());
@@ -7866,7 +8052,8 @@ impl Ui {
                             lines,
                             (&mut *pool, &mut free),
                             layer,
-                            shown_lines.clone(),
+                            (shown_lines.clone(), *scroll),
+                            code,
                             &draw_hint.line_cache(),
                             (color, size, &font),
                             (wrap_width, draw_wrap.get()),
@@ -7995,6 +8182,7 @@ impl Ui {
             // Untracked: a window's activity changing shows or hides the
             // caret itself (`caret_blink::window_active_changed`), no draw.
             let caret_shown = *focus.borrow()
+                && !caret_clipped
                 && draw_window
                     .upgrade()
                     .is_none_or(|storage| !storage.selection.borrow().inactive)
@@ -9322,8 +9510,38 @@ impl Ui {
                     }
                 }
                 InputEvent::Scroll {
-                    delta_x, delta_y, ..
+                    x,
+                    y,
+                    mut delta_x,
+                    mut delta_y,
                 } => {
+                    // Sideways over a scroll group's line (a code block's):
+                    // the group takes it, at its edges too, and the text
+                    // area what is left (a trackpad's motion down).
+                    let mut group_moved = false;
+                    // (Down alone, as most wheels move, asks nothing more.)
+                    if multiline
+                        && (delta_x != 0. || crate::input::mouse_wheel_shift() == Some(true))
+                        && let Some(code) = wheel_hint.code()
+                        && let Some(lines) = code.lines.borrow().as_ref()
+                        && lines.last_grouped()
+                    {
+                        let at = *scroll.borrow();
+                        let taken = wheel_group(lines, &scene, viewport, at, (x, y), (delta_x, delta_y));
+                        if let Some((moved, shifted)) = taken {
+                            if shifted {
+                                delta_y = 0.;
+                            } else {
+                                delta_x = 0.;
+                            }
+                            if moved {
+                                reveal_caret.hold.set(true);
+                                group_moved = true;
+                            }
+                            cx.prevent_default();
+                            cx.stop_propagation();
+                        }
+                    }
                     if delta_x.is_finite() && delta_y.is_finite() {
                         let mut offset = scroll.borrow_mut();
                         let previous = *offset;
@@ -9340,7 +9558,9 @@ impl Ui {
                                 cx.prevent_default();
                                 cx.stop_propagation();
                             }
-                            return;
+                            if !group_moved {
+                                return;
+                            }
                         }
                         drop(offset);
                         reveal_caret.hold.set(true);
@@ -10175,6 +10395,41 @@ fn in_viewport(s: &Scene, viewport: NodeId, x: f32, y: f32) -> (f32, f32) {
     s.point_in(viewport, x, y).unwrap_or((x, y))
 }
 
+/// A wheel at `point` (in the window) moving `delta` over a text area whose
+/// lines are in scroll groups, scrolled to `scroll`: if sideways over a
+/// group's line, inside its frame (a mouse wheel's motion down with Shift
+/// held counts as sideways), it moves the group. Whether it was taken, the
+/// group moved, and the motion was a shifted wheel's.
+#[cold]
+#[inline(never)]
+fn wheel_group(
+    lines: &crate::editor_lines::LineCache,
+    scene: &RefCell<Scene>,
+    viewport: NodeId,
+    scroll: (f32, f32),
+    (x, y): (f32, f32),
+    (delta_x, delta_y): (f32, f32),
+) -> Option<(bool, bool)> {
+    let shifted = delta_x == 0. && crate::input::mouse_wheel_shift() == Some(true);
+    let across = if shifted { delta_y } else { delta_x };
+    if !across.is_finite() || across == 0. {
+        return None;
+    }
+    let layout = lines.last_layout()?;
+    let (lx, ly) = {
+        let s = scene.borrow();
+        let bounds = s.bounds(viewport);
+        let (px, py) = in_viewport(&s, viewport, x, y);
+        (px - bounds.x + scroll.0, py - bounds.y + scroll.1)
+    };
+    let (group, frame) = layout.group_of(layout.line_at(ly))?;
+    if lx < frame.left || lx > frame.right() {
+        return None;
+    }
+    let now = lines.group_scroll(group);
+    let to = (now + across).clamp(0., frame.limit());
+    Some((to != now && lines.set_group_scroll(group, to), shifted))
+}
 /// What a macOS Control key does in an editor that no other key does.
 #[derive(Clone, Copy)]
 enum MacControl {
@@ -10489,9 +10744,31 @@ thread_local! {
 pub fn debug_editor_draws() -> u64 {
     EDITOR_DRAWS.get()
 }
-/// A text area's line nodes for the lines in view, each placed past its
-/// room (`set_line_insets`) in what its indent leaves; a hidden line
-/// (`LineInset::hidden`) has none. The draw's own loop, for an area with
+/// The caret at `rect` (`position`) in a text area with scroll groups: its
+/// line's group moved to show it if `reveal` and its frame cuts it (and the
+/// caret placed again), and whether it is scrolled out of the frame.
+#[cold]
+#[inline(never)]
+fn caret_in_group(
+    lines: &crate::editor_lines::LinesLayout,
+    position: TextPosition,
+    rect: Rect,
+    reveal: bool,
+) -> (Rect, bool) {
+    let i = lines.line_of(position.byte_offset);
+    let Some((group, frame)) = lines.group_of(i) else {
+        return (rect, false);
+    };
+    let mut rect = rect;
+    if reveal
+        && let Some((_, x)) = lines.reveal_in_group(i, rect)
+        && lines.set_group_scroll(group, x)
+    {
+        rect = lines.caret_position(position);
+    }
+    let clipped = rect.x < frame.left - 0.5 || rect.x > frame.right() + 0.5;
+    (rect, clipped)
+}
 /// A text area's line marks (`EditorHandle::set_line_marks`), drawn: two
 /// layers beside its lines' (under and over them), placed as that one is,
 /// and their nodes.
@@ -10520,6 +10797,10 @@ fn place_line_marks(
 ) {
     let mut under = Vec::new();
     let mut over = Vec::new();
+    // The groups that moved since the last draw (`place_groups`).
+    let moved: Vec<u32> = (code.groups_drawn.borrow().as_ref())
+        .map(|drawn| drawn.moved.clone())
+        .unwrap_or_default();
     if lines.has_marks() {
         for i in shown {
             let inset = lines.inset(i);
@@ -10528,6 +10809,7 @@ fn place_line_marks(
             }
             let top = lines.top(i) + inset.above;
             let tall = (lines.height(i) - inset.above).max(0.);
+            let group = lines.group_of(i);
             for mark in lines.marks(i) {
                 let width = if mark.width.is_finite() {
                     mark.width
@@ -10544,11 +10826,15 @@ fn place_line_marks(
                 } else {
                     mark.x
                 };
-                let rect = Rect::new(x, top + mark.y, width, height);
+                let mut rect = Rect::new(x, top + mark.y, width, height);
+                let mut placed = PlacedMark::default();
+                if let Some((id, frame)) = &group {
+                    placed = group_mark(lines, &mut rect, &mark, (*id, frame), &moved);
+                }
                 if mark.over_text {
-                    over.push((rect, mark));
+                    over.push((rect, mark, placed));
                 } else {
-                    under.push((rect, mark));
+                    under.push((rect, mark, placed));
                 }
             }
         }
@@ -10613,18 +10899,63 @@ fn place_line_marks(
         );
     }
 }
+/// How a mark of a scroll group's line shows (`group_mark`): what of it the
+/// group's frame cuts, and whether it repaints where it is (still as the
+/// group moved, where a copy of the lines' pixels would take it along).
+#[derive(Clone, Copy, Default)]
+struct PlacedMark {
+    clip: Option<crate::scene::ClipInset>,
+    repaint: bool,
+}
+/// Mark `mark` at `rect` of a line in scroll group `id` (its `frame`):
+/// moved by the group's offset and cut to its frame, unless pinned
+/// (`LineMark::pinned`). A pinned one with edges, corners, a label, or over
+/// the text, inside the frame of a group in `moved`, repaints.
+#[cold]
+#[inline(never)]
+fn group_mark(
+    lines: &crate::editor_lines::LinesLayout,
+    rect: &mut Rect,
+    mark: &LineMark,
+    (id, frame): (u32, &crate::editor_lines::Group),
+    moved: &[u32],
+) -> PlacedMark {
+    let (left, right) = (frame.left, frame.right());
+    if mark.pinned {
+        let inside = |x: f32| x > left && x < right;
+        let shown = rect.x < right && rect.x + rect.width > left;
+        let plain = !mark.over_text
+            && mark.radius <= 0.
+            && mark.border_width <= 0.
+            && mark.label.is_none()
+            && !inside(rect.x)
+            && !inside(rect.x + rect.width);
+        return PlacedMark {
+            clip: None,
+            repaint: shown && !plain && moved.contains(&id),
+        };
+    }
+    rect.x -= lines.group_scroll(id);
+    let width = rect.width.max(0.);
+    let cut_left = (left - rect.x).clamp(0., width);
+    let cut_right = (rect.x + width - right).clamp(0., width - cut_left);
+    PlacedMark {
+        clip: Some(crate::scene::ClipInset::px(0., cut_right, 0., cut_left)),
+        repaint: false,
+    }
+}
 /// `marks` drawn in `layer`'s `nodes`, made and let go as their count
 /// changes: a quad each, and a text node for each label.
 fn paint_line_marks(
     s: &mut Scene,
     layer: NodeId,
     nodes: &mut Vec<NodeId>,
-    marks: Vec<(Rect, LineMark)>,
+    marks: Vec<(Rect, LineMark, PlacedMark)>,
     font: &FontStyle,
 ) {
     let count: usize = marks
         .iter()
-        .map(|(_, m)| 1 + usize::from(m.label.is_some()))
+        .map(|(_, m, _)| 1 + usize::from(m.label.is_some()))
         .sum();
     while nodes.len() > count {
         s.remove(nodes.pop().expect("longer than count"));
@@ -10633,8 +10964,14 @@ fn paint_line_marks(
         nodes.push(s.append(layer, NodeKind::Rect(Color(0, 0, 0, 0)), Style::default()));
     }
     let mut ids = nodes.iter().copied();
-    for (rect, mark) in marks {
+    for (rect, mark, placed) in marks {
         let Some(id) = ids.next() else { return };
+        if placed.clip.is_some() || s.clip_inset(id).is_some() {
+            s.set_clip_inset(id, placed.clip);
+        }
+        if placed.repaint {
+            s.damage_still(id);
+        }
         let quad = crate::scene::QuadStyle {
             fill: mark.fill,
             radius: mark.radius,
@@ -10685,6 +11022,12 @@ fn paint_line_marks(
             }
             s.set_font(id, label_font);
             s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
+            if placed.clip.is_some() || s.clip_inset(id).is_some() {
+                s.set_clip_inset(id, placed.clip);
+            }
+            if placed.repaint {
+                s.damage_still(id);
+            }
             s.set_transform(
                 id,
                 Transform {
@@ -10695,7 +11038,13 @@ fn paint_line_marks(
         }
     }
 }
-/// insets: one without places its lines as before.
+/// A text area's line nodes for the lines in view, each placed past its
+/// room (`set_line_insets`) in what its indent leaves; a hidden line
+/// (`LineInset::hidden`) has none. A scroll group's lines
+/// (`LineInset::scroll_group`) show in a layer of its own, cut to its frame
+/// and moved by its offset: a sideways scroll moves that layer alone, which
+/// the renderer copies, shaping and placing no line again. The draw's own
+/// loop, for an area with insets: one without places its lines as before.
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -10704,25 +11053,46 @@ fn place_lines_in_room(
     lines: &crate::editor_lines::LinesLayout,
     (pool, free): (&mut Vec<(usize, NodeId)>, &mut Vec<NodeId>),
     layer: NodeId,
-    shown: std::ops::Range<usize>,
+    (shown, scroll): (std::ops::Range<usize>, (f32, f32)),
+    code: &CodeHint,
     cache: &crate::editor_lines::LineCache,
     (color, size, font): (Color, f32, &FontStyle),
     (wrap_width, text_wrap): (Option<f32>, bool),
 ) {
+    // Each shown group's layer (made as it first shows), and those that no
+    // longer show gone, with their lines.
+    let groups = lines
+        .grouped()
+        .then(|| place_groups(s, lines, code, (layer, scroll), shown.clone(), free));
+    // Where line `i` goes: its group's layer, from its frame, or the lines'.
+    let home = |i: usize| -> (NodeId, f32, f32) {
+        let placed = groups.as_ref().and_then(|groups| {
+            let (id, frame) = lines.group_of(i)?;
+            let (_, content) = groups.iter().find(|(group, _)| *group == id)?.1;
+            Some((content, frame.left, lines.top(frame.first)))
+        });
+        placed.unwrap_or((layer, 0., 0.))
+    };
     pool.retain(|(line, id)| {
         let hidden = lines.inset(*line).hidden;
-        if hidden {
+        // In another layer than its line's now (its group's, or out of it).
+        let moved = !hidden && groups.is_some() && s.parent(*id) != Some(home(*line).0);
+        if hidden || moved {
             free.push(*id);
         }
-        !hidden
+        !hidden && !moved
     });
     for i in shown {
         if lines.inset(i).hidden || pool.iter().any(|(line, _)| *line == i) {
             continue;
         }
-        let id = free.pop().unwrap_or_else(|| {
+        let parent = home(i).0;
+        // A node let go in the same layer, else one made there.
+        let reused = (free.iter().rposition(|id| s.parent(*id) == Some(parent)))
+            .map(|at| free.swap_remove(at));
+        let id = reused.unwrap_or_else(|| {
             s.append(
-                layer,
+                parent,
                 NodeKind::Text {
                     text: std::sync::Arc::from(""),
                     color,
@@ -10775,20 +11145,156 @@ fn place_lines_in_room(
         let wrap_width = lines.draw_width(*i, wrap_width);
         let width = wrap_width.unwrap_or(shaped.0 + 2.);
         let mut style = fixed(width, lines.height(*i) - inset.above - inset.below);
-        style.text_wrap = text_wrap;
+        style.text_wrap = text_wrap && !inset.nowrap;
         s.set_style(*id, style);
         s.know_text_size(*id, wrap_width, shaped);
         if s.bounds(*id).width == 0. {
             s.know_text_size(*id, Some(0.), shaped);
         }
+        let (_, left, top) = home(*i);
         s.set_transform(
             *id,
             Transform {
-                x: inset.left,
-                y: lines.top(*i) + inset.above,
+                x: inset.left - left,
+                y: lines.top(*i) + inset.above - top,
             },
         );
     }
+}
+/// What a text area's scroll groups drew (`place_groups`): each shown
+/// group's layer, by id: its frame's clip and, in it, its lines' layer
+/// (scroll content, moved by the group's offset), and the offset drawn.
+#[derive(Default)]
+struct GroupsDrawn {
+    layers: Vec<(u32, (NodeId, NodeId))>,
+    offsets: Vec<(u32, f32)>,
+    /// The groups whose offset changed since the last draw: what stays
+    /// still over or under their lines (pinned marks) repaints.
+    moved: Vec<u32>,
+    /// Its groups' scrollbar (`View::group_scrollbar`), if it has one.
+    bar: Option<Box<GroupBar>>,
+}
+/// A text area's scroll groups' scrollbar (`View::group_scrollbar`): the one
+/// scroll views show, across the bottom of the group that moved last (a code
+/// block's), following and moving its offset.
+struct GroupBar {
+    /// How far the group is scrolled across: the bar's drag writes it.
+    offset: Signal<f32>,
+    /// The group's frame: as wide as it shows, as tall as its lines.
+    size: Signal<(f32, f32)>,
+    /// How wide its lines reach.
+    extent: Signal<f32>,
+    /// The bar's corner, in the text area's viewport, at the frame's.
+    holder: NodeId,
+    /// What the last draw showed: the group, its frame's size, its lines'
+    /// width and its offset (told the signals after the draw).
+    shown: Cell<Option<BarShown>>,
+}
+/// What a group scrollbar shows (`GroupBar::shown`): the group, its frame's
+/// size, its lines' width and its offset.
+type BarShown = (u32, (f32, f32), f32, f32);
+/// The layers of the scroll groups with lines in `shown`, in the lines'
+/// `layer`: made as each first shows, each clip placed at its group's frame
+/// and its lines' layer moved by its offset. Those that no longer show go
+/// (their nodes taken out of `free`). Each shown group and its layers.
+fn place_groups(
+    s: &mut Scene,
+    lines: &crate::editor_lines::LinesLayout,
+    code: &CodeHint,
+    (layer, scroll): (NodeId, (f32, f32)),
+    shown: std::ops::Range<usize>,
+    free: &mut Vec<NodeId>,
+) -> Vec<(u32, (NodeId, NodeId))> {
+    let mut wanted: Vec<(u32, crate::editor_lines::Group)> = Vec::new();
+    for i in shown {
+        if let Some((id, frame)) = lines.group_of(i)
+            && !wanted.iter().any(|(group, _)| *group == id)
+        {
+            wanted.push((id, frame));
+        }
+    }
+    let mut drawn = code.groups_drawn.borrow_mut();
+    if wanted.is_empty() && drawn.is_none() {
+        return Vec::new();
+    }
+    let drawn = drawn.get_or_insert_default();
+    // Those not shown now go, with their lines.
+    drawn.layers.retain(|(id, (clip, content))| {
+        let keep = s.contains(*clip) && wanted.iter().any(|(group, _)| group == id);
+        if !keep {
+            free.retain(|node| s.contains(*node) && s.parent(*node) != Some(*content));
+            if s.contains(*clip) {
+                s.remove(*clip);
+            }
+        }
+        keep
+    });
+    drawn.moved.clear();
+    for (id, frame) in &wanted {
+        let (clip, content) = match drawn.layers.iter().find(|(group, _)| group == id) {
+            Some((_, layers)) => *layers,
+            None => {
+                let clip = s.append(
+                    layer,
+                    NodeKind::Container(Layout::Overlay),
+                    Style::default(),
+                );
+                let content =
+                    s.append(clip, NodeKind::Container(Layout::Overlay), Style::default());
+                // Scroll content: a sideways scroll moves it alone, which the
+                // renderer copies within the frame.
+                s.set_scroll_copy(content, true);
+                drawn.layers.push((*id, (clip, content)));
+                (clip, content)
+            }
+        };
+        let top = lines.top(frame.first);
+        let bottom = lines.top(frame.last) + lines.height(frame.last);
+        let mut style = fixed(frame.view.min(1.0e6), (bottom - top).max(0.));
+        style.clip = frame.view.is_finite();
+        s.set_style(clip, style);
+        s.set_transform(
+            clip,
+            Transform {
+                x: frame.left,
+                y: top,
+            },
+        );
+        let offset = lines.group_scroll(*id);
+        s.set_transform(content, Transform { x: -offset, y: 0. });
+        match drawn.offsets.iter_mut().find(|(group, _)| group == id) {
+            Some((_, drawn_at)) if *drawn_at == offset => {}
+            Some((_, drawn_at)) => {
+                *drawn_at = offset;
+                drawn.moved.push(*id);
+            }
+            None => drawn.offsets.push((*id, offset)),
+        }
+    }
+    // Its scrollbar: across the bottom of the group that moved last, if shown.
+    if let Some(bar) = &drawn.bar {
+        let last = lines.last_scrolled_group();
+        let shown = wanted.iter().find(|(id, _)| Some(*id) == last);
+        bar.shown.set(shown.map(|(id, frame)| {
+            let top = lines.top(frame.first);
+            let bottom = lines.top(frame.last) + lines.height(frame.last);
+            s.set_transform(
+                bar.holder,
+                Transform {
+                    x: frame.left - scroll.0,
+                    y: top - scroll.1,
+                },
+            );
+            let view = frame.view.min(1.0e6);
+            (
+                *id,
+                (view, (bottom - top).max(0.)),
+                frame.content.max(view),
+                lines.group_scroll(*id),
+            )
+        }));
+    }
+    drawn.layers.clone()
 }
 /// An input waiting to be drawn, with the model effect whose reads its
 /// draw's are.
