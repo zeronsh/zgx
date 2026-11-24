@@ -60,6 +60,10 @@ pub fn module(args: TokenStream, item: TokenStream) -> TokenStream {
 /// - `#[export(name = "chat.reply_run")]` registers it under that name.
 /// - `#[export(action)]` registers it as an action (`ui.action`,
 ///   `ui.invoke`): one argument, nothing returned.
+/// - `#[export(async)]` registers it as an async action (`ui.call`, a
+///   promise): its first parameter (after the state) is the
+///   `Promise<T>` it settles later, then one argument at most, nothing
+///   returned. Its member on the module's table gives the promise.
 /// - A first parameter marked `#[state]`, `&T` or `&mut T`, is the module's
 ///   state of that type for the thread (`Host::state`).
 /// - Returning `Result<T, E>` raises an `Err` in the script that called.
@@ -236,6 +240,9 @@ fn derives_record(attrs: &[Attribute]) -> bool {
 struct Export {
     name: Option<String>,
     action: bool,
+    /// An async action: its first parameter (after the state) a
+    /// `Promise<T>` it settles later.
+    asynchronous: bool,
 }
 fn export_of(attr: &Attribute) -> Result<Export> {
     let mut export = Export::default();
@@ -249,8 +256,11 @@ fn export_of(attr: &Attribute) -> Result<Export> {
         } else if meta.path.is_ident("action") {
             export.action = true;
             Ok(())
+        } else if meta.path.is_ident("async") {
+            export.asynchronous = true;
+            Ok(())
         } else {
-            Err(meta.error("#[export] takes `name = \"…\"` and `action`"))
+            Err(meta.error("#[export] takes `name = \"…\"`, `action` and `async`"))
         }
     })?;
     Ok(export)
@@ -263,6 +273,7 @@ struct Exported {
     /// `"name":{…}`.
     manifest: String,
     action: bool,
+    asynchronous: bool,
 }
 
 fn exported(
@@ -295,6 +306,8 @@ fn exported(
     let mut passed = Vec::new();
     let mut args_json = Vec::new();
     let mut index = 0usize;
+    // An async action's promise, and what it resolves to.
+    let mut resolves = None;
     for (at, arg) in function.sig.inputs.iter_mut().enumerate() {
         let FnArg::Typed(arg) = arg else {
             return no(arg.span(), "an exported function takes no `self`");
@@ -321,6 +334,21 @@ fn exported(
             });
             continue;
         }
+        if export.asynchronous && resolves.is_none() {
+            let Some((name, of)) =
+                named(&arg.ty).filter(|(name, of)| name == "Promise" && of.len() == 1)
+            else {
+                return no(
+                    arg.ty.span(),
+                    "an async action's first parameter (after its state) is the `Promise<T>` it settles",
+                );
+            };
+            let _ = name;
+            let of = of[0];
+            resolves = Some(manifest_type(of, records, true)?);
+            passed.push(quote!(::zgx_module::__private::promise::<#of>(__promise)));
+            continue;
+        }
         let Pat::Ident(pat) = &*arg.pat else {
             return no(
                 arg.pat.span(),
@@ -330,14 +358,25 @@ fn exported(
         let (param, ty) = (pat.ident.to_string(), &arg.ty);
         let param = param.trim_start_matches('_').to_owned();
         let held = format_ident!("__arg{}", index);
+        let refused = if export.asynchronous {
+            quote! {
+                // SAFETY: The call's promise, unsettled, rejected over it.
+                unsafe { ::zgx_module::__private::wrong_async::<#ty>(__promise, #index, #param, #held) };
+                return;
+            }
+        } else {
+            quote! {
+                // SAFETY: `__out` takes why the call failed.
+                return unsafe { ::zgx_module::__private::wrong::<#ty>(__out, #index, #param, #held) };
+            }
+        };
         reads.push(quote! {
             // SAFETY: A call's arguments, as the runtime lends them.
             let #held = unsafe { ::zgx_module::__private::arg(__args, __len, #index) };
             let #held = match <#ty as ::zgx_module::FromValue>::read(#held) {
                 ::core::option::Option::Some(read) => read,
-                // SAFETY: `__out` takes why the call failed.
                 ::core::option::Option::None => {
-                    return unsafe { ::zgx_module::__private::wrong::<#ty>(__out, #index, #param, #held) };
+                    #refused
                 }
             };
         });
@@ -350,6 +389,27 @@ fn exported(
         index += 1;
     }
     let sig = &function.sig;
+    if export.asynchronous && export.action {
+        return no(sig.span(), "an export is an action or async, not both");
+    }
+    if export.asynchronous && resolves.is_none() {
+        return no(
+            sig.inputs.span(),
+            "an async action takes the `Promise<T>` it settles, first (after its state)",
+        );
+    }
+    if export.asynchronous && index > 1 {
+        return no(
+            sig.inputs.span(),
+            "an async action takes one argument besides its promise (`ui.call(name, arg)`)",
+        );
+    }
+    if export.asynchronous && !matches!(sig.output, ReturnType::Default) {
+        return no(
+            sig.output.span(),
+            "an async action returns nothing: it settles its promise",
+        );
+    }
     if export.action && index > 1 {
         return no(
             sig.inputs.span(),
@@ -390,7 +450,8 @@ fn exported(
         }
     });
     let call = quote!(#ident(#(#passed),*));
-    let body = match (export.action, fallible.is_some()) {
+    let body = match (export.action || export.asynchronous, fallible.is_some()) {
+        _ if export.asynchronous => quote! { #call; },
         (false, false) => quote! {
             let __made = #call;
             // SAFETY: `__out` takes the result.
@@ -421,7 +482,22 @@ fn exported(
             }
         },
     };
-    let wrapper_fn = if export.action {
+    let wrapper_fn = if export.asynchronous {
+        quote! {
+            #[doc(hidden)]
+            #[allow(clippy::missing_safety_doc, unused_variables)]
+            unsafe extern "C" fn #wrapper(
+                __user: *mut ::zgx_module::__private::c_void,
+                __args: *const ::zgx_module::abi::Raw,
+                __promise: *mut ::zgx_module::__private::c_void,
+            ) {
+                let __len = 1usize;
+                #(#reads)*
+                #borrow
+                #body
+            }
+        }
+    } else if export.action {
         quote! {
             #[doc(hidden)]
             #[allow(clippy::missing_safety_doc, unused_variables)]
@@ -456,7 +532,9 @@ fn exported(
         Some(of) => quote!(::zgx_module::__private::state_user(__host.state::<#of>())),
         None => quote!(::core::ptr::null_mut()),
     };
-    let raw = if export.action {
+    let raw = if export.asynchronous {
+        quote!(raw_async_action)
+    } else if export.action {
         quote!(raw_action)
     } else {
         quote!(raw_function)
@@ -472,7 +550,9 @@ fn exported(
         manifest.push_str(&format!("\"member\":{},", json_string(&ident.to_string())));
     }
     manifest.push_str(&format!("\"args\":[{}]", args_json.join(",")));
-    if !export.action {
+    if let Some(resolves) = &resolves {
+        manifest.push_str(&format!(",\"resolves\":{resolves}"));
+    } else if !export.action {
         manifest.push_str(&format!(",\"returns\":{returns_json}"));
     }
     if !doc.is_empty() {
@@ -484,6 +564,7 @@ fn exported(
         register,
         manifest,
         action: export.action,
+        asynchronous: export.asynchronous,
     })
 }
 
@@ -568,21 +649,22 @@ fn module_of(args: Tokens, mut item: ItemMod) -> Result<Tokens> {
         function.attrs[at] = syn::parse_quote!(#[#path(#marker)]);
         all.push(exported(function, export, &name, &records)?);
     }
-    let list = |action: bool| {
+    let list = |action: bool, asynchronous: bool| {
         all.iter()
-            .filter(|e| e.action == action)
+            .filter(|e| e.action == action && e.asynchronous == asynchronous)
             .map(|e| e.manifest.as_str())
             .collect::<Vec<_>>()
             .join(",")
     };
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     let json = format!(
-        "{{\"zgx_module\":1,\"abi\":{ABI},\"name\":{},\"version\":{},\"records\":{{{}}},\"functions\":{{{}}},\"actions\":{{{}}}}}",
+        "{{\"zgx_module\":1,\"abi\":{ABI},\"name\":{},\"version\":{},\"records\":{{{}}},\"functions\":{{{}}},\"actions\":{{{}}},\"async\":{{{}}}}}",
         json_string(&name),
         json_string(&version),
         records_json.join(","),
-        list(false),
-        list(true),
+        list(false, false),
+        list(true, false),
+        list(false, true),
     );
     let size = 32 + json.len() + 16;
     // (`zgx_module::abi::ENTRY` and `MANIFEST`, and the name.)

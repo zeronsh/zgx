@@ -121,6 +121,24 @@ A panic in a module ends the process: nothing unwinds across the boundary. Retur
 
 `#[export(name = "chat.reply_run")]` registers a function or an action under a name of its own: an app moving existing host functions into a module keeps their names, and the scripts that call them by name don't change.
 
+### Async actions
+
+`#[export(async)]` registers an async action: a script calls it with `ui.call(name, arg)`, or as a member of the module's table, and gets a `Promise`. Its first parameter (after its state) is the `Promise<T>` it settles, then one argument at most; it returns at once, and settles the promise later, on the interface's thread:
+
+```rust
+/// The page `id` is on, read on a thread of the module's.
+#[export(async)]
+fn load(promise: Promise<Page>, id: &str) {
+    let id = id.to_owned();
+    std::thread::spawn(move || {
+        let read = read_page(&id); // a `String` and numbers: they may cross threads
+        promise.resolve_with(move |_host| read.map(Page::from).map_err(Failed::from));
+    });
+}
+```
+
+`resolve_with` posts its closure to the interface's thread, which makes the result there (a value is that thread's) and settles the promise with it. On that thread, `promise.resolve(host, value)` and `promise.reject(host, why)` settle it at once; `promise.ui()` is a handle to post by. A promise is `Send`, so a thread may hold it while it works. A rejection is raised in the script that waits, naming the action and the module (`load (module `pages`): has no page 3`); a promise dropped unsettled rejects, saying the module dropped it; one settled after its script's host is gone does nothing. `host.async_action(name, |arg, promise| …)` registers one by hand. `zgx types` types its member `(id: string) -> Promise<PagesPage>`.
+
 ### State
 
 A module's state is one per thread, kept by the runtime. A first parameter marked `#[state]` is the module's state of that type (`Default`), lent for the call:
@@ -261,7 +279,10 @@ Every module carries a manifest: its name, version, records, functions and actio
     "words.count": { "member": "count", "args": [["text", "string"]], "returns": "number",
                      "doc": "How many words `text` has." }
   },
-  "actions": {}
+  "actions": {},
+  "async": {
+    "words.later": { "member": "later", "args": [["text", "string"]], "resolves": "number" }
+  }
 }
 ```
 

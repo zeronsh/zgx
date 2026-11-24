@@ -97,6 +97,10 @@ typedef void (*zgx_job)(void *user, void *host);
 /* A timer's call (zgx_api.after), on the interface's thread, `host` lent: a
  * repeating timer goes on while it returns not 0. */
 typedef uint32_t (*zgx_fire)(void *user, void *host);
+/* A module's async action (`ui.call(name, arg)`): `arg` lent. It returns at
+ * once; the module settles `promise` later (zgx_api.settle) or lets go of it
+ * (zgx_api.promise_release), exactly one of the two. */
+typedef void (*zgx_async_action)(void *user, const zgx_value *arg, void *promise);
 /* A shared state's observer (zgx_api.shared_observe): `value` is what it
  * holds now, lent; `host` the state's host handle, lent. */
 typedef void (*zgx_observe)(void *user, void *host, const zgx_value *value);
@@ -169,6 +173,16 @@ typedef struct zgx_api {
     void (*shared_unobserve)(void *subscription);
     /* Lets go of a shared state's handle. */
     void (*shared_release)(void *shared);
+    /* Settles an async action's promise: with `value` (taken) if `ok` is not
+     * 0, else rejected with `value`, a string of why. Once, on the
+     * interface's thread; the promise is let go of with it. */
+    void (*settle)(void *promise, uint32_t ok, zgx_value *value);
+    /* Lets go of a promise unsettled: it rejects, saying the module dropped
+     * it. Any thread. */
+    void (*promise_release)(void *promise);
+    /* A handle to the host of the script waiting on `promise`, to keep: any
+     * thread. */
+    void *(*promise_host)(const void *promise);
 } zgx_api;
 
 /* What a call returns: done, or failed. Failing, it wrote why (a string)
@@ -210,6 +224,9 @@ typedef struct zgx_registrar {
      * zgx_api.post and zgx_api.after take. Let go with
      * zgx_api.host_release. */
     void *(*host_ref)(void *host);
+    /* Registers an async action scripts call with `ui.call(name, arg)`. */
+    void (*async_action)(void *host, const uint8_t *name, size_t len, zgx_async_action call,
+                         void *user, zgx_free free);
 } zgx_registrar;
 
 /* A module's entry, called once per host it is loaded into. Returns 0, or

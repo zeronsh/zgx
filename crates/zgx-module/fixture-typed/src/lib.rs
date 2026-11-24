@@ -12,7 +12,7 @@ pub struct Kept {
 
 #[zgx_module::module(name = "typed")]
 pub mod typed {
-    use zgx_module::{Failed, List, Map, Record, Ref, Text, Value, export};
+    use zgx_module::{Failed, List, Map, Promise, Record, Ref, Text, Value, export};
 
     use super::Kept;
 
@@ -38,6 +38,23 @@ pub mod typed {
         pub text: &'a str,
         pub n: f64,
         pub done: bool,
+    }
+
+    /// The record `query` asks for, found later on a thread of the
+    /// module's: rejected if its id is empty.
+    #[export(async)]
+    pub fn find_later(promise: Promise<Found>, query: Query) {
+        let id = query.id.to_owned();
+        std::thread::spawn(move || {
+            promise.resolve_with(move |_| match id.is_empty() {
+                true => Err(Failed("has no id".into())),
+                false => Ok(Found {
+                    id: id.to_uppercase(),
+                    n: id.len() as f64,
+                    tags: Vec::new(),
+                }),
+            });
+        });
     }
 
     /// How many words `text` has.

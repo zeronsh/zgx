@@ -51,6 +51,9 @@ int main(void) {
     AT(zgx_api, shared_observe);
     AT(zgx_api, shared_unobserve);
     AT(zgx_api, shared_release);
+    AT(zgx_api, settle);
+    AT(zgx_api, promise_release);
+    AT(zgx_api, promise_host);
     SIZE(zgx_registrar);
     AT(zgx_registrar, size);
     AT(zgx_registrar, host);
@@ -59,5 +62,6 @@ int main(void) {
     AT(zgx_registrar, action);
     AT(zgx_registrar, state);
     AT(zgx_registrar, host_ref);
+    AT(zgx_registrar, async_action);
     return 0;
 }
