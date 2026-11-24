@@ -181,11 +181,12 @@ pub struct Api {
     /// `get` is.
     pub shared_get: unsafe extern "C" fn(shared: *const c_void, out: *mut Raw),
     /// Sets it to `value` (taken), keeping the parts of what it held that
-    /// are equal (`Shared::set`): not 0 if anything changed.
+    /// are equal (`Shared::set`): 1 if anything changed, 0 if not;
+    /// [`HOST_GONE`] once its host is gone (nothing set).
     pub shared_set: unsafe extern "C" fn(shared: *const c_void, value: *mut Raw) -> u32,
     /// Adds `len` bytes of text (UTF-8) to the end of the string it holds,
     /// as a script's `state:append`: [`DONE`], or [`FAILED`] with why
-    /// written to `out` (it holds something else).
+    /// written to `out` (it holds something else, or its host is gone).
     pub shared_append: unsafe extern "C" fn(
         shared: *const c_void,
         text: *const u8,
@@ -227,8 +228,8 @@ pub struct Api {
     /// the others are added at the end in the order given, and of two rows
     /// given with one key the last is written. One pass over the list;
     /// only the rows given are new (`Shared::upsert`). [`DONE`], or
-    /// [`FAILED`] with why in `out` (a row with no string at `key`: nothing
-    /// written).
+    /// [`FAILED`] with why in `out`, nothing written (a row with no string
+    /// at `key`, or its host is gone).
     pub shared_upsert: unsafe extern "C" fn(
         shared: *const c_void,
         key: *const u8,
@@ -237,7 +238,8 @@ pub struct Api {
         out: *mut Raw,
     ) -> u32,
     /// Removes the rows of the list it holds whose field `key` is one of
-    /// the `len` strings `keys` (lent), every such row: not 0 if any was.
+    /// the `len` strings `keys` (lent), every such row: 1 if any was, 0 if
+    /// none; [`HOST_GONE`] once its host is gone.
     pub shared_remove: unsafe extern "C" fn(
         shared: *const c_void,
         key: *const u8,
@@ -285,6 +287,10 @@ pub type Observe = unsafe extern "C" fn(user: *mut c_void, host: *mut c_void, va
 pub const POSTED: u32 = 1;
 /// What [`Api::post`] returns when the host is gone: the job won't run.
 pub const GONE: u32 = 0;
+/// What [`Api::shared_set`] and [`Api::shared_remove`] return when the
+/// state's host is gone, nothing written: not a count, so told from one.
+/// (The writes that return `DONE` or `FAILED` fail then, saying so.)
+pub const HOST_GONE: u32 = u32::MAX;
 
 /// A job [`Api::post`] runs on the interface's thread: `host` is the host
 /// handle it was posted to, lent for the call. It runs once, and frees its
