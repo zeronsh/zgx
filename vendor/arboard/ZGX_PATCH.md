@@ -1,7 +1,7 @@
 # zgx patch to arboard 3.6.1
 
 Vendored from crates.io `arboard` 3.6.1 (MIT OR Apache-2.0, `LICENSE-MIT.txt`
-and `LICENSE-APACHE.txt` as published) and published as `zgx-arboard` 3.6.2,
+and `LICENSE-APACHE.txt` as published) and published as `zgx-arboard` 3.6.3,
 its library still `arboard`. zgx-desktop's clipboard (macOS, Windows, X11)
 goes through it. The changes are marked `zgx:` in the source.
 
@@ -27,6 +27,18 @@ text nor read the blob a browser put there.
 The data control protocol's clipboard (`wayland-data-control`, which zgx
 doesn't enable: its own data worker serves Wayland) takes the text and HTML
 of `formats` alone, and `raw` is `ClipboardNotSupported` there.
+
+## An image in the same change (3.6.3)
+
+A copy of an image with its text and types (a figure with its citation)
+puts the encoded PNG in `raw` (`public.png`, `PNG`, `image/png`), which is
+what apps paste on macOS and X11. Many of Windows' apps (Paint, older
+editors) paste only a DIB, so `Set::formats_with_dib` also writes `image` as
+a CF_DIBV5 on Windows, in the same opening of the clipboard: the DIB
+helper borrows the opened clipboard rather than taking it. Elsewhere
+`image` is not written. The helper also wrote the converted pixels over
+the header rather than after it, where they had to be converted; they now
+go after it.
 
 Drop the fork once arboard can write formats of the caller's beside its own
 in one change and read one back.

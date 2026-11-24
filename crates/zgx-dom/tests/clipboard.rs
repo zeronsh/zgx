@@ -191,3 +191,35 @@ fn a_pastes_types_read_back_and_a_typed_write_keeps_its_text() {
     mounted.unmount();
     host.remove();
 }
+
+/// A write with an image goes as one `ClipboardItem` (the PNG beside the
+/// text and HTML): asked, its text and HTML read back as this page wrote
+/// them, and a page's own types, which can't go with an image, are left out.
+#[wasm_bindgen_test]
+fn a_write_with_an_image_keeps_its_text_and_html() {
+    let runtime = Runtime::new();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        component(move |cx| {
+            let platform = cx.service::<PlatformService>();
+            button().id("write").child(text("Write")).on_click(move || {
+                let png: std::sync::Arc<[u8]> = (&b"\x89PNG\r\n\x1a\n"[..]).into();
+                let types = [("application/x-notes".to_owned(), "n".to_owned())];
+                let html = Some("<b>t</b>".to_owned());
+                drop(
+                    platform
+                        .0
+                        .set_clipboard_typed_image("t".into(), html, &types, png),
+                );
+                assert_eq!(platform.0.clipboard_text().as_deref(), Some("t"));
+                assert_eq!(platform.0.clipboard_html().as_deref(), Some("<b>t</b>"));
+                assert!(platform.0.clipboard_types().is_empty());
+            })
+        }),
+    );
+    find(&host, "[data-id=write]").click();
+    mounted.unmount();
+    host.remove();
+}

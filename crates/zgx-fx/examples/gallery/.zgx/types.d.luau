@@ -23730,10 +23730,14 @@ declare ui: {
 	-- image is decoded and encoded off the main thread. `write` takes
 	-- `{ text, html?, types? }` too: HTML and types of the app's own beside
 	-- the text in one change, which `read_type` reads back (a web page's
-	-- copy's types too, in Chrome, Edge and Electron apps).
+	-- copy's types too, in Chrome, Edge and Electron apps). With `image`
+	-- (a PNG's bytes) too, the image goes beside them in the same change,
+	-- and `write` is a promise (Windows' copy decodes it off the main
+	-- thread).
 	clipboard: {
 		read: () -> string?,
-		write: (content: string | { text: string, html: string?, types: { [string]: string }? }) -> boolean,
+		write: ((content: string | { text: string, html: string?, types: { [string]: string }? }) -> boolean)
+			& ((content: { text: string, html: string?, types: { [string]: string }?, image: string }) -> Promise<boolean>),
 		read_type: (mime: string) -> string?,
 		read_html: () -> string?,
 		write_html: (text: string, html: string) -> boolean,

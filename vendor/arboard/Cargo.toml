@@ -1,7 +1,7 @@
 [package]
 name = "zgx-arboard"
-version = "3.6.2"
-description = "arboard 3.6.1 writing text, HTML and formats of the caller's in one change and reading a format's bytes, for zgx (see ZGX_PATCH.md): image and text handling for the OS clipboard"
+version = "3.6.3"
+description = "arboard 3.6.1 writing text, HTML, formats of the caller's and a DIB in one change and reading a format's bytes, for zgx (see ZGX_PATCH.md): image and text handling for the OS clipboard"
 repository = "https://github.com/zeronsh/zgx"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
