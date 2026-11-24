@@ -1804,7 +1804,11 @@ fn a_window_back_after_a_while_takes_no_huge_step() {
 }
 
 /// What a state does run to 100 from 0, sampled each frame, and how long it went on.
+/// Where a box a spring moves stands, a 17 ms frame at a time, on a clock
+/// of the test's own that the frames step (`zgx::clock`): the wall clock,
+/// a loaded machine's, moves nothing.
 fn spring_to_path(options: &str) -> Vec<f32> {
+    let clock = zgx::clock::VirtualClock::new();
     let mut h = Harness::inline(&format!(
         r##"local at = ui.state("at", 0)
         local shown = ui.state("shown", "going")
@@ -1818,8 +1822,12 @@ fn spring_to_path(options: &str) -> Vec<f32> {
     ));
     h.frames(2);
     h.click("go");
+    // The clock where the frames are: the first, 17 ms after the call, at
+    // the curve's start (it is the first the spring hears of), as frames
+    // read it.
     let path = (0..90)
-        .map(|_| {
+        .map(|step| {
+            clock.advance(std::time::Duration::from_millis(17 * step), || {});
             h.run_ms(17.);
             h.x("box")
         })
@@ -1892,6 +1900,34 @@ fn a_spring_with_little_damping_passes_its_target_and_comes_back() {
     let peak = path.iter().copied().fold(0f32, f32::max);
     assert!(peak > 101., "past it: {peak}");
     assert_eq!(*path.last().unwrap(), 100.);
+}
+
+/// A delay is counted on the interface's clock (`zgx::clock`), not the
+/// wall clock: however long a frame is in coming (a loaded machine), a
+/// spring on a test's clock that hasn't passed its delay hasn't moved. Read
+/// off the wall clock, a 60 ms stall started a 40 ms delay's spring early.
+#[test]
+fn a_delay_is_counted_on_the_interfaces_clock() {
+    let clock = zgx::clock::VirtualClock::new();
+    let mut h = Harness::inline(
+        r##"local at = ui.state("at", 0)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = at },
+            ui.button { "Go", id = "go", on_click = function()
+                ui.spring_to(at, 100, { stiffness = 650, damping = 56, delay = 40 })
+            end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    // The wall clock runs on past the delay; the interface's stands still.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    clock.advance(std::time::Duration::from_millis(17), || {});
+    h.run_ms(17.);
+    assert_eq!(h.x("box"), 0., "still waiting, 17 ms in");
+    clock.advance(std::time::Duration::from_millis(120), || {});
+    h.run_ms(100.);
+    assert!(h.x("box") > 0., "and moves once it has passed");
 }
 
 #[test]
