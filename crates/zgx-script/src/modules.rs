@@ -168,6 +168,9 @@ static API: Api = Api {
     shared_observe,
     shared_unobserve,
     shared_release,
+    settle,
+    promise_release,
+    promise_host,
 };
 
 /// A registration's `user`, freed with the host's hold on it.
@@ -189,6 +192,7 @@ enum Kind {
     Function(abi::Function),
     Taking(abi::FunctionTaking),
     Action(abi::Action),
+    Async(abi::AsyncAction),
 }
 struct Pending {
     name: String,
@@ -272,6 +276,18 @@ unsafe extern "C" fn register_action(
             User { ptr: user, free },
         )
     }
+}
+
+unsafe extern "C" fn register_async_action(
+    host: *mut c_void,
+    name: *const u8,
+    len: usize,
+    call: abi::AsyncAction,
+    user: *mut c_void,
+    free: abi::Free,
+) {
+    // SAFETY: As `register_function`'s.
+    unsafe { pend(host, name, len, Kind::Async(call), User { ptr: user, free }) }
 }
 
 /// What a module's function or action is called with, and what an error
@@ -387,6 +403,8 @@ fn action_of(call: abi::Action, registered: Rc<Registered>) -> impl Fn(Value) {
 enum Call {
     Lent(abi::Function),
     Taking(abi::FunctionTaking),
+    /// An async action: called as `ui.call(name, arg)` is, for a promise.
+    Async,
 }
 /// A function of a module's table (`ui.module`).
 struct Member {
@@ -446,6 +464,8 @@ struct Registers {
     /// Each function's name, its member name and how many arguments.
     functions: Vec<(String, String, usize)>,
     actions: Vec<String>,
+    /// Each async action's name and member name.
+    asyncs: Vec<(String, String)>,
 }
 /// What a manifest says of a module.
 struct Manifest {
@@ -495,7 +515,21 @@ fn manifest_of(json: &str) -> Result<Manifest, String> {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        Registers { functions, actions }
+        let asyncs = fields("async")
+            .into_iter()
+            .map(|(name, of): (String, Value)| {
+                let member = match of.field("member") {
+                    Some(Value::Str(member)) => member.to_string(),
+                    _ => member_of(&name).to_owned(),
+                };
+                (name, member)
+            })
+            .collect();
+        Registers {
+            functions,
+            actions,
+            asyncs,
+        }
     });
     Ok(Manifest { name, registers })
 }
@@ -517,23 +551,38 @@ fn member_of(name: &str) -> &str {
 /// Whether what a module registered is what its manifest says, or what
 /// differs.
 fn held_to(said: &Registers, pending: &[Pending]) -> Result<(), String> {
-    let (functions, actions) = (&said.functions, &said.actions);
-    let registered = |action: bool| {
+    let registered = |of: fn(&Kind) -> bool| {
         let mut names: Vec<&str> = pending
             .iter()
-            .filter(|p| matches!(p.kind, Kind::Action(_)) == action)
+            .filter(|p| of(&p.kind))
             .map(|p| &*p.name)
             .collect();
         names.sort_unstable();
         names
     };
-    let mut functions: Vec<&str> = functions.iter().map(|(name, ..)| &**name).collect();
-    let mut actions: Vec<&str> = actions.iter().map(|name| &**name).collect();
-    functions.sort_unstable();
-    actions.sort_unstable();
+    fn sorted(mut names: Vec<&str>) -> Vec<&str> {
+        names.sort_unstable();
+        names
+    }
+    let functions = sorted(said.functions.iter().map(|(name, ..)| &**name).collect());
+    let actions = sorted(said.actions.iter().map(|name| &**name).collect());
+    let asyncs = sorted(said.asyncs.iter().map(|(name, _)| &**name).collect());
     for (what, said, did) in [
-        ("function", functions, registered(false)),
-        ("action", actions, registered(true)),
+        (
+            "function",
+            functions,
+            registered(|k| matches!(k, Kind::Function(_) | Kind::Taking(_))),
+        ),
+        (
+            "action",
+            actions,
+            registered(|k| matches!(k, Kind::Action(_))),
+        ),
+        (
+            "async action",
+            asyncs,
+            registered(|k| matches!(k, Kind::Async(_))),
+        ),
     ] {
         if let Some(missing) = said.iter().find(|name| !did.contains(name)) {
             return Err(format!(
@@ -947,6 +996,141 @@ unsafe extern "C" fn shared_release(shared: *mut c_void) {
     drop(unsafe { Box::from_raw(shared as *mut SharedHandle) });
 }
 
+/// A module's promise, as a script holds it (`ui.call`): settled by the
+/// module (`Api::settle`) or rejected as it is let go of unsettled.
+#[derive(Default)]
+struct Settled {
+    result: RefCell<Option<Result<Value, String>>>,
+    waker: RefCell<Option<Waker>>,
+}
+/// The promises a thread's modules hold, by number: each one's wait, and
+/// what made it.
+type Promises = std::collections::HashMap<u64, (Weak<Settled>, Rc<Registered>)>;
+thread_local! {
+    /// The promises this thread's modules hold: made as an async action is
+    /// first called.
+    static PROMISES: RefCell<Promises> = RefCell::default();
+    static NEXT_PROMISE: Cell<u64> = const { Cell::new(0) };
+}
+/// What a module holds for a promise: its number, and its host's mailbox
+/// (how it is rejected from any thread, let go of).
+struct PromiseHandle {
+    id: u64,
+    mailbox: Arc<Mailbox>,
+}
+/// The call of a module's async action: its promise made, the module
+/// called, and the result awaited as the module settles it.
+fn async_call(
+    call: abi::AsyncAction,
+    registered: &Rc<Registered>,
+    host: &Weak<crate::Inner>,
+    arg: Value,
+) -> impl std::future::Future<Output = Result<Value, String>> + 'static + use<> {
+    let settled = Rc::new(Settled::default());
+    let started = host.upgrade().map(|host| {
+        let id = NEXT_PROMISE.replace(NEXT_PROMISE.get() + 1);
+        PROMISES.with_borrow_mut(|all| {
+            all.insert(id, (Rc::downgrade(&settled), registered.clone()));
+        });
+        let promise = Box::into_raw(Box::new(PromiseHandle {
+            id,
+            mailbox: mailbox_of(&ScriptHost(host)),
+        }));
+        // SAFETY: The module's action and its own `user`, alive with
+        // `registered`; `arg` lent for the call; the promise the module's.
+        unsafe {
+            call(
+                registered.user.ptr,
+                std::ptr::from_ref(&arg).cast(),
+                promise.cast(),
+            )
+        };
+        id
+    });
+    /// Lets go of its entry as the caller's wait goes.
+    struct Forget(Option<u64>);
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            if let Some(id) = self.0 {
+                let _ = PROMISES.try_with(|all| all.borrow_mut().remove(&id));
+            }
+        }
+    }
+    let forget = Forget(started);
+    async move {
+        let _forget = forget;
+        std::future::poll_fn(|cx| match settled.result.borrow_mut().take() {
+            Some(result) => Poll::Ready(result),
+            None => {
+                *settled.waker.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+/// Settles promise `id` on this thread, if its caller still waits.
+fn settled(id: u64, result: impl FnOnce(&Registered) -> Result<Value, String>) {
+    let Some((settled, registered)) = PROMISES.with_borrow_mut(|all| all.remove(&id)) else {
+        return;
+    };
+    let Some(settled) = settled.upgrade() else {
+        return;
+    };
+    *settled.result.borrow_mut() = Some(result(&registered));
+    if let Some(waker) = settled.waker.borrow_mut().take() {
+        waker.wake();
+    }
+}
+unsafe extern "C" fn settle(promise: *mut c_void, ok: u32, value: *mut Raw) {
+    // SAFETY: A promise the module settles once; its owned value, taken.
+    let (promise, value) = unsafe { (Box::from_raw(promise as *mut PromiseHandle), take(value)) };
+    if promise.mailbox.thread != std::thread::current().id() {
+        // (Values are the interface thread's: one here would be another's.)
+        eprintln!("zgx: a module settled a promise off the interface's thread");
+        std::process::abort();
+    }
+    settled(promise.id, |registered| match ok {
+        0 => Err(registered.error(value)),
+        _ => Ok(value),
+    });
+}
+unsafe extern "C" fn promise_host(promise: *const c_void) -> *mut c_void {
+    // SAFETY: A promise, held (any thread: the count is atomic).
+    let promise = unsafe { &*(promise as *const PromiseHandle) };
+    Arc::into_raw(promise.mailbox.clone()) as *mut c_void
+}
+unsafe extern "C" fn promise_release(promise: *mut c_void) {
+    unsafe extern "C" fn rejected(user: *mut c_void, _host: *mut c_void) {
+        // SAFETY: The number posted below.
+        let id = unsafe { *(user as *const u64) };
+        settled(id, |registered| {
+            Err(format!(
+                "{} (module `{}`): the module dropped its promise unsettled",
+                registered.name, registered.module
+            ))
+        });
+    }
+    unsafe extern "C" fn free(user: *mut c_void) {
+        // SAFETY: The box posted below, freed once.
+        drop(unsafe { Box::from_raw(user as *mut u64) });
+    }
+    // SAFETY: A promise let go of once, from any thread.
+    let promise = unsafe { Box::from_raw(promise as *mut PromiseHandle) };
+    let id = Box::into_raw(Box::new(promise.id));
+    // (Rejected on the host's thread, where promises are: from here a post.
+    // A host gone has no caller left to tell.)
+    // SAFETY: A host handle, held by the promise; a job of this file's.
+    unsafe {
+        post(
+            Arc::as_ptr(&promise.mailbox) as *mut c_void,
+            rejected,
+            id.cast(),
+            free,
+        )
+    };
+}
+
 /// What a script passed a module's function, as the values it is lent.
 /// Stated by count so no call allocates for them: a function of up to four
 /// arguments reads them off the script's stack.
@@ -984,6 +1168,7 @@ fn called<const N: usize>(
                 let lent: *const Value = if N == 0 { &none } else { args.as_ptr() };
                 call(user, lent.cast(), N, out.as_mut_ptr())
             }
+            Call::Async => unreachable!("an async action's member calls `ui.call`"),
             Call::Taking(call) => {
                 let mut args = args.into_iter();
                 let mut first = ManuallyDrop::new(args.next().unwrap_or(Value::Nil));
@@ -1017,6 +1202,7 @@ fn member_of_many(lua: &Lua, member: &Member) -> mlua::Result<mlua::Function> {
         let (status, made) = unsafe {
             let status = match call {
                 Call::Lent(call) => call(user, args.as_ptr().cast(), len, out.as_mut_ptr()),
+                Call::Async => unreachable!("an async action's member calls `ui.call`"),
                 Call::Taking(call) => {
                     let mut first = ManuallyDrop::new(args.swap_remove(0));
                     call(
@@ -1040,9 +1226,12 @@ fn member_of_many(lua: &Lua, member: &Member) -> mlua::Result<mlua::Function> {
 /// only: a plugin reaches what the app exposes to it, by name
 /// (`ui.call_sync`).
 pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    // (`ui.call` read as a table with an async action is made, not here:
+    // reading it makes the names made with it.)
+    let calls = ui.clone();
     ui.set(
         "module",
-        lua.create_function(|lua, name: String| {
+        lua.create_function(move |lua, name: String| {
             let functions = {
                 let env = crate::node::env(lua)?;
                 if !matches!(*env.grants, crate::Grants::All) {
@@ -1070,6 +1259,16 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             })?;
             let table = lua.create_table_with_capacity(0, module.members.len())?;
             for member in &module.members {
+                if let Call::Async = member.call {
+                    // (As `ui.call(name, arg)`: a promise, the app's grants.)
+                    let call: mlua::Function = calls.get("call")?;
+                    let name = member.registered.name.clone();
+                    let function = lua.create_function(move |_, arg: Option<Value>| {
+                        call.call::<mlua::Value>((&*name, arg))
+                    })?;
+                    table.raw_set(&*member.member, function)?;
+                    continue;
+                }
                 let function = match member.arity {
                     0 => member_function!(lua, member,),
                     1 => member_function!(lua, member, a),
@@ -1236,6 +1435,7 @@ impl ScriptHost {
             action: register_action,
             state,
             host_ref,
+            async_action: register_async_action,
         };
         // SAFETY: The tables an entry is called with, `registrar` alive
         // through the call.
@@ -1268,9 +1468,16 @@ impl ScriptHost {
                     .iter()
                     .flat_map(|said| &said.functions)
                     .find(|(function, ..)| *function == name);
+                let listed_async = said
+                    .registers
+                    .iter()
+                    .flat_map(|said| &said.asyncs)
+                    .find(|(function, _)| *function == name);
                 Member {
                     member: listed
-                        .map_or_else(|| member_of(&name).to_owned(), |(_, m, _)| m.clone()),
+                        .map(|(_, m, _)| m.clone())
+                        .or_else(|| listed_async.map(|(_, m)| m.clone()))
+                        .unwrap_or_else(|| member_of(&name).to_owned()),
                     arity: listed.map_or(1, |(.., arity)| *arity),
                     call,
                     registered: registered.clone(),
@@ -1286,6 +1493,11 @@ impl ScriptHost {
                     self.function(name, taking_of(call, registered));
                 }
                 Kind::Action(call) => self.action(name, action_of(call, registered)),
+                Kind::Async(call) => {
+                    members.push(member(Call::Async));
+                    let host = Rc::downgrade(&self.0);
+                    self.async_action(name, move |arg| async_call(call, &registered, &host, arg));
+                }
             }
         }
         LOADED.with_borrow_mut(|all| {

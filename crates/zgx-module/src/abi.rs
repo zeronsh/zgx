@@ -207,6 +207,19 @@ pub struct Api {
     /// Lets go of a shared state's handle (the state stays: it is the
     /// host's).
     pub shared_release: unsafe extern "C" fn(shared: *mut c_void),
+    /// Settles an async action's promise ([`AsyncAction`]): with `value`
+    /// (taken) if `ok` is not 0, else rejected with `value`, a string of
+    /// why (raised as the action's error, naming it and the module). Once,
+    /// on the interface's thread; the promise is let go of with it. Settled
+    /// after its caller is gone, it does nothing.
+    pub settle: unsafe extern "C" fn(promise: *mut c_void, ok: u32, value: *mut Raw),
+    /// Lets go of a promise unsettled: it rejects, saying the module
+    /// dropped it. Any thread.
+    pub promise_release: unsafe extern "C" fn(promise: *mut c_void),
+    /// A handle to the host of the script waiting on `promise`, to keep
+    /// (let go with [`host_release`](Self::host_release)): how a thread
+    /// holding the promise posts its settling back. Any thread.
+    pub promise_host: unsafe extern "C" fn(promise: *const c_void) -> *mut c_void,
 }
 
 /// A shared state's observer ([`Api::shared_observe`]): `value` is what it
@@ -256,6 +269,14 @@ pub type FunctionTaking =
 pub type Action = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw, out: *mut Raw) -> u32;
 /// Frees a registration's `user` when the host that held it goes.
 pub type Free = unsafe extern "C" fn(user: *mut c_void);
+/// A module's async action, as `ui.call(name, arg)` calls it (and a script
+/// by name on the module's table): `arg` lent for the call, as a
+/// function's. It returns at once; the script holds a promise, which the
+/// module settles later ([`Api::settle`], on the interface's thread) or
+/// lets go of ([`Api::promise_release`], any thread), exactly one of the
+/// two. `promise` may be sent to another thread to wait there.
+pub type AsyncAction =
+    unsafe extern "C" fn(user: *mut c_void, arg: *const Raw, promise: *mut c_void);
 
 /// What a module registers with as it loads: valid only inside its
 /// [`Entry`] call.
@@ -314,6 +335,16 @@ pub struct Registrar {
     /// [`Api::host_release`]. A host whose module asks for none keeps
     /// nothing for it.
     pub host_ref: unsafe extern "C" fn(host: *mut c_void) -> *mut c_void,
+    /// Registers an async action scripts call with `ui.call(name, arg)`,
+    /// getting a promise of its result.
+    pub async_action: unsafe extern "C" fn(
+        host: *mut c_void,
+        name: *const u8,
+        len: usize,
+        call: AsyncAction,
+        user: *mut c_void,
+        free: Free,
+    ),
 }
 
 /// A module's entry, exported as [`ENTRY`]: called once per host it is

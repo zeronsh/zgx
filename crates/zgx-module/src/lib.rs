@@ -983,6 +983,50 @@ impl Host<'_> {
         // SAFETY: The registrar's own host, inside the entry call.
         unsafe { (r.action)(r.host, name.as_ptr(), name.len(), call, user, free) }
     }
+    /// [`Host::raw_function`], of an async action.
+    ///
+    /// # Safety
+    /// As `raw_function`'s, by [`abi::AsyncAction`].
+    #[doc(hidden)]
+    pub unsafe fn raw_async_action(
+        &self,
+        name: &str,
+        call: abi::AsyncAction,
+        user: *mut c_void,
+        free: abi::Free,
+    ) {
+        let r = self.registrar();
+        // SAFETY: The registrar's own host, inside the entry call.
+        unsafe { (r.async_action)(r.host, name.as_ptr(), name.len(), call, user, free) }
+    }
+    /// Registers an async action scripts call with `ui.call(name, arg)`
+    /// (`ScriptHost::async_action`), getting a promise of its result: it
+    /// returns at once, and settles `promise` later ([`Promise::resolve`],
+    /// [`Promise::reject`]), on the interface's thread, from a job a
+    /// thread of its own posts ([`Ui::post`]). A promise dropped unsettled
+    /// rejects, naming the action and the module.
+    pub fn async_action<F: Fn(Ref<'_>, Promise<Value>) + 'static>(&self, name: &str, action: F) {
+        unsafe extern "C" fn call<G: Fn(Ref<'_>, Promise<Value>)>(
+            user: *mut c_void,
+            arg: *const Raw,
+            promise: *mut c_void,
+        ) {
+            // SAFETY: `user` is the `F` boxed below, alive until `free`;
+            // `arg` lent for the call; the promise the module's.
+            unsafe {
+                (*(user as *const G))(
+                    Ref {
+                        at: arg,
+                        _of: PhantomData,
+                    },
+                    Promise::from_raw(promise),
+                )
+            }
+        }
+        let user = Box::into_raw(Box::new(action));
+        // SAFETY: `call` reads `user` as the `F` it is, and the box's free.
+        unsafe { self.raw_async_action(name, call::<F>, user.cast(), free_box_of(user)) }
+    }
 }
 
 /// A handle to a host for a module's own threads ([`Host::ui`]): `Send`,
@@ -1113,6 +1157,81 @@ impl Drop for Observer {
             // SAFETY: The subscription this one holds, let go of once.
             unsafe { (api().shared_unobserve)(self.0) }
         }
+    }
+}
+
+/// An async action's promise ([`Host::async_action`], `#[export(async)]`):
+/// what the script that called waits on. `Send`, so a thread of the
+/// module's may hold it while it works; settled on the interface's thread
+/// (a `&Host` says so), once. Dropped unsettled, it rejects, saying the
+/// module dropped it.
+#[must_use = "a promise dropped unsettled rejects"]
+pub struct Promise<T = Value> {
+    at: *mut c_void,
+    _of: PhantomData<fn(T)>,
+}
+// SAFETY: A promise may be held and let go of on any thread
+// (`Api::promise_release`); settled only with a `&Host`, on the interface's.
+unsafe impl<T> Send for Promise<T> {}
+impl<T> Promise<T> {
+    /// # Safety
+    /// `at` is a promise the runtime handed the module, unsettled.
+    #[doc(hidden)]
+    pub unsafe fn from_raw(at: *mut c_void) -> Self {
+        Promise {
+            at,
+            _of: PhantomData,
+        }
+    }
+    /// A handle to the host of the script waiting on it: how a thread
+    /// holding it posts back ([`Ui::post`]).
+    pub fn ui(&self) -> Ui {
+        // SAFETY: An unsettled promise, held; the handle the `Ui` owns.
+        Ui(unsafe { (api().promise_host)(self.at) })
+    }
+    /// Settles it on the interface's thread, from any: posts `make`, which
+    /// makes its result there (a value is that thread's) and settles it
+    /// with that. Dropped unrun if the host is gone (no one waits then).
+    pub fn resolve_with<F>(self, make: F)
+    where
+        T: IntoValue + 'static,
+        F: FnOnce(&Host) -> Result<T, Failed> + Send + 'static,
+    {
+        let ui = self.ui();
+        ui.post(move |host| match make(host) {
+            Ok(value) => self.resolve(host, value),
+            Err(why) => self.reject(host, why),
+        });
+    }
+    /// Rejects it: `why` is raised in the script that waits, naming the
+    /// action and the module, as a failing function's is.
+    pub fn reject(self, _host: &Host, why: impl Into<Failed>) {
+        self.settle(false, Value::from(why.into().0));
+    }
+    fn settle(self, ok: bool, value: Value) {
+        let promise = std::mem::ManuallyDrop::new(self);
+        let mut value = std::mem::ManuallyDrop::new(value);
+        // SAFETY: An unsettled promise, settled once, on the interface's
+        // thread (a `&Host` was lent to the caller); `value` given.
+        unsafe {
+            (api().settle)(
+                promise.at,
+                u32::from(ok),
+                std::ptr::from_mut(&mut value.raw),
+            )
+        }
+    }
+}
+impl<T: IntoValue> Promise<T> {
+    /// Settles it with `value`.
+    pub fn resolve(self, _host: &Host, value: T) {
+        self.settle(true, value.into_value());
+    }
+}
+impl<T> Drop for Promise<T> {
+    fn drop(&mut self) {
+        // SAFETY: An unsettled promise, let go of once (any thread).
+        unsafe { (api().promise_release)(self.at) }
     }
 }
 
@@ -1252,6 +1371,33 @@ pub mod __private {
     }
     /// What frees a `user` that needs no freeing.
     pub unsafe extern "C" fn keep(_user: *mut c_void) {}
+    /// An async action's promise, from the runtime's pointer.
+    ///
+    /// # Safety
+    /// As [`super::Promise::from_raw`]'s.
+    #[inline(always)]
+    pub unsafe fn promise<T>(at: *mut c_void) -> super::Promise<T> {
+        // SAFETY: The caller's.
+        unsafe { super::Promise::from_raw(at) }
+    }
+    /// An async action rejected at once over the argument at `index`,
+    /// named `name`, which isn't a `T`.
+    ///
+    /// # Safety
+    /// `promise` is an unsettled promise, on the interface's thread.
+    #[cold]
+    #[inline(never)]
+    pub unsafe fn wrong_async<'a, T: FromValue<'a>>(
+        promise: *mut c_void,
+        index: usize,
+        name: &str,
+        value: Ref<'a>,
+    ) {
+        let why = format!("argument {} ({name}) {}", index + 1, T::wrong(value));
+        let mut why = std::mem::ManuallyDrop::new(Value::from(why));
+        // SAFETY: The caller's; `why` given.
+        unsafe { (super::api().settle)(promise, 0, std::ptr::from_mut(&mut why.raw)) }
+    }
 }
 
 /// What a module's entry does ([`register!`], [`module`]): checks the runtime speaks this module's
