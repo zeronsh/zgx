@@ -132,8 +132,9 @@ pub struct Api {
     /// any thread. It wakes the host as a value sent to it does, and nothing
     /// waits or polls while nothing is posted. The jobs of one turn run in
     /// the order posted, each in one reactive batch (what it sets updates
-    /// once). [`POSTED`], or [`GONE`] once the host is: `free` is then
-    /// called at once, on the caller's thread.
+    /// once); each frees its `user` as it runs, and `free` frees one that
+    /// doesn't run. [`POSTED`], or [`GONE`] once the host is: `free` is
+    /// then called at once, on the caller's thread.
     pub post:
         unsafe extern "C" fn(host: *mut c_void, job: Job, user: *mut c_void, free: Free) -> u32,
     /// Calls `fire` after `ms` milliseconds on zgx's clock (a test's,
@@ -232,8 +233,9 @@ pub const POSTED: u32 = 1;
 pub const GONE: u32 = 0;
 
 /// A job [`Api::post`] runs on the interface's thread: `host` is the host
-/// handle it was posted to, lent for the call. It runs once; its `user` is
-/// freed after (or unrun, if the host goes first).
+/// handle it was posted to, lent for the call. It runs once, and frees its
+/// own `user` as it does (the post's `free` is for a job that never runs:
+/// its host went first).
 pub type Job = unsafe extern "C" fn(user: *mut c_void, host: *mut c_void);
 /// A timer's call ([`Api::after`]), on the interface's thread, `host` lent:
 /// a repeating timer goes on while it returns not 0.

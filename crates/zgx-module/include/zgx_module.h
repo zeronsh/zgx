@@ -91,8 +91,8 @@ typedef struct zgx_bytes {
 /* Frees a registration's, a job's or a timer's `user` when it is done. */
 typedef void (*zgx_free)(void *user);
 /* A job zgx_api.post runs on the interface's thread: `host` is the host
- * handle it was posted to, lent. It runs once; `user` is freed after (or
- * unrun, if the host goes first). */
+ * handle it was posted to, lent. It runs once and frees its own `user` as it
+ * does; the post's `free` frees one that never runs (its host went first). */
 typedef void (*zgx_job)(void *user, void *host);
 /* A timer's call (zgx_api.after), on the interface's thread, `host` lent: a
  * repeating timer goes on while it returns not 0. */
