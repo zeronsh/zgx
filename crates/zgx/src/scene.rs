@@ -10865,8 +10865,12 @@ impl Scene {
             } else {
                 self.tree_node_mut(current)
             };
-            let boundary = !first && Self::is_layout_boundary(node);
-            // A boundary is laid out as one (`layout_roots`).
+            // The node it starts from as well, where that is the stop: its
+            // children changed, its own size did not
+            // (`invalidate_children_layout`).
+            let boundary = (!first || alone) && Self::is_layout_boundary(node);
+            // A boundary is laid out as one (`layout_roots`): `layout_alone`
+            // leaves those to it.
             let alone = alone && !boundary;
             let parent = node.parent;
             let ink = node.bounds_valid.replace(0);
