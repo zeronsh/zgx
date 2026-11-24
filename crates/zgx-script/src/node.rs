@@ -1934,6 +1934,11 @@ pub(crate) struct CodeProps {
     /// end`: shapes beside a line (a quote's rule, a code block's wash),
     /// given what `highlight` was given for it (0 without one).
     pub line_marks: Option<Function>,
+    /// `group_scrollbar = true`: its scroll groups (a `line_insets` line's
+    /// `group`, a code block's) show the scrollbar scroll views do, across
+    /// the bottom of the one that moved last. Read past the style keys
+    /// (`late_field`), as few textareas have one.
+    pub group_scrollbar: std::cell::Cell<bool>,
     /// `decorations`: a state or function of `{ { from, to, color }, … }`,
     /// bytes of the whole text marked behind it (a search's matches).
     pub decorations: Option<Readable>,
@@ -4175,6 +4180,7 @@ const WIDGET_FIELDS: &[&str] = &[
 #[cfg(test)]
 const LATE_FIELDS: &[&str] = &[
     "hit",
+    "group_scrollbar",
     "inputmode",
     "caret_color",
     "caret_width",
@@ -4266,6 +4272,15 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             let radius = source(lua, Ty::Num, name, value)?;
             let given = node.rare_mut().theme.take();
             node.rare_mut().theme = Some(ThemeSpec::SelectionRadius(Box::new((given, radius))));
+        }
+        // A code textarea's (one with `line_insets`) group scrollbar.
+        "group_scrollbar" => {
+            if let Kind::Input {
+                code: Some(code), ..
+            } = &node.kind
+            {
+                code.group_scrollbar.set(lua.unpack::<bool>(value)?);
+            }
         }
         "caret_color" | "caret_width" => {
             let Kind::Input { rare, .. } = &mut node.kind else {

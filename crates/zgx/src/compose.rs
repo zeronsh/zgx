@@ -569,6 +569,8 @@ pub(crate) struct CodeOptions {
     atom_style: Option<crate::editor_atom_style::AtomStyle>,
     /// `atom_codec`: how its atoms go on the clipboard beyond the app.
     atom_codec: Option<crate::widgets::AtomCodec>,
+    /// `group_scrollbar`: its scroll groups' scrollbar.
+    group_scrollbar: bool,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -2060,6 +2062,14 @@ impl View {
         marks: impl Fn(usize, &str, u32) -> Vec<crate::widgets::LineMark> + 'static,
     ) -> Self {
         self.code_mut().line_marks = Some(std::rc::Rc::new(marks));
+        self
+    }
+    /// A text area's scroll groups (`LineInset::scroll_group`, a code
+    /// block's) get the scrollbar scroll views show: one, across the bottom
+    /// of the group that moved last, as it scrolls; its drag scrolls it.
+    #[doc(hidden)]
+    pub fn group_scrollbar(mut self) -> Self {
+        self.code_mut().group_scrollbar = true;
         self
     }
     /// Ranges of a text area's text (UTF-8 byte ranges) marked with a colour
@@ -7759,7 +7769,11 @@ fn open_element(
                 atom_pointer,
                 atom_style,
                 atom_codec,
+                group_scrollbar,
             } = *code;
+            if group_scrollbar {
+                editor.mount_group_scrollbar(ui);
+            }
             if line_insets.is_some() {
                 editor.set_line_insets(line_insets);
             }

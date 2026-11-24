@@ -6643,6 +6643,19 @@ fn line_insets_of(
                 if table.raw_get::<Option<bool>>("hidden").ok().flatten() == Some(true) {
                     inset = zgx::widgets::LineInset::hidden();
                 }
+                // A code block's lines: one scroll group, never wrapped.
+                if let Ok(Some(group)) = table.raw_get::<Option<f64>>("group")
+                    && group.is_finite()
+                    && group >= 0.
+                {
+                    inset = inset.in_group(group.min(u32::MAX as f64) as u32);
+                }
+                if matches!(
+                    table.raw_get::<mlua::Value>("nowrap"),
+                    Ok(mlua::Value::Boolean(true))
+                ) {
+                    inset = inset.unwrapped();
+                }
                 inset
             }
             Ok(None) => zgx::widgets::LineInset::default(),
@@ -6738,6 +6751,7 @@ fn line_marks_of<C: Fn(&str) -> Option<zgx::scene::Color> + 'static>(
             made.mono = yes("mono");
             made.tabular = yes("tabular");
             made.over_text = yes("over_text");
+            made.pinned = yes("pinned");
             if let Ok(Some(label)) = mark.raw_get::<Option<String>>("label") {
                 made.label = Some((
                     std::sync::Arc::from(label),
@@ -7012,6 +7026,9 @@ fn code_editor(
             color_of.clone(),
             theme.clone(),
         ));
+    }
+    if code.group_scrollbar.get() {
+        view = view.group_scrollbar();
     }
     if let Some(highlight) = &code.highlight {
         let (highlight, vm, states) = (highlight.clone(), vm.clone(), states.clone());

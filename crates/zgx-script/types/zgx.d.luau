@@ -601,18 +601,26 @@ export type HighlightSpan = {
 }
 -- A textarea line's room (`line_insets`), in points: before its text (it
 -- wraps in what this leaves), above and below it; `hidden` takes the line
--- and its room away (a closed toggle's lines).
+-- and its room away (a closed toggle's lines). Lines sharing a `group`
+-- scroll sideways together (a code block's), shown from the first one's
+-- `left` to the area's edge; a `nowrap` line never wraps (the web's
+-- `white-space: pre`): shaped once at its full width, it scrolls with its
+-- group.
 export type LineInset = {
 	left: number?,
 	above: number?,
 	below: number?,
 	hidden: boolean?,
+	group: number?,
+	nowrap: boolean?,
 }
 -- A shape beside a textarea line (`line_marks`), in points from the line's
 -- left edge (its right with `from_right`) and from the top of its text:
 -- `w = "fill"` reaches the area's right edge, `h = "fill"` the line's
 -- bottom (less `bottom`). A list item's number is a `label`; `over_text`
--- draws it over the text.
+-- draws it over the text. A mark of a line in a scroll group moves with
+-- its text, cut to the group's frame, unless `pinned` (a code block's
+-- wash and line numbers stay still).
 export type LineMark = {
 	x: number?,
 	y: number?,
@@ -630,6 +638,7 @@ export type LineMark = {
 	mono: boolean?,
 	tabular: boolean?,
 	over_text: boolean?,
+	pinned: boolean?,
 }
 -- A number, or a number token: a standard one (`"$radius.md"`, see
 -- `NumberToken`) or an app's (`"$terminal.inset"`), hence any string.
@@ -9433,6 +9442,10 @@ export type InputProps = {
 	-- for it. Asked once for each line text and state (and theme), it must
 	-- depend on nothing but its arguments.
 	line_marks: ((line: string, state: any) -> { LineMark }?)?,
+	-- Several lines only: its scroll groups (a `LineInset`'s `group`, a
+	-- code block's) show the scrollbar scroll views do, across the bottom
+	-- of the one that moved last.
+	group_scrollbar: boolean?,
 	-- Several lines only: ranges of the whole text marked behind it (a
 	-- search's matches), `{ { from, to, color? }, … }` in bytes counted
 	-- from 1; only those in view are drawn.

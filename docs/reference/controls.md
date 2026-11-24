@@ -179,6 +179,36 @@ return ui.textarea {
 }
 ```
 
+### Code blocks
+
+A `line_insets` line with a `group` (a number) scrolls sideways with the other lines of that group, as the web's `overflow-x: auto` does; with `nowrap = true` it never wraps (`white-space: pre`): it's shaped once at its full width and shows from the group's first line's `left` to the area's right edge. A sideways wheel or trackpad motion over a group's line, or a mouse wheel with Shift held, scrolls that group and nothing else; a caret moved into what the group cuts off brings it into view, and one scrolled out of it hides. Carets, clicks and selection follow the group's offset, and its text moves without being laid out again. A mark of a grouped line moves with its text, cut to the group's frame, unless it's `pinned = true` (a block's wash and line numbers stay still). `group_scrollbar = true` shows the scrollbar scroll views do across the bottom of the group that moved last; its drag scrolls it. A textarea without groups lays out and draws as before. In the browser, lines scroll with the text area ([zgx-dom](../dom.md#what-doesnt-map)).
+
+```lua
+return ui.textarea {
+	value = ui.state("note", "Some prose that wraps.\n```\nlocal wide = 'a line wider than the note'\n```"),
+	wrap = true,
+	group_scrollbar = true,
+	highlight = function(line, state)
+		if line == "```" then
+			return {}, if state == "code" then 0 else "code"
+		end
+		return {}, state
+	end,
+	line_insets = function(line, state)
+		if state == "code" and line ~= "```" then
+			return { left = 12, group = 1, nowrap = true }
+		end
+		return nil
+	end,
+	line_marks = function(line, state)
+		if state == "code" and line ~= "```" then
+			return { { x = 0, w = "fill", h = "fill", fill = "$surface.sunken", pinned = true } }
+		end
+		return nil
+	end,
+}
+```
+
 ## checkbox
 
 A toggle drawn as the platform draws one, a rounded 16-point box beside its label, bound to a boolean state: outlined while off; filled with the accent while on, its checkmark drawing on; a dash while `mixed`. A click on either, or Space, toggles it; Enter goes on to the form (its default action), as a browser's checkbox and AppKit's do. Its colours are the theme's `$accent`, `$accent.text`, `$input.bg` and `$border.strong`, so the system's accent shows where the host gives it. Disabled, it dims.

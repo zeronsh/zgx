@@ -11798,6 +11798,13 @@ impl Scene {
             self.add_damage(clip);
         }
     }
+    /// Repaint what `id` and its descendants paint, where they are: what
+    /// stays still under or over scroll content as it moves (a code block's
+    /// pinned marks as its lines scroll sideways), which a copy of the
+    /// content's pixels would take with it.
+    pub(crate) fn damage_still(&mut self, id: NodeId) {
+        self.damage_subtree(id);
+    }
     /// `world`'s clip alone (`.2`): what `id` paints within, from its own
     /// and its ancestors' clips, each at its box translated by its own and
     /// its ancestors' translations, summed from it upwards.

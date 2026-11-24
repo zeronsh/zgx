@@ -262,3 +262,73 @@ fn line_marks_draw_beside_lines_by_their_text_and_state() {
         "outside: {texts:?}"
     );
 }
+
+/// A fenced code block's lines, put in one scroll group and never wrapped
+/// by `line_insets` (by their state), scroll sideways together under a
+/// wheel's sideways motion; its wash, `pinned`, stays where it is, and the
+/// prose around it wraps and stays.
+#[test]
+fn a_code_blocks_lines_scroll_sideways_in_a_group() {
+    let wide = "x".repeat(120);
+    let mut h = Harness::inline(&format!(
+        r##"
+        return ui.textarea {{ id = "note", value = ui.state("text", "a\n```\n{wide}\nb\n```\n{prose}"),
+            w = 300, h = 200, p = 0, text_size = 10, line_height = 20, wrap = true,
+            group_scrollbar = true,
+            highlight = function(line, state)
+                if line == "```" then
+                    return {{}}, if state == "code" then 0 else "code"
+                end
+                return {{}}, state
+            end,
+            line_insets = function(line, state)
+                if state == "code" and line ~= "```" then
+                    return {{ left = 20, group = 7, nowrap = true }}
+                end
+                return nil
+            end,
+            line_marks = function(line, state)
+                if state == "code" and line ~= "```" then
+                    return {{ {{ x = 0, w = "fill", h = "fill", fill = "#eeeeee", pinned = true }},
+                        {{ x = 20, w = 4, h = 4, fill = "#ff0000" }} }}
+                end
+                return nil
+            end }}
+    "##,
+        prose = "word ".repeat(40),
+    ));
+    h.frames(4);
+    assert_eq!(h.error(), None);
+    let node = h.find("note").expect("the note");
+    let editor = h.ui.editor(node).expect("an editor");
+    let (view, content) = editor.group_extent(7).expect("its block's group");
+    assert_eq!(view, 280.);
+    assert!(content > view, "the wide line reaches past it: {content}");
+    let start = 6;
+    assert_eq!(
+        editor.range_boxes(start..start + 120).len(),
+        1,
+        "the wide line is one row"
+    );
+    // "a\n```\n", the wide line, "\nb\n```\n", then the prose.
+    let prose = start + 120 + 7;
+    let rows = editor.range_boxes(prose..prose + 200).len();
+    assert!(rows >= 2, "the prose wraps");
+    let before = editor.range_boxes(start + 40..start + 41)[0];
+    let at = h.ui.scene.borrow().transformed_bounds(node);
+    h.ui.dispatch(zgx::input::InputEvent::Scroll {
+        x: at.x + 100.,
+        y: at.y + before.y + 5.,
+        delta_x: 30.,
+        delta_y: 0.,
+    });
+    h.frames(2);
+    assert_eq!(editor.group_scroll(7), 30.);
+    let after = editor.range_boxes(start + 40..start + 41)[0];
+    assert!(
+        (before.x - after.x - 30.).abs() < 0.01,
+        "{before:?} {after:?}"
+    );
+    assert_eq!(editor.scroll_offset(), (0., 0.), "the note didn't move");
+    assert_eq!(h.error(), None);
+}
