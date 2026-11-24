@@ -95,6 +95,56 @@ fn luau_measures_text_as_the_page_lays_it_out() {
 }
 
 #[wasm_bindgen_test]
+async fn luau_measures_frames_on_animation_frames() {
+    // `ui.frames.measure` on `requestAnimationFrame`: a 200 ms window of
+    // frames, then the web's fields; and the page asks for none after.
+    let runtime = Runtime::new();
+    let script = ScriptHost::inline(
+        &runtime,
+        "frames.luau",
+        r#"
+        local said = ui.state("said", "")
+        local n = ui.state("n", 0)
+        return ui.column {
+            ui.button { "Measure", on_click = function()
+                ui.frames.measure(function() n:set(n:peek() + 1) end, { window_ms = 200 })
+                    :after(function(m)
+                        said:set(table.concat({
+                            tostring(m.frames >= 2),
+                            tostring(#m.times == m.frames),
+                            tostring(m.duration_ms ~= nil and m.duration_ms > 0),
+                            tostring(m.settled_ms ~= nil and m.settled_ms >= m.duration_ms),
+                            tostring(m.blocked_ms ~= nil),
+                            tostring(m.times[#m.times] >= 200),
+                        }, " "))
+                    end)
+            end },
+            ui.text { said },
+        }
+        "#,
+    );
+    script.reload().expect("the script loads");
+    let host = host();
+    let mounted = zgx_dom::mount(&runtime, &host, script.view());
+    let button: web_sys::HtmlElement = host
+        .query_selector("button")
+        .unwrap()
+        .expect("a button")
+        .dyn_into()
+        .unwrap();
+    button.click();
+    zgx_dom::flush();
+    sleep(900).await;
+    let text = host.text_content().unwrap_or_default();
+    assert!(text.contains("true true true true true true"), "{text}");
+    assert!(
+        !zgx_dom::frame_asked(),
+        "a settled measure asks for no frames"
+    );
+    mounted.unmount();
+}
+
+#[wasm_bindgen_test]
 fn script_errors_are_caught_in_the_browser() {
     // Luau throws on a script error (a C++ exception, through WebAssembly's
     // exception handling): the host reports it rather than the page dying.

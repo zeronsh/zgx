@@ -55,6 +55,7 @@ mod element;
 mod elements_report;
 mod estimate;
 mod fetch_policy;
+mod frames;
 mod journal;
 mod json;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
@@ -4717,6 +4718,8 @@ impl ScriptHost {
                 #[cfg(feature = "audio")]
                 host.0.audio.set_frames((*frames).clone());
                 cx.tasks().spawn(engine.run((*frames).clone()));
+                // `ui.frames` measures on them.
+                timers.set_frames((*frames).clone());
             }
             // `ui.persist` saves on a timer from here, and `ui.every` runs.
             if cx.try_service::<zgx::compose::TaskRunner>().is_some() {
@@ -5426,6 +5429,7 @@ impl ScriptHost {
         );
         lazy.ui(&["glass"], node::install_glass);
         lazy.ui(&["host_view"], node::install_host_view);
+        lazy.ui(&["frames"], frames::install);
         lazy.ui(&["map"], node::install_map);
         #[cfg(feature = "scene3d")]
         lazy.ui(

@@ -511,6 +511,10 @@ pub(crate) fn pending(lua: &Lua, name: String) -> mlua::Result<Rc<Promise>> {
         abort: RefCell::default(),
     }))
 }
+/// Settle `promise` with `value` now (a caller batching what it wakes).
+pub(crate) fn resolve(promise: &Rc<Promise>, value: Value) {
+    promise.settle(Ok(value));
+}
 /// Settle `promise` with what `future` gives, on the window's tasks.
 pub(crate) fn settle_with(
     lua: &Lua,

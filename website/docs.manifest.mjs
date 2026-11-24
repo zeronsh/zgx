@@ -139,7 +139,7 @@ export const sets = [
       { slug: 'reference', src: 'docs/reference/index.md', title: 'Reading the reference' },
       { slug: 'reference/api', mdx: 'luau/api.mdx' },
       { slug: 'reference/state', src: 'docs/reference/state.md', title: 'State and components', intro: true,
-        sections: ['Making state', 'State methods', 'Actions', 'Computeds, effects, batches', 'Large data', 'Refs', 'Components', 'Example', 'Modules and templates', 'Plugins and slots', 'Gotchas'] },
+        sections: ['Making state', 'State methods', 'Actions', 'Computeds, effects, batches', 'Large data', 'Measuring frames', 'Refs', 'Components', 'Example', 'Modules and templates', 'Plugins and slots', 'Gotchas'] },
       { slug: 'reference/properties', src: 'docs/reference/properties.md', title: 'Properties' },
       { slug: 'reference/events', src: 'docs/reference/events.md', title: 'Events' },
       { slug: 'reference/containers', src: 'docs/reference/containers.md', title: 'Containers' },

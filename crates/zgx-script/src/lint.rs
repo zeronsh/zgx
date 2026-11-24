@@ -314,6 +314,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "linear",
     "render_canvas",
     "measure_text",
+    "frames",
     "radial",
     "conic",
     "sort",

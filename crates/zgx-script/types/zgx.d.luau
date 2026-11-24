@@ -1014,6 +1014,26 @@ export type FolderPickerOptions = {
 -- A value to come (`ui.call`, `ui.fetch`, the file functions), of type
 -- `T`. Reads of its fields are tracked: what reads them follows it as it
 -- settles.
+-- What `ui.frames` measured: each frame's time from the start (ms), the
+-- start on `ui.now`'s clock, frames and those after a gap over 50 ms;
+-- `duration_ms` the second frame's time, `blocked_ms` the sum of the gaps
+-- over 50 ms, `settled_ms` the later of `duration_ms` and the last such
+-- gap's end (a sample cut short has `duration_ms` alone, if two frames
+-- came), each rounded; `capped` once `begin` reached 30 s.
+export type FrameSample = {
+	start_ms: number,
+	times: { number },
+	frames: number,
+	long_frames: number,
+	duration_ms: number?,
+	settled_ms: number?,
+	blocked_ms: number?,
+	capped: boolean?,
+}
+-- A gesture's measure (`ui.frames.begin`): `finish` ends it.
+declare extern type FrameMeasure with
+	function finish(self): Promise<FrameSample>
+end
 export type Promise<T = unknown> = {
 	-- It settled, with a value or an error.
 	done: boolean,
@@ -23902,6 +23922,13 @@ declare ui: {
 	-- Call `fn` once, after `ms` milliseconds (0: before the next frame is drawn); returns a
 	-- function that cancels it.
 	after: (ms: number, fn: () -> ()) -> () -> (),
+	-- How smoothly the app's frames came: `measure` runs `fn` and records
+	-- for `window_ms` (1000) after it, as the web's rAF measures a switch;
+	-- `begin` records until `finish` (a gesture), 30 s at most.
+	frames: {
+		measure: (fn: () -> (), opts: { window_ms: number? }?) -> Promise<FrameSample>,
+		begin: () -> FrameMeasure,
+	},
 	column: (props: ContainerProps?) -> Node,
 	row: (props: ContainerProps?) -> Node,
 	div: (props: ContainerProps?) -> Node,

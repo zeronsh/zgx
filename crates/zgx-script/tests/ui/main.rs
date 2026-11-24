@@ -44,6 +44,8 @@ mod failures;
 mod file_drop;
 #[path = "../focus_snapshot.rs"]
 mod focus_snapshot;
+#[path = "../frames_measure.rs"]
+mod frames_measure;
 #[path = "../grid_areas.rs"]
 mod grid_areas;
 #[path = "../grid_tracks.rs"]
