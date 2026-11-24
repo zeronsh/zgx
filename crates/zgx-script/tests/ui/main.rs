@@ -32,6 +32,8 @@ mod drag_declined;
 mod driver;
 #[path = "../each_reorder.rs"]
 mod each_reorder;
+#[path = "../editor_fence_above.rs"]
+mod editor_fence_above;
 #[path = "../editor_group_leaves.rs"]
 mod editor_group_leaves;
 #[path = "../editor_metrics.rs"]

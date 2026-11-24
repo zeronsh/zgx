@@ -353,3 +353,105 @@ fn without_a_group_nothing_is_cut() {
             .all(|(_, clip)| clip.is_none())
     );
 }
+
+/// "```" typed above lines puts them in a code block (their highlighter
+/// state, which their room depends on): they join its scroll group in that
+/// frame, and leave it as the fence goes.
+#[test]
+fn a_fence_typed_above_lines_groups_them() {
+    let mut ui = Ui::new(600., 400.);
+    let wide = "y".repeat(200);
+    let value = ui.signal(format!("intro\n\n{wide}\nshort"));
+    let view = ui.mount(
+        text_area("Note", value)
+            .w(400.)
+            .h(300.)
+            .p(0.)
+            .text_size(10.)
+            .line_height(20.)
+            .text_wrap(true)
+            .span_highlighter(|line: &str, state| {
+                (Vec::new(), if line == "```" { 1 - state } else { state })
+            }),
+    );
+    ui.prepare_frame();
+    let editor = ui.editor(view.node()).unwrap();
+    editor.set_line_insets(Some(Rc::new(|_, line: &str, state| {
+        let mut inset = LineInset::default();
+        if state == 1 && line != "```" {
+            inset.scroll_group = Some(GROUP);
+            inset.nowrap = true;
+        }
+        inset
+    })));
+    ui.input.focus(&ui.scene, Some(view.node()));
+    ui.prepare_frame();
+    assert_eq!(editor.group_extent(GROUP), None);
+    let at = "intro\n".len();
+    editor.set_selection(at, at);
+    for _ in 0..3 {
+        ui.dispatch(InputEvent::Text("`".into()));
+        ui.prepare_frame();
+    }
+    let (view_width, content) = editor
+        .group_extent(GROUP)
+        .expect("the lines below are in it");
+    assert!(content > view_width, "{content} in {view_width}");
+    editor.set_selection(at, at + 3);
+    ui.dispatch(InputEvent::Text("x".into()));
+    ui.prepare_frame();
+    assert_eq!(editor.group_extent(GROUP), None, "the fence gone");
+}
+
+/// A theme change asks the highlighter for the lines shown, not the note:
+/// its lines' room, and their group, hold. A new highlighter is asked for
+/// them all, and groups what its states say.
+#[test]
+fn a_theme_change_remeasures_nothing_and_a_new_highlighter_does() {
+    use zgx::theme::{Theme, ThemeKind, tok};
+    let mut ui = Ui::new(600., 400.);
+    for (name, color) in [("a", Color(255, 0, 0, 255)), ("b", Color(0, 255, 0, 255))] {
+        let theme = Theme::new(name, ThemeKind::Dark).with(tok::TEXT_PRIMARY, color);
+        ui.theme().register(theme);
+    }
+    ui.theme().set("a").unwrap();
+    let below: String = (0..1_000).map(|i| format!("\nline {i}")).collect();
+    let value = ui.signal(format!("```{below}"));
+    let (asked, room) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    let (a, r) = (asked.clone(), room.clone());
+    let view = ui.mount(
+        text_area("Note", value)
+            .w(400.)
+            .h(300.)
+            .p(0.)
+            .text_size(10.)
+            .line_height(20.)
+            .text_wrap(true)
+            .span_highlighter(move |line: &str, state| {
+                a.set(a.get() + 1);
+                (Vec::new(), if line == "```" { 1 - state } else { state })
+            })
+            .line_insets(move |_, line: &str, state| {
+                r.set(r.get() + 1);
+                if state == 1 && line != "```" {
+                    LineInset::new(0., 0., 0.).in_group(GROUP)
+                } else {
+                    LineInset::default()
+                }
+            }),
+    );
+    ui.prepare_frame();
+    let editor = ui.editor(view.node()).unwrap();
+    assert!(editor.group_extent(GROUP).is_some());
+    asked.set(0);
+    room.set(0);
+    ui.theme().set("b").unwrap();
+    ui.prepare_frame();
+    assert!(asked.get() > 0, "asked for its colours anew");
+    assert!(asked.get() < 40, "{}", asked.get());
+    assert!(room.get() < 200, "{}", room.get());
+    assert!(editor.group_extent(GROUP).is_some());
+    editor.set_span_highlighter(Some(Rc::new(|_: &str, _| (Vec::new(), 0))));
+    ui.prepare_frame();
+    assert_eq!(editor.group_extent(GROUP), None);
+}

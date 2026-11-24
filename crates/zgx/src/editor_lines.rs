@@ -954,10 +954,21 @@ struct GroupLines {
     first: usize,
     last: usize,
 }
+/// What a line's room says of its scroll group (`LayoutGroups::each`).
+#[derive(Clone, Copy, Debug, Default)]
+struct LineGroup {
+    group: Option<u32>,
+    left: f32,
+    /// How far right it reaches, estimated (none hidden).
+    right: Option<f32>,
+}
 /// A layout's scroll groups (`LinesLayout::groups`): their lines, found once
 /// asked for, and how far their unwrapped lines reach as shaped.
 #[derive(Default)]
 struct LayoutGroups {
+    /// Each line's, in an area with a line in a group: as it was measured,
+    /// so finding the groups asks no line's room again.
+    each: Vec<LineGroup>,
     lines: Option<HashMap<u32, GroupLines>>,
     reach: HashMap<u32, f32>,
 }
@@ -1053,14 +1064,14 @@ impl LineCache {
             Some(old) => {
                 let prefix = old.text.common_prefix(&text);
                 let suffix = old.text.common_suffix(&text, prefix);
-                let layout = LinesLayout::edited(old, text, prefix, suffix);
-                self.edited(Some((old, prefix, suffix)), &layout);
-                layout
+                // Before its lines are measured: their room may depend on
+                // what the lines above leave now (`LineInsets`).
+                self.edited(Some((old, prefix, suffix)), &text);
+                LinesLayout::edited(old, text, prefix, suffix)
             }
             None => {
-                let layout = LinesLayout::new(text, wrap, shape(), self.clone());
-                self.edited(None, &layout);
-                layout
+                self.edited(None, &text);
+                LinesLayout::new(text, wrap, shape(), self.clone())
             }
         });
         *self.last.borrow_mut() = Some(layout.clone());
@@ -1070,7 +1081,7 @@ impl LineCache {
     /// The text went from `old` to `new`'s: what the lines above the edit
     /// leave holds, and what those below it left is kept for when the
     /// edited lines leave what they did.
-    fn edited(&self, old: Option<(&LinesLayout, usize, usize)>, new: &LinesLayout) {
+    fn edited(&self, old: Option<(&LinesLayout, usize, usize)>, new: &Text) {
         let mut states = self.states.borrow_mut();
         let mut tail = self.tail.borrow_mut();
         *tail = None;
@@ -1081,7 +1092,7 @@ impl LineCache {
         let first = new.line_of(prefix);
         let (old_last, new_last) = (
             old.line_of(old.text.len() - suffix),
-            new.line_of(new.text.len() - suffix),
+            new.line_of(new.len() - suffix),
         );
         // The lines below the edit, as far as their states were known, with
         // what entered the first of them.
@@ -1272,6 +1283,26 @@ impl LineCache {
         self.states_through(&highlight, layout, i);
         self.states.borrow()[i - 1]
     }
+    /// The line after the last whose highlighter state before it the edit
+    /// `layout` was just made by changed, of those from line `from` on (the
+    /// first below the edit): a fence typed above lines, which are inside a
+    /// block now. What lines leave is found down to where it is what it was.
+    #[cold]
+    #[inline(never)]
+    fn restated(&self, layout: &LinesLayout, from: usize) -> usize {
+        let Some(highlight) = self.highlighter.borrow().clone() else {
+            return from;
+        };
+        let known = self.tail.borrow().is_some();
+        for i in from..layout.line_count() {
+            self.states_through(&highlight, layout, i);
+            // The lines below leave what they did again (`push_state`).
+            if known && self.tail.borrow().is_none() && self.states.borrow().len() > i {
+                return i;
+            }
+        }
+        layout.line_count()
+    }
     /// What each line above line `i` leaves the next, found as far as it.
     #[inline]
     fn states_through(&self, highlight: &SpanHighlighter, layout: &LinesLayout, i: usize) {
@@ -1292,12 +1323,30 @@ impl LineCache {
     /// Style lines with `highlighter` (none: the editor's style).
     pub(crate) fn set_highlighter(&self, highlighter: Option<SpanHighlighter>) {
         *self.highlighter.borrow_mut() = highlighter;
-        // Lines with room are asked for in `styled` whatever their spans.
-        self.shapes.set(self.has_insets());
+        // Lines with room are asked for in `styled` whatever their spans, and
+        // are measured again: their room may depend on its states.
+        let room = self.has_insets();
+        self.shapes.set(room);
+        if room {
+            self.forget_last();
+        }
         self.tall.set(false);
         self.chips.set(false);
         self.states.borrow_mut().clear();
         *self.tail.borrow_mut() = None;
+        self.colored.borrow_mut().clear();
+    }
+    /// Ask the highlighter for the colours of lines shown anew (a theme's):
+    /// what lines leave the next, and so the room of those with some, holds.
+    pub(crate) fn recolor(&self) {
+        let room = self.has_insets();
+        self.shapes.set(room);
+        self.tall.set(false);
+        self.chips.set(false);
+        if !room {
+            self.states.borrow_mut().clear();
+            *self.tail.borrow_mut() = None;
+        }
         self.colored.borrow_mut().clear();
     }
     /// Ask the highlighter for every line anew.
@@ -1939,38 +1988,113 @@ impl LinesLayout {
         // room of their own. Otherwise every line is a row high.
         if wrap.is_some() || layout.cache.keeps_heights() {
             let width = wrap.unwrap_or(f32::INFINITY);
+            if layout.room {
+                layout.measure_in_room(width);
+                return layout;
+            }
             let known = layout.cache.heights.borrow();
-            let mut grouped = false;
             let each = (0..layout.line_count())
-                .map(|i| {
-                    let line = layout.line_text(i);
-                    let inset = layout.inset(i);
-                    grouped |= inset.scroll_group.is_some();
-                    inset.height(layout.bare_height(&inset, &line, &known, width))
-                })
+                .map(|i| layout.bare_height(&layout.line_text(i), &known, width))
                 .collect();
             drop(known);
-            layout.grouped = grouped;
             layout.heights = Some(RefCell::new(Heights::new(each)));
         }
         layout
     }
-    /// Line `line`'s height before it is shaped, without its room `inset`:
-    /// as last shaped, or estimated at `width`; an unwrapped line's, a row.
-    fn bare_height(
-        &self,
-        inset: &LineInset,
-        line: &str,
-        known: &HashMap<Box<str>, f32>,
-        width: f32,
-    ) -> f32 {
-        if inset.nowrap {
-            return self.row;
-        }
+    /// Line `line`'s height before it is shaped: as last shaped, or estimated
+    /// at `width`.
+    fn bare_height(&self, line: &str, known: &HashMap<Box<str>, f32>, width: f32) -> f32 {
         known
             .get(line)
             .copied()
             .unwrap_or_else(|| self.estimate(line, width))
+    }
+    /// Line `i`'s height with its room before it is shaped (an unwrapped
+    /// line's text, a row), and what its room says of its scroll group: its
+    /// room asked for once.
+    fn measure(&self, i: usize, width: f32) -> (f32, LineGroup) {
+        let inset = self.inset(i);
+        let bare = if inset.nowrap {
+            self.row
+        } else if inset.hidden {
+            0.
+        } else {
+            self.estimate(&self.line_text(i), width)
+        };
+        let group = LineGroup {
+            group: inset.scroll_group,
+            left: inset.left,
+            right: (inset.scroll_group.is_some() && !inset.hidden).then(|| {
+                let width = match self.wrap {
+                    Some(wrap) if !inset.nowrap => (wrap - inset.left).max(1.),
+                    _ => self.line_range(i).len() as f32 * self.advance,
+                };
+                inset.left + width
+            }),
+        };
+        (inset.height(bare), group)
+    }
+    /// Each line's height, its lines with room of their own.
+    #[cold]
+    #[inline(never)]
+    fn measure_in_room(&mut self, width: f32) {
+        let count = self.line_count();
+        let (mut each, mut groups) = (Vec::with_capacity(count), Vec::new());
+        for i in 0..count {
+            let (height, group) = self.measure(i, width);
+            each.push(height);
+            if group.group.is_some() {
+                groups.resize(i, LineGroup::default());
+                groups.push(group);
+            }
+        }
+        self.measured(each, groups);
+    }
+    /// The heights of `old`'s text edited to this one's (`edited`), its lines
+    /// with room of their own: lines `lines` measured again, the rest kept,
+    /// from `moved` of `old`'s on after them.
+    #[cold]
+    #[inline(never)]
+    fn measure_edited(&mut self, old: &LinesLayout, lines: Range<usize>, moved: usize) {
+        let Some(heights) = &old.heights else {
+            return;
+        };
+        let width = self.wrap.unwrap_or(f32::INFINITY);
+        let count = self.line_count();
+        let mut each = Vec::with_capacity(count);
+        let mut groups: Vec<LineGroup> = Vec::new();
+        for i in lines.clone() {
+            let (height, group) = self.measure(i, width);
+            each.push(height);
+            if group.group.is_some() {
+                groups.resize(i, LineGroup::default());
+                groups.push(group);
+            }
+        }
+        let (measured, old_heights) = (each, heights.borrow());
+        let mut each = Vec::with_capacity(count);
+        each.extend_from_slice(&old_heights.each[..lines.start]);
+        each.extend_from_slice(&measured);
+        each.extend_from_slice(&old_heights.each[moved..]);
+        drop(old_heights);
+        let old_groups = old.groups.borrow();
+        if let Some(old) = old_groups.as_ref().filter(|old| !old.each.is_empty()) {
+            groups.resize(lines.end, LineGroup::default());
+            groups[..lines.start].copy_from_slice(&old.each[..lines.start]);
+            groups.extend_from_slice(&old.each[moved..]);
+        }
+        drop(old_groups);
+        self.measured(each, groups);
+    }
+    /// Its lines' heights `each`, and groups `groups` (as far as any is in
+    /// one; none: no line is).
+    fn measured(&mut self, each: Vec<f32>, mut groups: Vec<LineGroup>) {
+        self.grouped = groups.iter().any(|line| line.group.is_some());
+        if self.grouped {
+            groups.resize(each.len(), LineGroup::default());
+            self.groups.get_mut().get_or_insert_default().each = groups;
+        }
+        self.heights = Some(RefCell::new(Heights::new(each)));
     }
     /// `old`'s layout of the text it became, `text`: the same as `text`'s
     /// own. The text starts with `prefix` bytes of `old`'s and ends with
@@ -1993,7 +2117,7 @@ impl LinesLayout {
             rich: old.rich.clone(),
             cache: old.cache.clone(),
             room: old.cache.has_insets(),
-            grouped: old.grouped,
+            grouped: false,
             groups: RefCell::default(),
             joined: RefCell::default(),
         };
@@ -2001,22 +2125,23 @@ impl LinesLayout {
         for i in kept - 1..first_moved.min(layout.line_count()) {
             layout.longest = layout.longest.max(layout.line_range(i).len());
         }
-        if let Some(heights) = &old.heights {
+        if layout.room {
+            // Those below whose state before them the edit changed too, whose
+            // room may depend on it.
+            let measured = layout.cache.restated(&layout, first_moved);
+            let moved = moved + (measured - first_moved);
+            layout.measure_edited(old, kept - 1..measured, moved);
+        } else if let Some(heights) = &old.heights {
             let width = old.wrap.unwrap_or(f32::INFINITY);
             let old_each = &heights.borrow().each;
             let known = layout.cache.heights.borrow();
             let mut each = Vec::with_capacity(layout.line_count());
             each.extend_from_slice(&old_each[..kept - 1]);
-            let mut grouped = layout.grouped;
             for i in kept - 1..first_moved {
-                let line = layout.line_text(i);
-                let inset = layout.inset(i);
-                grouped |= inset.scroll_group.is_some();
-                each.push(inset.height(layout.bare_height(&inset, &line, &known, width)));
+                each.push(layout.bare_height(&layout.line_text(i), &known, width));
             }
             each.extend_from_slice(&old_each[moved..]);
             drop(known);
-            layout.grouped = grouped;
             layout.heights = Some(RefCell::new(Heights::new(each)));
         }
         layout
@@ -2132,32 +2257,27 @@ impl LinesLayout {
             .or_insert(0.);
         *far = far.max(right);
     }
-    /// Each scroll group's lines, found once (each line's room asked for).
+    /// Each scroll group's lines, found once, as each was measured.
     fn group_lines(&self, id: u32) -> Option<GroupLines> {
         if let Some(lines) = (self.groups.borrow().as_ref()).and_then(|g| g.lines.as_ref()) {
             return lines.get(&id).copied();
         }
         let mut found: HashMap<u32, GroupLines> = HashMap::new();
-        for i in 0..self.line_count() {
-            let inset = self.inset(i);
-            let Some(group) = inset.scroll_group else {
+        for (i, line) in (self.groups.borrow().iter())
+            .flat_map(|groups| &groups.each)
+            .enumerate()
+        {
+            let Some(group) = line.group else {
                 continue;
             };
             let lines = found.entry(group).or_insert(GroupLines {
-                left: inset.left,
-                right: inset.left,
+                left: line.left,
+                right: line.left,
                 first: i,
                 last: i,
             });
             lines.last = i;
-            if inset.hidden {
-                continue;
-            }
-            let width = match self.wrap {
-                Some(wrap) if !inset.nowrap => (wrap - inset.left).max(1.),
-                _ => self.line_range(i).len() as f32 * self.advance,
-            };
-            lines.right = lines.right.max(inset.left + width);
+            lines.right = lines.right.max(line.right.unwrap_or(line.left));
         }
         let mine = found.get(&id).copied();
         self.groups.borrow_mut().get_or_insert_default().lines = Some(found);
@@ -3128,5 +3248,189 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(layout.group(3), None);
+    }
+
+    /// A note whose fenced lines (its highlighter's state 1) are 30 in, in
+    /// scroll group 3 and unwrapped, and a closed toggle's (state 2, from a
+    /// line `>` to one `<`) hidden; how many lines were asked for their room.
+    fn fenced() -> (Rc<LineCache>, Rc<Cell<usize>>) {
+        let cache = Rc::new(LineCache::default());
+        cache.set_highlighter(Some(fences()));
+        let asked = Rc::new(Cell::new(0));
+        let count = asked.clone();
+        cache.set_insets(Some(Rc::new(move |_, line: &str, state| {
+            count.set(count.get() + 1);
+            let mut inset = LineInset::default();
+            match state {
+                1 if line != "```" => {
+                    inset.left = 30.;
+                    inset.scroll_group = Some(3);
+                    inset.nowrap = true;
+                }
+                2 => inset.hidden = true,
+                _ => {}
+            }
+            inset
+        })));
+        (cache, asked)
+    }
+    fn fences() -> SpanHighlighter {
+        Rc::new(|line: &str, state| {
+            let leaves = match (line, state) {
+                ("```", 0) => 1,
+                ("```", 1) => 0,
+                (">", 0) => 2,
+                ("<", 2) => 0,
+                _ => state,
+            };
+            (Vec::new(), leaves)
+        })
+    }
+    fn laid(cache: &Rc<LineCache>, text: &str) -> Rc<LinesLayout> {
+        cache.layout(
+            || Text::new(text),
+            None,
+            14.,
+            Some(200.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        )
+    }
+    /// What `layout` says of each line: whether it's hidden and its group
+    /// before any is shaped, and its top, height and group once all are.
+    #[allow(clippy::type_complexity)]
+    fn said(layout: &LinesLayout) -> (Vec<(bool, Option<u32>)>, Vec<(f32, f32, Option<u32>)>) {
+        let group = |i: usize| layout.group_of(i).map(|(id, _)| id);
+        let lines = 0..layout.line_count();
+        let before = (lines.clone())
+            .map(|i| (layout.height(i) == 0., group(i)))
+            .collect();
+        layout.lines_between(0., 10_000.);
+        let after = lines
+            .map(|i| (layout.top(i), layout.height(i), group(i)))
+            .collect();
+        (before, after)
+    }
+
+    /// A fence typed above lines puts them in its block: their room, height
+    /// and group follow, unshown ones' too, as a layout made new has them;
+    /// the fence closed, or gone, puts those below it back.
+    #[test]
+    fn an_edit_above_lines_remeasures_those_its_state_reaches() {
+        let long = "a line wide enough to wrap more than once in two hundred points";
+        let (cache, _) = fenced();
+        let first = laid(&cache, &format!("a\n{long}\nb\n{long}"));
+        assert!(!first.grouped());
+        for text in [
+            format!("a\n```\n{long}\nb\n{long}"),
+            format!("a\n```\n{long}\n```\nb\n{long}"),
+            format!("a\n{long}\n```\nb\n{long}"),
+            format!("a\n{long}\nb\n{long}"),
+            // A toggle closed above them: they take no room.
+            format!("a\n>\n{long}\nb\n{long}"),
+            format!("a\n>\n{long}\nb\n<\n{long}"),
+            // A whole block in one edit: its own lines are in it.
+            format!("a\n```\n{long}\n```\nb"),
+        ] {
+            let edited = laid(&cache, &text);
+            let fresh = laid(&fenced().0, &text);
+            if fresh.grouped() {
+                assert!(edited.grouped(), "{text:?}");
+            }
+            assert_eq!(said(&edited), said(&fresh), "{text:?}");
+        }
+    }
+
+    /// A typed letter asks for its own line's room alone, and a fence for
+    /// its block's, not for the text below it.
+    #[test]
+    fn an_edit_remeasures_no_line_its_state_does_not_reach() {
+        let below: String = (0..1_000).map(|i| format!("\nline {i}")).collect();
+        let (cache, asked) = fenced();
+        laid(&cache, &format!("a\nb\nc\n```\nd\n```{below}"));
+        asked.set(0);
+        laid(&cache, &format!("ax\nb\nc\n```\nd\n```{below}"));
+        assert_eq!(asked.get(), 1);
+        asked.set(0);
+        // Closed two lines on.
+        laid(&cache, &format!("ax\n```\nb\n```\nc\n```\nd\n```{below}"));
+        assert!(asked.get() < 10, "{}", asked.get());
+    }
+
+    /// A highlighter set after the lines were measured measures them again:
+    /// their room may depend on its states.
+    #[test]
+    fn a_highlighter_set_later_remeasures_lines_with_room() {
+        let (cache, _) = fenced();
+        cache.set_highlighter(None);
+        let text = "a\n```\ncode\n```\nb";
+        assert!(!laid(&cache, text).grouped());
+        cache.set_highlighter(Some(fences()));
+        let layout = laid(&cache, text);
+        assert!(layout.grouped());
+        assert_eq!(layout.group_of(2).map(|(id, _)| id), Some(3));
+    }
+
+    /// New colours (a theme's) ask for the lines shown alone, and for no
+    /// line's room, as before insets; the letter typed after asks for its
+    /// own line. What lines leave is kept.
+    #[test]
+    fn new_colours_remeasure_nothing() {
+        let cache = Rc::new(LineCache::default());
+        let highlights = Rc::new(Cell::new(0));
+        let (count, fences) = (highlights.clone(), fences());
+        cache.set_highlighter(Some(Rc::new(move |line: &str, state| {
+            count.set(count.get() + 1);
+            fences(line, state)
+        })));
+        let asked = Rc::new(Cell::new(0));
+        let count = asked.clone();
+        cache.set_insets(Some(Rc::new(move |_, line: &str, state| {
+            count.set(count.get() + 1);
+            let mut inset = LineInset::default();
+            if state == 1 && line != "```" {
+                inset.scroll_group = Some(3);
+            }
+            inset
+        })));
+        let below: String = (0..1_000).map(|i| format!("\nline {i}")).collect();
+        let layout = laid(&cache, &format!("a\n```{below}"));
+        assert!(layout.grouped());
+        highlights.set(0);
+        asked.set(0);
+        cache.recolor();
+        let same = laid(&cache, &format!("a\n```{below}"));
+        assert!(Rc::ptr_eq(&layout, &same), "the layout holds");
+        for i in 0..10 {
+            cache.spans(&same, i);
+        }
+        assert_eq!((highlights.get(), asked.get()), (10, 0));
+        let typed = laid(&cache, &format!("ax\n```{below}"));
+        assert_eq!(asked.get(), 1, "its own line");
+        assert!(typed.grouped());
+    }
+
+    /// A fence typed above a block's worth of lines, and the group it makes,
+    /// ask each line's room once.
+    #[test]
+    fn a_fence_asks_each_lines_room_once() {
+        let below: String = (0..1_000).map(|i| format!("\nline {i}")).collect();
+        let (cache, asked) = fenced();
+        laid(&cache, &format!("a\n``{below}"));
+        asked.set(0);
+        let typed = laid(&cache, &format!("a\n```{below}"));
+        assert!(typed.group(3).is_some());
+        assert_eq!(asked.get(), 1_001, "the fence's line and those below");
+        asked.set(0);
+        let letter = laid(&cache, &format!("ax\n```{below}"));
+        assert!(letter.group(3).is_some());
+        assert_eq!(asked.get(), 1, "its own line, the group kept");
+        let (fresh, count) = fenced();
+        assert_eq!(
+            said(&laid(&fresh, &format!("ax\n```{below}"))),
+            said(&letter)
+        );
+        assert!(count.get() > 0);
     }
 }

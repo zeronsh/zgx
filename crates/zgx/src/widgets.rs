@@ -2041,6 +2041,18 @@ impl EditorHandle {
             self.refresh();
         }
     }
+    /// The theme changed: ask the highlighter for its colours anew, the
+    /// lines otherwise as they were (`rehighlight` asks for what they leave
+    /// the next too).
+    pub(crate) fn recolor(&self) {
+        self.natural.wrapped.recolor();
+        self.natural.unwrapped.recolor();
+        self.natural.invalidate_spans();
+        if let Some(lines) = self.hint.code().and_then(|c| c.lines.borrow().clone()) {
+            lines.recolor();
+        }
+        self.refresh();
+    }
     /// Ask the highlighter for the lines anew (what it gives changed: a
     /// theme's colours).
     pub fn rehighlight(&self) {
