@@ -1186,6 +1186,9 @@ impl Raster {
         clip: Rect,
         effects: Effects,
     ) {
+        if self.shared_rich_text(text, bounds, clip, effects) {
+            return;
+        }
         let Some(clip) = intersect(bounds, clip) else {
             return;
         };
@@ -1362,46 +1365,8 @@ impl Raster {
             let Some(image) = &images[&key] else {
                 continue;
             };
-            let gx = ox + x as i32 + image.placement.left;
-            let gy = oy + y as i32 - image.placement.top;
-            let color = selected_ink(&self.selected, bounds, gx, gy, image, color);
-            for by in 0..image.placement.height as usize {
-                let py = gy + by as i32;
-                if py < y0 as i32 || py >= y1 as i32 {
-                    continue;
-                }
-                for bx in 0..image.placement.width as usize {
-                    let px = gx + bx as i32;
-                    if px < x0 as i32 || px >= x1 as i32 {
-                        continue;
-                    }
-                    let i = by * image.placement.width as usize + bx;
-                    let (ink, alpha) = match image.content {
-                        cosmic_text::SwashContent::Mask => (
-                            color,
-                            zgx_gpu::glyph_coverage(image.data[i] as f32 / 255., color, 1.),
-                        ),
-                        cosmic_text::SwashContent::Color => (
-                            Color(
-                                image.data[i * 4],
-                                image.data[i * 4 + 1],
-                                image.data[i * 4 + 2],
-                                color.3,
-                            ),
-                            image.data[i * 4 + 3] as f32 / 255.,
-                        ),
-                        cosmic_text::SwashContent::SubpixelMask => (
-                            color,
-                            zgx_gpu::glyph_coverage(image.data[i * 4] as f32 / 255., color, 1.),
-                        ),
-                    };
-                    blend(
-                        &mut self.pixels[py as usize * self.width + px as usize],
-                        ink,
-                        effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade) * alpha,
-                    );
-                }
-            }
+            let at = (ox + x as i32, oy + y as i32);
+            self.shared_glyph(image, at, color, (x0, y0, x1, y1), bounds, effects);
         }
         // Its underlines in its colour, as the GPU draws them: on whole
         // pixels.
@@ -1420,6 +1385,163 @@ impl Raster {
                 }
             }
         }
+        true
+    }
+    /// A shared glyph `image` drawn with its pen at `at` in `color`, within
+    /// `region` (`x0, y0, x1, y1`), coverage as the GPU renderer draws it at
+    /// 1x (`glyph_coverage`).
+    fn shared_glyph(
+        &mut self,
+        image: &cosmic_text::SwashImage,
+        at: (i32, i32),
+        color: Color,
+        (x0, y0, x1, y1): (usize, usize, usize, usize),
+        bounds: Rect,
+        effects: Effects,
+    ) {
+        let gx = at.0 + image.placement.left;
+        let gy = at.1 - image.placement.top;
+        let color = selected_ink(&self.selected, bounds, gx, gy, image, color);
+        for by in 0..image.placement.height as usize {
+            let py = gy + by as i32;
+            if py < y0 as i32 || py >= y1 as i32 {
+                continue;
+            }
+            for bx in 0..image.placement.width as usize {
+                let px = gx + bx as i32;
+                if px < x0 as i32 || px >= x1 as i32 {
+                    continue;
+                }
+                let i = by * image.placement.width as usize + bx;
+                let (ink, alpha) = match image.content {
+                    cosmic_text::SwashContent::Mask => (
+                        color,
+                        zgx_gpu::glyph_coverage(image.data[i] as f32 / 255., color, 1.),
+                    ),
+                    cosmic_text::SwashContent::Color => (
+                        Color(
+                            image.data[i * 4],
+                            image.data[i * 4 + 1],
+                            image.data[i * 4 + 2],
+                            color.3,
+                        ),
+                        image.data[i * 4 + 3] as f32 / 255.,
+                    ),
+                    cosmic_text::SwashContent::SubpixelMask => (
+                        color,
+                        zgx_gpu::glyph_coverage(image.data[i * 4] as f32 / 255., color, 1.),
+                    ),
+                };
+                blend(
+                    &mut self.pixels[py as usize * self.width + px as usize],
+                    ink,
+                    effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade) * alpha,
+                );
+            }
+        }
+    }
+    /// Rich text from the shared services (`share_text`), laid out and each
+    /// glyph placed and keyed as the GPU renderer does at 1x, thickened for
+    /// its run's colour: false without them. Its decorations on whole
+    /// pixels, backgrounds under the glyphs and lines over them.
+    fn shared_rich_text(
+        &mut self,
+        text: &zgx::rich_text::RichText,
+        bounds: Rect,
+        clip: Rect,
+        effects: Effects,
+    ) -> bool {
+        const IMAGE_BUDGET: usize = 8 * 1024 * 1024;
+        let Some(shared) = self.shared_text.clone() else {
+            return false;
+        };
+        let mut shared = shared.borrow_mut();
+        let SharedText {
+            fonts,
+            cache,
+            swash,
+            images,
+            image_bytes,
+            drawn,
+        } = &mut *shared;
+        let mut fonts = fonts.borrow_mut();
+        let (places, decorations, key) = zgx_gpu::rich_glyph_places(
+            &mut fonts,
+            &mut cache.borrow_mut(),
+            text,
+            bounds.width,
+            bounds.height,
+            1.,
+        );
+        drawn.extend(key);
+        let Some(clip) = intersect(bounds, clip) else {
+            return true;
+        };
+        let region = self.region(clip);
+        // Its origin on a whole pixel, as the GPU renderer snaps it.
+        let (ox, oy) = (bounds.x.round() as i32, bounds.y.round() as i32);
+        let paint = |raster: &mut Self, background: bool| {
+            for d in decorations.iter().filter(|d| d.background == background) {
+                let (left, top) = (
+                    (d.bounds.x + ox as f32).round(),
+                    (d.bounds.y + oy as f32).round(),
+                );
+                let right = (d.bounds.x + ox as f32 + d.bounds.width).round();
+                let bottom = (d.bounds.y + oy as f32 + d.bounds.height).round();
+                let line = Rect::new(left, top, right - left, (bottom - top).max(1.));
+                let Some(shown) = intersect(line, clip) else {
+                    continue;
+                };
+                let (lx0, ly0, lx1, ly1) = raster.region(shown);
+                for py in ly0..ly1 {
+                    let alpha = effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade);
+                    for pixel in
+                        &mut raster.pixels[py * raster.width + lx0..py * raster.width + lx1]
+                    {
+                        blend(pixel, d.color, alpha);
+                    }
+                }
+            }
+        };
+        paint(self, true);
+        // A run's level worked out once, not per glyph (as the renderer).
+        let mut last: Option<(usize, Color, u8)> = None;
+        for (key, x, y, run) in places {
+            let (color, smoothing) = match last {
+                Some((at, color, smoothing)) if at == run => (color, smoothing),
+                _ => {
+                    let color = text
+                        .runs()
+                        .get(run)
+                        .map_or(Color(0, 0, 0, 255), |r| r.color);
+                    let smoothing = zgx_gpu::text::smoothing(color);
+                    last = Some((run, color, smoothing));
+                    (color, smoothing)
+                }
+            };
+            let key = zgx_gpu::text::smoothed(key, smoothing);
+            if !images.contains_key(&key) {
+                let image = zgx_gpu::glyph_image(swash, &mut fonts, key);
+                *image_bytes += image.as_ref().map_or(0, |i| i.data.capacity());
+                if *image_bytes > IMAGE_BUDGET {
+                    images.clear();
+                    *image_bytes = 0;
+                }
+                images.insert(key, image);
+            }
+            let Some(image) = &images[&key] else {
+                continue;
+            };
+            self.shared_glyph(
+                image,
+                (ox + x as i32, oy + y as i32),
+                color,
+                region,
+                bounds,
+                effects,
+            );
+        }
+        paint(self, false);
         true
     }
     #[allow(clippy::too_many_arguments)]

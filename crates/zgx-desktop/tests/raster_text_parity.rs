@@ -236,3 +236,72 @@ fn a_changing_value_keeps_the_shared_word_cache_the_size_of_what_is_shown() {
     assert!(most < 40, "{most} words cached for one changing label");
     assert!(services.text_system().borrow().shape_run_cache.len() >= 4);
 }
+
+/// Plain text in greys a smoothing level apart (macOS thickens each its own
+/// amount, by its luminance): each matches, on light and dark.
+#[test]
+fn mid_grey_text_matches_the_gpu_at_each_smoothing_level() {
+    for (ink, ground) in [
+        (0x898989, 0xfafafa),
+        (0xbcbcbc, 0x101010),
+        (0xe1e1e1, 0x202020),
+        (0x5a5a5a, 0xffffff),
+    ] {
+        let mut ui = Ui::new(W as f32, H as f32);
+        ui.mount(page(ink, ground));
+        let Some((mut gpu, mut raster)) = renderers(&ui, true) else {
+            return;
+        };
+        frame(&mut ui, &mut gpu, &mut raster);
+        matches(&differences(&raster, &gpu))
+            .unwrap_or_else(|e| panic!("{ink:06x} on {ground:06x}: {e}"));
+    }
+}
+
+/// Rich text, its spans in inks of every smoothing level and a colour, one
+/// underlined and one on a background, wrapped.
+fn rich_page(ground: u32) -> View {
+    let mut rich = rich_text().w(W as f32 - 20.).text_size(14.).text_wrap(true);
+    for (i, ink) in [
+        0x000000u32,
+        0x898989,
+        0xbcbcbc,
+        0xe1e1e1,
+        0xffffff,
+        0x3a8adf,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rich = rich.child(text_span(format!("span {i} the quick brown fox ")).text_color(rgb(ink)));
+    }
+    rich = rich
+        .child(
+            text_span("underlined ")
+                .text_color(rgb(0x3a8adf))
+                .underline(zgx::rich_text::Decoration::new(1.)),
+        )
+        .child(
+            text_span("on a background")
+                .text_color(rgb(0xffffff))
+                .background(rgb(0x7a3adf)),
+        );
+    column().w(W as f32).h(H as f32).bg(rgb(ground)).child(rich)
+}
+
+/// The raster lays rich text out and places its glyphs as the GPU renderer
+/// does (`zgx_gpu::rich_glyph_places`), each run thickened for its colour.
+/// Laid out apart, in a font system of its own, its glyphs kept their
+/// fractions of a pixel: 4,900 pixels off, by up to 207.
+#[test]
+fn rich_text_matches_the_gpu_run_by_run() {
+    for ground in [0x101010u32, 0xfafafa] {
+        let mut ui = Ui::new(W as f32, H as f32);
+        ui.mount(rich_page(ground));
+        let Some((mut gpu, mut raster)) = renderers(&ui, true) else {
+            return;
+        };
+        frame(&mut ui, &mut gpu, &mut raster);
+        matches(&differences(&raster, &gpu)).unwrap_or_else(|e| panic!("on {ground:06x}: {e}"));
+    }
+}
