@@ -245,6 +245,36 @@ pub struct Api {
         keys: *const Bytes,
         len: usize,
     ) -> u32,
+    /// A buffer for an image's pixels, `len` bytes, all 0: a handle, its
+    /// bytes at `*data`, made as what the image shares (set, they aren't
+    /// copied). Any thread; the module's to write, from one thread at a
+    /// time, until it gives it to `image_set` or lets go of it with
+    /// `image_drop`. NULL if `len` is 0 or more than `isize::MAX / 2`.
+    pub image_buffer: unsafe extern "C" fn(len: usize, data: *mut *mut u8) -> *mut c_void,
+    /// Sets the image `host:<name>` (scripts' `ui.image { src = … }`) to a
+    /// `width` by `height` picture whose pixels are `buffer`'s (taken, on
+    /// success or not): RGBA8, straight alpha, rows top to bottom, tightly
+    /// packed (a row's stride is `width * 4`), so `width * height * 4`
+    /// bytes. On the interface's thread; `name` is `<module>.<name>`, and
+    /// what a module sets goes with its host, or as the module is loaded
+    /// into it again. `DONE`, or `FAILED` with why in `out`, nothing set:
+    /// another length, a size of 0, a name not so, or its host gone (as
+    /// `post` says `GONE`; the buffer freed). On another thread, `FAILED`
+    /// and `out` `nil` (no value is made off the interface's thread).
+    pub image_set: unsafe extern "C" fn(
+        host: *mut c_void,
+        name: *const u8,
+        len: usize,
+        width: u32,
+        height: u32,
+        buffer: *mut c_void,
+        out: *mut Raw,
+    ) -> u32,
+    /// Lets go of a buffer not set: any thread.
+    pub image_drop: unsafe extern "C" fn(buffer: *mut c_void),
+    /// Removes the image `host:<name>` a module set: not 0 if there was one.
+    /// On the interface's thread (on another, nothing).
+    pub image_remove: unsafe extern "C" fn(host: *mut c_void, name: *const u8, len: usize) -> u32,
 }
 
 /// A shared state's observer ([`Api::shared_observe`]): `value` is what it

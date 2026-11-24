@@ -199,6 +199,31 @@ typedef struct zgx_api {
      * if any was. */
     uint32_t (*shared_remove)(const void *shared, const uint8_t *key, size_t key_len,
                               const zgx_bytes *keys, size_t len);
+    /* Images by name. A picture is RGBA8: four bytes a pixel (red, green,
+     * blue, alpha; straight, not premultiplied), rows top to bottom, tightly
+     * packed (a row's stride is width * 4), so width * height * 4 bytes. */
+    /* A buffer of `len` bytes, all 0, for an image's pixels: a handle, its
+     * bytes at `*data`. Allocated as what the image will share, so setting
+     * it copies nothing. Any thread: the module's to write, from one thread
+     * at a time, until it gives it to image_set or image_drop. NULL if
+     * `len` is 0 or more than SIZE_MAX / 4. */
+    void *(*image_buffer)(size_t len, uint8_t **data);
+    /* Sets the image `host:<name>` (scripts' `ui.image { src = ... }`) to a
+     * `width` by `height` picture, `buffer`'s bytes (taken, set or not):
+     * its length must be width * height * 4. On the interface's thread;
+     * `name` is `<module>.<name>`, and what a module sets goes with its
+     * host, or as the module is loaded into it again. ZGX_DONE, or
+     * ZGX_FAILED with why in `out`, nothing set: another length, a size of
+     * 0, a name not so, or its host gone (as post says ZGX_GONE; the buffer
+     * freed). On another thread, ZGX_FAILED and `out` nil (no value is made
+     * off the interface's thread). */
+    uint32_t (*image_set)(void *host, const uint8_t *name, size_t len, uint32_t width,
+                          uint32_t height, void *buffer, zgx_value *out);
+    /* Lets go of a buffer not set: any thread. */
+    void (*image_drop)(void *buffer);
+    /* Removes the image `host:<name>` a module set: not 0 if there was one.
+     * On the interface's thread (on another, nothing). */
+    uint32_t (*image_remove)(void *host, const uint8_t *name, size_t len);
 } zgx_api;
 
 /* What a call returns: done, or failed. Failing, it wrote why (a string)

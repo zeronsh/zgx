@@ -56,6 +56,10 @@ int main(void) {
     AT(zgx_api, promise_host);
     AT(zgx_api, shared_upsert);
     AT(zgx_api, shared_remove);
+    AT(zgx_api, image_buffer);
+    AT(zgx_api, image_set);
+    AT(zgx_api, image_drop);
+    AT(zgx_api, image_remove);
     SIZE(zgx_registrar);
     AT(zgx_registrar, size);
     AT(zgx_registrar, host);
