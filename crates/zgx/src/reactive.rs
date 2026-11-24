@@ -1304,12 +1304,10 @@ impl<T: 'static> Signal<T> {
                 existing.run = run;
             }
         } else if self.inner.subscribers.borrow_mut().insert(id) {
-            let dependency: Rc<dyn Dependency> = self.inner.clone();
-            record.dependencies.push(Subscription {
-                source: Rc::downgrade(&dependency),
-                key,
-                run,
-            });
+            // Downgraded as it is, unsized as a weak: no strong count to
+            // raise and drop again.
+            let source: Weak<SignalInner<T>> = Rc::downgrade(&self.inner);
+            record.dependencies.push(Subscription { source, key, run });
         }
     }
     /// Whether any effect reads it: for a host dropping data nothing shows.

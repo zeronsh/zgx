@@ -520,8 +520,13 @@ impl ThemeScope {
     /// it lives (see `Signal::subscribe`): text restyled every frame then
     /// reads it untracked.
     pub(crate) fn subscribe_body(&self) {
-        let existing = self.body.borrow().clone();
-        if let Some(signal) = existing.or_else(|| self.body_signal()) {
+        // Through the borrow, not a clone: subscribing touches only the
+        // runtime and the signal, never this scope's body.
+        if let Some(signal) = &*self.body.borrow() {
+            signal.subscribe();
+            return;
+        }
+        if let Some(signal) = self.body_signal() {
             signal.subscribe();
         }
     }
