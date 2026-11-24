@@ -480,6 +480,24 @@ fn web_options(table: &Table) -> mlua::Result<zgx::web_view::WebViewOptions> {
     })
 }
 
+/// `ui.host_view`, made at a script's first read of it (`lazy`): a VM whose
+/// scripts show no view of the host's holds no closure for it.
+pub(crate) fn install_host_view(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    ui.set(
+        "host_view",
+        lua.create_function(|lua, table: Table| {
+            let name: String = table.get("name")?;
+            table.raw_set("name", mlua::Value::Nil)?;
+            let node = fill(
+                lua,
+                Node::new(owner(lua)?, Kind::Host(name.into())),
+                Some(&table),
+            )?;
+            node_ud(lua, node)
+        })?,
+    )?;
+    Ok(())
+}
 /// `ui.shader(source, { fps })`: a WGSL fill, compiled once per source.
 #[derive(Clone)]
 pub(crate) struct ShaderUd(pub Arc<zgx::decoration::FillShader>);
@@ -7059,19 +7077,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "ref",
         lua.create_function(|lua, ()| Ok(RefUd(Ref::new(&env(lua)?.runtime))))?,
-    )?;
-    ui.set(
-        "host_view",
-        lua.create_function(|lua, table: Table| {
-            let name: String = table.get("name")?;
-            table.raw_set("name", mlua::Value::Nil)?;
-            let node = fill(
-                lua,
-                Node::new(owner(lua)?, Kind::Host(name.into())),
-                Some(&table),
-            )?;
-            node_ud(lua, node)
-        })?,
     )?;
     ui.set(
         "webview",
