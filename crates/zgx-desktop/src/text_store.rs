@@ -415,10 +415,20 @@ impl TextStore {
         }
         self.seen = Some(seen(&editor));
     }
+    /// Whether the input method has heard of all there is.
+    pub(crate) fn told(&self) -> bool {
+        match (&self.editor, &self.seen) {
+            (Some(editor), Some(seen)) => seen.is(editor),
+            _ => true,
+        }
+    }
     /// What changed in the editor since the input method last heard, from
     /// edits it didn't make (typing, the app writing its value, undo): to
-    /// tell it (`OnTextChange`, `OnSelectionChange`). The whole text, once,
-    /// for a text change: Windows takes a wider range than changed.
+    /// tell it (`OnTextChange`, `OnSelectionChange`). One edit is told as
+    /// what it changed: an input method told its whole document changed
+    /// forgets what it was following there. More than one, or a composition
+    /// beside it, as the whole text, once: Windows takes a wider range than
+    /// changed. `old_len`: the document's length when it last heard.
     pub(crate) fn changes(&mut self, old_len: usize) -> Vec<Change> {
         let cancelled = self.drop_cancelled();
         let Some(editor) = &self.editor else {
@@ -435,11 +445,15 @@ impl TextStore {
         };
         let mut changes = Vec::new();
         if before.revision != now.revision || before.preedit != now.preedit {
-            changes.push(Change::Text {
+            let composing = before.preedit.is_some() || now.preedit.is_some();
+            let one = (!composing)
+                .then(|| one_edit(editor, before.revision, old_len))
+                .flatten();
+            changes.push(one.unwrap_or(Change::Text {
                 start: 0,
                 old_end: old_len,
                 new_end: self.len(),
-            });
+            }));
         }
         if before.selection != now.selection || before.preedit != now.preedit {
             changes.push(Change::Selection);
@@ -528,6 +542,24 @@ impl Seen {
                 _ => false,
             }
     }
+}
+
+/// The one edit `editor` took since `revision`, if it was one, of a document
+/// that was `old_len` long. What follows it is as it was, so its old end is
+/// as far from the old document's end as its new end is from the new one's:
+/// the text it replaced isn't needed, nor a copy of the document.
+fn one_edit(editor: &EditorHandle, revision: u64, old_len: usize) -> Option<Change> {
+    let mut e = editor.editor.borrow_mut();
+    let (start, _, put) = e.edit_after(revision)?;
+    let new_end = e.byte_to_utf16(start + put);
+    let after = e.utf16_len().checked_sub(new_end)?;
+    let start = e.byte_to_utf16(start);
+    let old_end = old_len.checked_sub(after).filter(|end| *end >= start)?;
+    Some(Change::Text {
+        start,
+        old_end,
+        new_end,
+    })
 }
 
 fn seen(editor: &EditorHandle) -> Seen {
@@ -924,18 +956,149 @@ mod tests {
         let (_ui, mut store, _) = store("ab");
         let len = store.len();
         store.editor().unwrap().paste("c");
+        assert!(!store.told(), "an edit it hasn't heard of");
         assert_eq!(
             store.changes(len),
             [
                 Change::Text {
-                    start: 0,
+                    start: 2,
                     old_end: 2,
                     new_end: 3
                 },
                 Change::Selection
             ]
         );
+        assert!(store.told(), "once told, there is nothing more");
         assert!(store.changes(3).is_empty());
+        // In the middle, and a deletion there: what changed alone.
+        store.editor().unwrap().set_selection(1, 1);
+        store.changes(3);
+        store.editor().unwrap().paste("1");
+        let text = |start, old_end, new_end| Change::Text {
+            start,
+            old_end,
+            new_end,
+        };
+        assert_eq!(store.changes(3), [text(1, 1, 2), Change::Selection]);
+        store.editor().unwrap().replace_text(1..2, "");
+        assert_eq!(store.changes(4)[0], text(1, 2, 1));
+        // More than one since it heard: the whole text.
+        store.editor().unwrap().paste("1");
+        store.editor().unwrap().paste("2");
+        assert_eq!(store.changes(3)[0], text(0, 3, 5));
+    }
+
+    /// Numbers in a fixed order (Knuth's MMIX generator).
+    struct Numbers(u64);
+    impl Numbers {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = (self.0.wrapping_mul(6364136223846793005)).wrapping_add(1442695040888963407);
+            (self.0 >> 33) as usize % n
+        }
+    }
+
+    /// The changes told, applied in turn to what the input method knew, make
+    /// the document: whatever edits the app, the person and the input method
+    /// make, with atoms, pairs and open compositions; and none of them starts
+    /// or ends inside a surrogate pair.
+    #[test]
+    fn the_changes_told_make_the_document() {
+        let inside_pair = |units: &[u16], at: usize| {
+            at > 0
+                && at < units.len()
+                && (0xD800..0xDC00).contains(&units[at - 1])
+                && (0xDC00..0xE000).contains(&units[at])
+        };
+        let (mut told, mut narrow) = (0, 0);
+        for seed in 1..=20 {
+            let (ui, mut store, value, _) = store_with_atom();
+            let editor = ui.focused_editor().unwrap();
+            let mut numbers = Numbers(seed);
+            let mut known = store.text(0, store.len());
+            for step in 0..300 {
+                let text = value.get();
+                let mut places: Vec<_> = text.char_indices().map(|(i, _)| i).collect();
+                places.push(text.len());
+                let (a, b) = (
+                    places[numbers.below(places.len())],
+                    places[numbers.below(places.len())],
+                );
+                let (a, b) = (a.min(b), a.max(b));
+                let words = ["1", "。", "😀", "😁", "é", "aa", "", "好", "a😀"];
+                let word = words[numbers.below(words.len())];
+                let op = numbers.below(12);
+                let mut own = false;
+                match op {
+                    0 | 1 => {
+                        editor.set_selection(a, a);
+                        editor.insert_text(word);
+                    }
+                    2 | 3 => {
+                        editor.replace_text(a..b, word);
+                    }
+                    4 => {
+                        editor.set_selection(a, b);
+                        editor.insert_atom("@x😀.y", None, None, None);
+                    }
+                    5 => {
+                        editor.undo();
+                    }
+                    6 => {
+                        value.set(format!("{word}{}{word}", &text[a..b]));
+                    }
+                    7 | 8 if !store.is_composing() => {
+                        own = true;
+                        let (start, end, _) = store.selection();
+                        store.start_composition(start..start);
+                        store.replace(start, end, &utf16(word));
+                    }
+                    7..=9 if store.is_composing() => {
+                        own = true;
+                        let (start, ..) = store.selection();
+                        store.replace(start, start, &utf16(word));
+                    }
+                    10 if store.is_composing() => {
+                        own = true;
+                        store.end_composition();
+                    }
+                    _ => editor.set_selection(a, b),
+                }
+                ui.prepare_frame();
+                let now = store.text(0, store.len());
+                // Its own edits it knows.
+                if own {
+                    known = now.clone();
+                }
+                for change in store.changes(known.len()) {
+                    let Change::Text {
+                        start,
+                        old_end,
+                        new_end,
+                    } = change
+                    else {
+                        continue;
+                    };
+                    let what = format!("seed {seed} step {step} op {op}: {change:?}");
+                    for (units, at) in [
+                        (&known, start),
+                        (&known, old_end),
+                        (&now, start),
+                        (&now, new_end),
+                    ] {
+                        assert!(at <= units.len(), "{what}: past the end");
+                        assert!(!inside_pair(units, at), "{what}: inside a pair");
+                    }
+                    told += 1;
+                    narrow += usize::from(old_end - start < known.len().max(1));
+                    known.splice(start..old_end, now[start..new_end].iter().copied());
+                }
+                assert_eq!(known, now, "seed {seed} step {step} op {op}");
+            }
+        }
+        assert!(
+            told > 1000 && narrow * 4 > told,
+            "{narrow} of {told} told narrowly"
+        );
     }
 
     #[test]

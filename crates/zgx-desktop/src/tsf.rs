@@ -64,6 +64,9 @@ struct Shared {
     sink_mask: u32,
     /// The lock held now (`TS_LF_READ` or `TS_LF_READWRITE` bits), if any.
     lock: u32,
+    /// The editor dropped a composition, told with its text, which is still
+    /// to be ended (`Tsf::after_dispatch`).
+    cancelled: bool,
     /// A lock asked for while one couldn't be granted, granted after.
     pending: Option<u32>,
     hwnd: HWND,
@@ -128,6 +131,7 @@ impl Tsf {
                 store: TextStore::new(),
                 sink: None,
                 sink_mask: 0,
+                cancelled: false,
                 lock: 0,
                 pending: None,
                 hwnd,
@@ -217,55 +221,26 @@ impl Tsf {
         }
         // The focused editor's input mode set while it has focus.
         retell_scope(&self.shared);
-        let (sink, mask, changes, layout) = {
+        tell(&self.shared);
+        let (sink, mask, layout, cancelled) = {
             let mut shared = self.shared.borrow_mut();
+            // (Told, it may hold a lock now.)
             if shared.lock != 0 {
                 return;
             }
-            let told = shared.told_len;
-            let changes = shared.store.changes(told);
-            if !changes.is_empty() {
-                shared.told_len = shared.store.len();
-            }
-            let layout = std::mem::take(&mut shared.layout_changed);
-            // Nothing to tell or grant: most dispatches.
-            if changes.is_empty() && !layout && shared.pending.is_none() {
-                return;
-            }
-            (shared.sink.clone(), shared.sink_mask, changes, layout)
+            (
+                shared.sink.clone(),
+                shared.sink_mask,
+                std::mem::take(&mut shared.layout_changed),
+                std::mem::take(&mut shared.cancelled),
+            )
         };
-        let mut cancelled = false;
-        if let Some(sink) = &sink {
-            // SAFETY: the sink is alive while advised; the change is valid.
-            unsafe {
-                for change in changes {
-                    match change {
-                        Change::Text {
-                            start,
-                            old_end,
-                            new_end,
-                        } => {
-                            if mask & TS_AS_TEXT_CHANGE != 0 {
-                                let change = TS_TEXTCHANGE {
-                                    acpStart: acp(start),
-                                    acpOldEnd: acp(old_end),
-                                    acpNewEnd: acp(new_end),
-                                };
-                                let _ = sink.OnTextChange(TEXT_STORE_TEXT_CHANGE_FLAGS(0), &change);
-                            }
-                        }
-                        Change::Selection => {
-                            if mask & TS_AS_SEL_CHANGE != 0 {
-                                let _ = sink.OnSelectionChange();
-                            }
-                        }
-                        Change::CompositionCancelled => cancelled = true,
-                    }
-                }
-                if layout && mask & TS_AS_LAYOUT_CHANGE != 0 {
-                    let _ = sink.OnLayoutChange(TS_LC_CHANGE, VIEW);
-                }
-            }
+        if layout
+            && mask & TS_AS_LAYOUT_CHANGE != 0
+            && let Some(sink) = &sink
+        {
+            // SAFETY: the sink is alive while advised.
+            let _ = unsafe { sink.OnLayoutChange(TS_LC_CHANGE, VIEW) };
         }
         // The editor dropped the composition (the app set its text or its
         // selection): the input method ends its own, with nothing of it left
@@ -303,6 +278,18 @@ fn acp(at: usize) -> i32 {
 fn at(acp: i32) -> usize {
     usize::try_from(acp).unwrap_or(0)
 }
+/// The `len` units at `text`: none at a null pointer, as an empty text (a
+/// deletion's) may come.
+///
+/// # Safety
+/// `text`, unless null, points at `len` units that outlive the result.
+unsafe fn units(text: &PCWSTR, len: u32) -> &[u16] {
+    match text.is_null() {
+        true => &[],
+        // SAFETY: as the caller promises.
+        false => unsafe { std::slice::from_raw_parts(text.0, len as usize) },
+    }
+}
 
 /// A COM method's `body`: a panic in it fails the call (`E_UNEXPECTED`)
 /// instead of ending the app. Windows calls the store from inside its own
@@ -336,6 +323,46 @@ fn retell_scope(shared: &Rc<RefCell<Shared>>) {
     }
 }
 
+/// Tell the input method what changed that it didn't do. No lock is held,
+/// and nothing is borrowed across the calls: the framework asks for a lock
+/// in them.
+fn tell(shared: &Rc<RefCell<Shared>>) {
+    let (sink, mask, changes) = {
+        let mut shared = shared.borrow_mut();
+        let told = shared.told_len;
+        let changes = shared.store.changes(told);
+        // (Most dispatches: nothing.)
+        if changes.is_empty() {
+            return;
+        }
+        shared.told_len = shared.store.len();
+        shared.cancelled |= changes.contains(&Change::CompositionCancelled);
+        (shared.sink.clone(), shared.sink_mask, changes)
+    };
+    let Some(sink) = sink else { return };
+    for change in changes {
+        // SAFETY: the sink is alive while advised; the change is valid.
+        let _ = unsafe {
+            match change {
+                Change::Text {
+                    start,
+                    old_end,
+                    new_end,
+                } if mask & TS_AS_TEXT_CHANGE != 0 => sink.OnTextChange(
+                    TEXT_STORE_TEXT_CHANGE_FLAGS(0),
+                    &TS_TEXTCHANGE {
+                        acpStart: acp(start),
+                        acpOldEnd: acp(old_end),
+                        acpNewEnd: acp(new_end),
+                    },
+                ),
+                Change::Selection if mask & TS_AS_SEL_CHANGE != 0 => sink.OnSelectionChange(),
+                _ => Ok(()),
+            }
+        };
+    }
+}
+
 /// A lock the store has granted: given back as this drops, a panic under
 /// it included (`guard` fails the call then), so the next request isn't
 /// told the store is busy for good.
@@ -354,7 +381,11 @@ impl Drop for Held<'_> {
     }
 }
 
-/// Grant lock `flags` now: hold it while the sink reads or edits.
+/// Grant lock `flags` now: hold it while the sink reads or edits. (An edit of
+/// the app's not told by now isn't told here: told as a lock is asked for, the
+/// framework ends the composition begun under it and what was typed is lost;
+/// told after, it moves that composition's range. The app's turns end telling
+/// them: `Tsf::after_dispatch`.)
 fn grant(shared: &Rc<RefCell<Shared>>, flags: u32) -> HRESULT {
     let held = Held::take(shared, flags);
     let sink = shared.borrow().sink.clone();
@@ -364,10 +395,13 @@ fn grant(shared: &Rc<RefCell<Shared>>, flags: u32) -> HRESULT {
             .map_or_else(|e| e.code(), |()| HRESULT(0))
     });
     // What the input method edited under the lock it knows of: the
-    // document's length from here.
+    // document's length from here. (Only read, with an edit of the app's
+    // still to tell, it knows what it did.)
     {
         let mut s = shared.borrow_mut();
-        s.told_len = s.store.len();
+        if s.store.told() {
+            s.told_len = s.store.len();
+        }
     }
     drop(held);
     result
@@ -587,7 +621,7 @@ impl ITextStoreACP2_Impl for Store_Impl {
         guard(|| {
             let mut shared = self.write()?;
             // SAFETY: `cch` units at `text`, from the caller.
-            let units = unsafe { std::slice::from_raw_parts(text.0, cch as usize) };
+            let units = unsafe { units(text, cch) };
             let range = shared
                 .store
                 .replace(at(start), at(end), units)
@@ -643,7 +677,7 @@ impl ITextStoreACP2_Impl for Store_Impl {
                 start..end
             } else {
                 // SAFETY: `cch` units at `text`, from the caller.
-                let units = unsafe { std::slice::from_raw_parts(text.0, cch as usize) };
+                let units = unsafe { units(text, cch) };
                 let range = shared
                     .store
                     .replace(start, end, units)
@@ -1146,6 +1180,7 @@ mod tests {
             store: TextStore::new(),
             sink: Some(sink),
             sink_mask: TS_AS_ATTR_CHANGE,
+            cancelled: false,
             lock: 0,
             pending: None,
             hwnd: HWND::default(),
@@ -1207,6 +1242,7 @@ mod tests {
             store: TextStore::new(),
             sink: None,
             sink_mask: 0,
+            cancelled: false,
             lock: 0,
             pending: None,
             hwnd: HWND::default(),
@@ -1253,6 +1289,7 @@ mod tests {
             store: TextStore::new(),
             sink: None,
             sink_mask: 0,
+            cancelled: false,
             lock: 0,
             pending: None,
             hwnd: HWND::default(),
@@ -1395,6 +1432,9 @@ mod tests {
                 CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
             },
         };
+        if !interactive() {
+            return;
+        }
         // SAFETY: COM on this test's thread, as winit initializes it on the
         // UI thread (the framework wants a single-threaded apartment).
         let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
@@ -1501,6 +1541,7 @@ mod tests {
             store: TextStore::new(),
             sink: None,
             sink_mask: 0,
+            cancelled: false,
             lock: TS_LF_READ.0,
             pending: None,
             hwnd: HWND::default(),
@@ -1568,5 +1609,372 @@ mod tests {
                 E_INVALIDARG
             );
         }
+    }
+
+    /// Whether the framework can start here: a service's session (a shell
+    /// over SSH) has no input desktop, and it doesn't. Says so where not.
+    fn interactive() -> bool {
+        use windows::Win32::System::{
+            RemoteDesktop::ProcessIdToSessionId, Threading::GetCurrentProcessId,
+        };
+        let mut session = 0;
+        // SAFETY: this process's id; the out value is a local.
+        let known = unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) }.is_ok();
+        if known && session == 0 {
+            eprintln!("skipped: session 0 has no desktop for the Text Services Framework");
+            return false;
+        }
+        true
+    }
+
+    /// The framework's sink, what it is told and the locks it is granted
+    /// noted on the way.
+    #[implement(ITextStoreACPSink)]
+    struct Recorder(Rc<RefCell<Vec<String>>>, ITextStoreACPSink);
+    impl ITextStoreACPSink_Impl for Recorder_Impl {
+        fn OnTextChange(
+            &self,
+            flags: TEXT_STORE_TEXT_CHANGE_FLAGS,
+            change: *const TS_TEXTCHANGE,
+        ) -> Result<()> {
+            // SAFETY: the store's own change; the sink is the framework's.
+            unsafe {
+                let TS_TEXTCHANGE {
+                    acpStart,
+                    acpOldEnd,
+                    acpNewEnd,
+                } = *change;
+                self.0
+                    .borrow_mut()
+                    .push(format!("text {acpStart}..{acpOldEnd} -> {acpNewEnd}"));
+                self.1.OnTextChange(flags, change)
+            }
+        }
+        fn OnSelectionChange(&self) -> Result<()> {
+            // SAFETY: the framework's sink, as in each call below.
+            unsafe { self.1.OnSelectionChange() }
+        }
+        fn OnLayoutChange(&self, code: TsLayoutCode, view: u32) -> Result<()> {
+            unsafe { self.1.OnLayoutChange(code, view) }
+        }
+        fn OnStatusChange(&self, flags: u32) -> Result<()> {
+            unsafe { self.1.OnStatusChange(flags) }
+        }
+        fn OnAttrsChange(
+            &self,
+            start: i32,
+            end: i32,
+            count: u32,
+            attrs: *const GUID,
+        ) -> Result<()> {
+            unsafe {
+                let attrs = std::slice::from_raw_parts(attrs, count as usize);
+                self.1.OnAttrsChange(start, end, attrs)
+            }
+        }
+        fn OnLockGranted(&self, flags: TEXT_STORE_LOCK_FLAGS) -> Result<()> {
+            self.0.borrow_mut().push("lock".into());
+            unsafe { self.1.OnLockGranted(flags) }
+        }
+        fn OnStartEditTransaction(&self) -> Result<()> {
+            unsafe { self.1.OnStartEditTransaction() }
+        }
+        fn OnEndEditTransaction(&self) -> Result<()> {
+            unsafe { self.1.OnEndEditTransaction() }
+        }
+    }
+
+    /// A text area of `text`, focused, its caret at the end, with the
+    /// framework in a hidden window, and what the framework is told: `run`.
+    fn with_framework(
+        text: &str,
+        run: impl FnOnce(&EditorHandle, &Tsf, &Service, &RefCell<Vec<String>>),
+    ) {
+        use windows::Win32::{
+            System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+            },
+        };
+        if !interactive() {
+            return;
+        }
+        // SAFETY: COM on this test's thread (a single-threaded apartment).
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        // SAFETY: a plain window of a system class, never shown.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let mut ui = Ui::new(400., 200.);
+        let value = ui.signal(text.to_owned());
+        let view = ui.mount(text_area("Notes", value).size(300., 100.));
+        ui.prepare_frame();
+        ui.input.focus(&ui.scene, Some(view.node()));
+        let editor = ui.focused_editor().unwrap();
+        editor.set_selection(text.len(), text.len());
+        let mut tsf = Tsf::new(hwnd, 1.).expect("the framework");
+        tsf.focus(ui.focused_editor());
+        tsf.after_dispatch();
+        let told = Rc::new(RefCell::new(Vec::new()));
+        let sink = tsf.shared.borrow().sink.clone();
+        let sink = sink.expect("the framework advised its sink");
+        tsf.shared.borrow_mut().sink = Some(Recorder(told.clone(), sink).into());
+        let service = Service::new(&tsf);
+        run(&editor, &tsf, &service, &told);
+        drop((service, tsf));
+        // SAFETY: the window made above.
+        let _ = unsafe { DestroyWindow(hwnd) };
+    }
+
+    /// An input method reading what is before the caret may ask where it
+    /// would insert, and what was typed is told as that, not as the whole
+    /// document.
+    #[test]
+    fn a_digit_typed_is_told_as_itself_and_a_reader_may_query_an_insertion() {
+        use windows::Win32::UI::TextServices::{ITfInsertAtSelection, TF_ES_READ};
+        with_framework("ab", |editor, tsf, service, told| {
+            editor.insert_text("1");
+            tsf.after_dispatch();
+            let seen = Rc::new(RefCell::new(String::new()));
+            let (context, out) = (service.context.clone(), seen.clone());
+            let edit: Edit = Box::new(move |cookie| {
+                // SAFETY: within the session, with its cookie.
+                unsafe {
+                    context
+                        .cast::<ITfInsertAtSelection>()?
+                        .InsertTextAtSelection(cookie, TF_IAS_QUERYONLY, &[])?;
+                    let (mut selection, mut fetched) = ([TF_SELECTION::default()], 0);
+                    context.GetSelection(
+                        cookie,
+                        TF_DEFAULT_SELECTION,
+                        &mut selection,
+                        &mut fetched,
+                    )?;
+                    let [TF_SELECTION { range, .. }] = selection;
+                    let range = std::mem::ManuallyDrop::into_inner(range).ok_or(E_FAIL)?;
+                    let mut moved = 0;
+                    range.ShiftStart(cookie, -2, &mut moved, std::ptr::null())?;
+                    let (mut text, mut len) = ([0; 8], 0);
+                    range.GetText(cookie, 0, &mut text, &mut len)?;
+                    *out.borrow_mut() = String::from_utf16_lossy(&text[..len as usize]);
+                }
+                Ok(())
+            });
+            let session: ITfEditSession = Session(RefCell::new(Some(edit))).into();
+            // SAFETY: zgx's context and the session, both alive.
+            let done = unsafe {
+                service.context.RequestEditSession(
+                    service.client,
+                    &session,
+                    TF_ES_SYNC | TF_ES_READ,
+                )
+            };
+            done.unwrap()
+                .ok()
+                .expect("a query-only insert in a read session");
+            assert_eq!(*seen.borrow(), "b1");
+            let told: Vec<_> = told.borrow().clone();
+            assert_eq!(
+                told.iter().filter(|t| *t != "lock").collect::<Vec<_>>(),
+                ["text 2..2 -> 3"]
+            );
+        });
+    }
+
+    /// The app's edit, told as its turn ends, is told once and as it was,
+    /// also where an input method read the document before that; and what it
+    /// composes next goes after it.
+    #[test]
+    fn an_edit_told_before_an_input_method_composes_is_told_once() {
+        use windows::Win32::UI::TextServices::TF_ES_READ;
+        with_framework("ab", |editor, tsf, service, told| {
+            let heard = || -> Vec<String> {
+                let told = std::mem::take(&mut *told.borrow_mut());
+                told.into_iter().filter(|t| t != "lock").collect()
+            };
+            editor.insert_text("1");
+            let session: ITfEditSession = Session(RefCell::new(Some(Box::new(|_| Ok(()))))).into();
+            // SAFETY: zgx's context and the session, both alive.
+            unsafe {
+                service.context.RequestEditSession(
+                    service.client,
+                    &session,
+                    TF_ES_SYNC | TF_ES_READ,
+                )
+            }
+            .unwrap()
+            .ok()
+            .unwrap();
+            assert_eq!(heard(), [""; 0]);
+            tsf.after_dispatch();
+            assert_eq!(heard(), ["text 2..2 -> 3"]);
+            service.compose("x");
+            assert!(service.composition.borrow().is_some());
+            tsf.after_dispatch();
+            service.end("X");
+            tsf.after_dispatch();
+            assert_eq!(editor.editor.borrow().text(), "ab1X");
+            assert_eq!(heard(), [""; 0], "its own edits aren't told back");
+        });
+    }
+
+    /// An app's edit that cancels the open composition is told as its turn
+    /// ends, the input method's composition ended with it, and it composes
+    /// again.
+    #[test]
+    fn an_edit_that_cancels_a_composition_ends_the_input_methods() {
+        with_framework("ab", |editor, tsf, service, told| {
+            service.compose("x");
+            assert!(service.composition.borrow().is_some());
+            told.borrow_mut().clear();
+            editor.replace_text(0..1, "Z");
+            tsf.after_dispatch();
+            // "abx" became "Zb": told whole, its composition beside it.
+            assert_eq!(
+                told.borrow().first().map(String::as_str),
+                Some("text 0..3 -> 2")
+            );
+            assert!(service.composition.borrow().is_none(), "ended");
+            assert!(!tsf.shared.borrow().store.is_composing());
+            assert_eq!(editor.editor.borrow().text(), "Zb");
+            editor.set_selection(0, 0);
+            tsf.after_dispatch();
+            service.compose("n");
+            assert!(tsf.shared.borrow().store.is_composing());
+            service.end("N");
+            tsf.after_dispatch();
+            assert_eq!(editor.editor.borrow().text(), "NZb");
+        });
+    }
+
+    /// A sink that asks for a lock from inside `OnTextChange`, and edits under
+    /// it: what it was granted, in order.
+    #[implement(ITextStoreACPSink)]
+    struct Asking {
+        store: ITextStoreACP2,
+        log: Rc<RefCell<Vec<String>>>,
+        inside: std::cell::Cell<bool>,
+    }
+    impl ITextStoreACPSink_Impl for Asking_Impl {
+        fn OnTextChange(
+            &self,
+            _flags: TEXT_STORE_TEXT_CHANGE_FLAGS,
+            change: *const TS_TEXTCHANGE,
+        ) -> Result<()> {
+            // SAFETY: the store's own change, and its own method.
+            unsafe {
+                let TS_TEXTCHANGE {
+                    acpStart,
+                    acpOldEnd,
+                    acpNewEnd,
+                } = *change;
+                self.log
+                    .borrow_mut()
+                    .push(format!("text {acpStart}..{acpOldEnd} -> {acpNewEnd}"));
+                self.inside.set(true);
+                let asked = self.store.RequestLock(TS_LF_READWRITE.0 | TS_LF_SYNC);
+                self.inside.set(false);
+                self.log.borrow_mut().push(format!("asked {:?}", asked?.0));
+            }
+            Ok(())
+        }
+        fn OnSelectionChange(&self) -> Result<()> {
+            Ok(())
+        }
+        fn OnLayoutChange(&self, _code: TsLayoutCode, _view: u32) -> Result<()> {
+            Ok(())
+        }
+        fn OnStatusChange(&self, _flags: u32) -> Result<()> {
+            Ok(())
+        }
+        fn OnAttrsChange(&self, _: i32, _: i32, _: u32, _: *const GUID) -> Result<()> {
+            Ok(())
+        }
+        fn OnLockGranted(&self, _flags: TEXT_STORE_LOCK_FLAGS) -> Result<()> {
+            let what = match self.inside.get() {
+                true => "lock inside",
+                false => "lock",
+            };
+            self.log.borrow_mut().push(what.into());
+            if self.inside.get() {
+                let text: Vec<u16> = "!".encode_utf16().collect();
+                let (mut a, mut b, mut change) = (0, 0, TS_TEXTCHANGE::default());
+                // SAFETY: the store's own method, under its lock.
+                unsafe {
+                    self.store
+                        .InsertTextAtSelection(0, &text, &mut a, &mut b, &mut change)?;
+                }
+            }
+            Ok(())
+        }
+        fn OnStartEditTransaction(&self) -> Result<()> {
+            Ok(())
+        }
+        fn OnEndEditTransaction(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Told of an edit, a sink may ask for a lock there and edit: it is
+    /// granted and given back, and each edit told once.
+    #[test]
+    fn a_sink_being_told_may_ask_for_a_lock_and_edit() {
+        let mut ui = Ui::new(400., 200.);
+        let value = ui.signal(String::from("ab"));
+        let view = ui.mount(text_area("Notes", value.clone()).size(300., 100.));
+        ui.prepare_frame();
+        ui.input.focus(&ui.scene, Some(view.node()));
+        let editor = ui.focused_editor().unwrap();
+        editor.set_selection(2, 2);
+        let shared = Rc::new(RefCell::new(Shared {
+            store: TextStore::new(),
+            sink: None,
+            sink_mask: TS_AS_TEXT_CHANGE | TS_AS_SEL_CHANGE,
+            cancelled: false,
+            lock: 0,
+            pending: None,
+            hwnd: HWND::default(),
+            scale: 1.,
+            told_len: 0,
+            layout_changed: false,
+            attributes: None,
+            scope_asked: false,
+            told_scope: 0,
+        }));
+        shared.borrow_mut().store.focus(ui.focused_editor());
+        shared.borrow_mut().told_len = 2;
+        let store: ITextStoreACP2 = Store(shared.clone()).into();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        shared.borrow_mut().sink = Some(
+            Asking {
+                store: store.clone(),
+                log: log.clone(),
+                inside: Default::default(),
+            }
+            .into(),
+        );
+        editor.insert_text("1");
+        tell(&shared);
+        let heard = || std::mem::take(&mut *log.borrow_mut());
+        assert_eq!(heard(), ["text 2..2 -> 3", "lock inside", "asked 0"]);
+        assert_eq!(shared.borrow().lock, 0);
+        tell(&shared);
+        assert_eq!(heard(), [""; 0], "its own edit isn't told back");
+        assert_eq!(value.get(), "ab1!");
+        shared.borrow_mut().sink = None;
     }
 }

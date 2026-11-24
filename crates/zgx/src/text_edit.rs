@@ -964,8 +964,10 @@ impl TextEditor {
         self.revision
     }
     /// The one change made since `revision`, if it made exactly one: where,
-    /// the length it replaced and the length it put there.
-    pub(crate) fn edit_after(&self, revision: u64) -> Option<(usize, usize, usize)> {
+    /// the length it replaced and the length it put there (bytes, on
+    /// characters' boundaries).
+    #[doc(hidden)]
+    pub fn edit_after(&self, revision: u64) -> Option<(usize, usize, usize)> {
         let sync = self.sync.as_ref()?;
         (revision.wrapping_add(1) == self.revision).then_some(sync.last_edit)
     }

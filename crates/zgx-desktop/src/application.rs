@@ -6127,7 +6127,15 @@ impl Host {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => self.key_input(event, true)?,
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.key_input(event, true)?;
+                // What it typed is told at once: an input method has its
+                // next key before any event of the window's.
+                #[cfg(windows)]
+                if let Some(tsf) = &self.tsf {
+                    tsf.after_dispatch();
+                }
+            }
             _ => {}
         }
 
@@ -9130,6 +9138,15 @@ impl ApplicationHandler<Event> for WindowManager {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));
+        // An edit a task, a timer or the app made this turn is told before
+        // the next message: an input method asks then, and can't be told
+        // as it does (`tsf::grant`). A comparison where nothing changed.
+        #[cfg(windows)]
+        self.contain(event_loop, None, |this| {
+            for tsf in this.hosts.values().filter_map(|host| host.tsf.as_ref()) {
+                tsf.after_dispatch();
+            }
+        });
     }
     /// The windows still open (`Application::quit`, a failure) close while
     /// the event loop is still there, not after `run_app` returns. On Linux
