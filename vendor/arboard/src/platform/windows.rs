@@ -50,8 +50,10 @@ mod image_data {
 		System::Ole::CF_DIBV5,
 	};
 
+	// zgx: the clipboard borrowed, not taken, so a write of other formats
+	// (`Set::formats_with_dib`) adds the DIB in the same opening.
 	pub(super) fn add_cf_dibv5(
-		_open_clipboard: OpenClipboard,
+		_open_clipboard: &OpenClipboard,
 		image: ImageData,
 	) -> Result<(), Error> {
 		// This constant is missing in windows-rs
@@ -117,7 +119,8 @@ mod image_data {
 			if let Cow::Owned(new_pixels) = rgba_to_win(dst_pixels_slice) {
 				// SAFETY: `data_ptr` is valid to write to and has no outstanding mutable borrows, and
 				// `new_pixels` will be the same length as the original bytes.
-				copy_nonoverlapping::<u8>(new_pixels.as_ptr(), data_ptr, new_pixels.len())
+				// zgx: over the pixels, after the header (they were copied over the header).
+				copy_nonoverlapping::<u8>(new_pixels.as_ptr(), pixels_dst, new_pixels.len())
 			}
 		}
 
@@ -731,6 +734,19 @@ impl<'clipboard> Set<'clipboard> {
 		html: Option<Cow<'_, str>>,
 		raw: &[(&str, &[u8])],
 	) -> Result<(), Error> {
+		self.formats_and_dib(text, html, raw, None)
+	}
+
+	// zgx: `formats`, and `image` as a CF_DIBV5 after them where given, in
+	// the same opening.
+	pub(crate) fn formats_and_dib(
+		self,
+		text: Cow<'_, str>,
+		html: Option<Cow<'_, str>>,
+		raw: &[(&str, &[u8])],
+		#[cfg(feature = "image-data")] image: Option<ImageData>,
+		#[cfg(not(feature = "image-data"))] image: Option<std::convert::Infallible>,
+	) -> Result<(), Error> {
 		let open_clipboard = self.clipboard?;
 
 		clipboard_win::raw::set_string(&text)
@@ -749,6 +765,12 @@ impl<'clipboard> Set<'clipboard> {
 			clipboard_win::raw::set_without_clear(format.get(), bytes)
 				.map_err(|e| Error::unknown(e.to_string()))?;
 		}
+		#[cfg(feature = "image-data")]
+		if let Some(image) = image {
+			image_data::add_cf_dibv5(&open_clipboard, image)?;
+		}
+		#[cfg(not(feature = "image-data"))]
+		let _ = image;
 
 		add_clipboard_exclusions(
 			open_clipboard,
@@ -771,7 +793,7 @@ impl<'clipboard> Set<'clipboard> {
 		// XXX: The ordering of these functions is important, as some programs will grab the
 		// first format available. PNGs tend to have better compatibility on Windows, so it is set first.
 		image_data::add_png_file(&image)?;
-		image_data::add_cf_dibv5(open_clipboard, image)?;
+		image_data::add_cf_dibv5(&open_clipboard, image)?;
 		Ok(())
 	}
 

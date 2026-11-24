@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-arboard"
-version = "3.6.2"
+version = "3.6.3"
 dependencies = [
  "clipboard-win",
  "env_logger",

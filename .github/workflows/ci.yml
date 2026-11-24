@@ -777,6 +777,8 @@ jobs:
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
       # Types of an app's own, as Chromium's web custom data, the same way.
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::types_round_trip_through_the_system_clipboard -- --ignored --exact
+      # An image with its text, HTML and types in one change, the same way.
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::an_image_with_its_text_and_types_round_trips_through_the_system_clipboard -- --ignored --exact
       # The soak (an app used for a while holds what it did), on Metal.
       - run: cargo test -p zgx-script --test soak --locked
       - run: cargo test -p zgx-run --test audit --locked
@@ -901,6 +903,8 @@ jobs:
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
       # Types of an app's own, as Chromium's web custom data, the same way.
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::types_round_trip_through_the_system_clipboard -- --ignored --exact
+      # An image with its text, HTML and types in one change, the same way.
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::an_image_with_its_text_and_types_round_trips_through_the_system_clipboard -- --ignored --exact
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # Real programs through ConPTY, from the image (zgx-terminal's ignored

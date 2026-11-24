@@ -271,6 +271,28 @@ impl Set<'_> {
 		self.platform.formats(text, html, raw)
 	}
 
+	/// zgx: `formats`, and on Windows `image` beside them as a CF_DIBV5 in
+	/// the same change, for the apps there that paste a DIB alone (an
+	/// encoded image goes in `raw`, as `PNG`). Elsewhere an image's encoded
+	/// form in `raw` (`public.png`, `image/png`) is what apps paste, and
+	/// `image` is not written.
+	#[cfg(feature = "image-data")]
+	pub fn formats_with_dib<'a>(
+		self,
+		text: Cow<'a, str>,
+		html: Option<Cow<'a, str>>,
+		raw: &[(&str, &[u8])],
+		image: Option<ImageData>,
+	) -> Result<(), Error> {
+		#[cfg(windows)]
+		return self.platform.formats_and_dib(text, html, raw, image);
+		#[cfg(not(windows))]
+		{
+			let _ = image;
+			self.platform.formats(text, html, raw)
+		}
+	}
+
 	/// Completes the "set" operation by placing a list of file paths onto the clipboard.
 	pub fn file_list(self, file_list: &[impl AsRef<Path>]) -> Result<(), Error> {
 		self.platform.file_list(file_list)

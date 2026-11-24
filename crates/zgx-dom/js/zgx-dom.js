@@ -1849,6 +1849,24 @@ export function zgx_clipboard_write_typed(text, html, types) {
   return true;
 }
 
+// `text`, `html` and `png` (an encoded PNG's bytes) as one ClipboardItem:
+// the async Clipboard API's image/png beside text/plain and text/html. A
+// page's own types can't go with an image (a copy event's data takes no
+// image), so a write with both takes the image. Refused (no permission, the
+// page not focused): what was asked stays what this page reads.
+export function zgx_clipboard_write_image(text, html, png) {
+  clipboard = { text, html: html === undefined ? null : html, types: [] };
+  const c = navigator.clipboard;
+  if (!c || typeof ClipboardItem === "undefined") return false;
+  const item = {
+    "text/plain": new Blob([text], { type: "text/plain" }),
+    "image/png": new Blob([png], { type: "image/png" }),
+  };
+  if (html != null) item["text/html"] = new Blob([html], { type: "text/html" });
+  c.write([new ClipboardItem(item)]).catch(() => {});
+  return true;
+}
+
 export function zgx_clipboard_write(text, html) {
   clipboard = { text, html: html === undefined ? null : html, types: [] };
   const c = navigator.clipboard;

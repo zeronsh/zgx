@@ -94,6 +94,8 @@ enum Command {
         /// Chromium's web custom data (the clipboard only), offered as
         /// `chromium/x-web-custom-data` (`clipboard::web_custom`).
         custom: Option<Arc<[u8]>>,
+        /// An encoded PNG (the clipboard only), offered as `image/png`.
+        png: Option<Arc<[u8]>>,
         reply: mpsc::Sender<Result<(), String>>,
     },
     Load {
@@ -189,12 +191,12 @@ impl WaylandClipboard {
     /// Publish `text`; fails before the seat has delivered any input, as a
     /// selection needs an input serial.
     pub fn store(&self, primary: bool, text: String) -> Result<(), String> {
-        self.publish(primary, text, None, None)
+        self.publish(primary, text, None, None, None)
     }
     /// Publish the clipboard as plain text and as HTML: rich editors and
     /// browsers paste the HTML, everything else the text.
     pub fn store_rich(&self, text: String, html: String) -> Result<(), String> {
-        self.publish(false, text, Some(html), None)
+        self.publish(false, text, Some(html), None, None)
     }
     /// Publish the clipboard as plain text, as HTML where given, and with
     /// Chromium's web custom data `custom` (a page's types) beside them.
@@ -204,7 +206,19 @@ impl WaylandClipboard {
         html: Option<String>,
         custom: Vec<u8>,
     ) -> Result<(), String> {
-        self.publish(false, text, html, Some(custom.into()))
+        self.publish(false, text, html, Some(custom.into()), None)
+    }
+    /// Publish the clipboard as plain text, as HTML where given, with
+    /// Chromium's web custom data `custom` where given and the PNG `png`
+    /// (offered as `image/png`) beside them: one selection.
+    pub fn store_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        custom: Option<Vec<u8>>,
+        png: Option<Arc<[u8]>>,
+    ) -> Result<(), String> {
+        self.publish(false, text, html, custom.map(Into::into), png)
     }
     fn publish(
         &self,
@@ -212,6 +226,7 @@ impl WaylandClipboard {
         text: String,
         html: Option<String>,
         custom: Option<Arc<[u8]>>,
+        png: Option<Arc<[u8]>>,
     ) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
         self.0
@@ -220,6 +235,7 @@ impl WaylandClipboard {
                 text,
                 html,
                 custom,
+                png,
                 reply,
             })
             .map_err(|_| "Wayland data worker stopped".to_string())?;
@@ -401,9 +417,10 @@ impl NativeData {
                                 text,
                                 html,
                                 custom,
+                                png,
                                 reply,
                             } => {
-                                let _ = reply.send(state.store(primary, text, html, custom));
+                                let _ = reply.send(state.store(primary, text, html, custom, png));
                             }
                             Command::Load { primary, reply } => {
                                 let _ = reply.send(state.load(primary));
@@ -646,8 +663,13 @@ struct Completion {
 }
 /// What this process published as the clipboard.
 enum Published {
-    /// Text, the same as HTML, and Chromium's web custom data.
-    Text(Arc<str>, Option<Arc<str>>, Option<Arc<[u8]>>),
+    /// Text, the same as HTML, Chromium's web custom data and a PNG.
+    Text(
+        Arc<str>,
+        Option<Arc<str>>,
+        Option<Arc<[u8]>>,
+        Option<Arc<[u8]>>,
+    ),
     /// An image, as PNG.
     Png(Arc<[u8]>),
 }
@@ -902,6 +924,7 @@ impl State {
         text: String,
         html: Option<String>,
         custom: Option<Arc<[u8]>>,
+        png: Option<Arc<[u8]>>,
     ) -> Result<(), String> {
         let (seat, serial) = self.serial.ok_or("no input has reached this client yet")?;
         let seat = self
@@ -933,11 +956,12 @@ impl State {
             for kind in (TEXT_TYPES.iter())
                 .chain(html.as_ref().map(|_| &"text/html"))
                 .chain(custom_kind)
+                .chain(png.as_ref().map(|_| &"image/png"))
             {
                 source.offer((*kind).into());
             }
             device.set_selection(Some(&source), serial);
-            let published = Published::Text(text, html.map(Into::into), custom);
+            let published = Published::Text(text, html.map(Into::into), custom, png);
             if let Some((previous, _)) = self.source.replace((source, published)) {
                 previous.destroy();
             }
@@ -1472,12 +1496,15 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
                     && current == source
                 {
                     match published {
-                        Published::Text(_, _, Some(custom))
+                        Published::Text(_, _, Some(custom), _)
                             if mime_type == crate::clipboard::web_custom::FORMAT =>
                         {
                             write_bytes(fd, custom.clone());
                         }
-                        Published::Text(text, html, _) => {
+                        Published::Text(_, _, _, Some(png)) if mime_type == "image/png" => {
+                            write_bytes(fd, png.clone());
+                        }
+                        Published::Text(text, html, ..) => {
                             let html = html.as_ref().filter(|_| mime_type == "text/html");
                             write_selection(fd, html.unwrap_or(text).clone());
                         }

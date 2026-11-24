@@ -11,6 +11,9 @@ clicked.
 - Copy offers its text, its HTML and the blob in one change
   (`set_clipboard_typed`), which the other client reads back and unpacks
   exactly as Chromium does;
+- Copy image offers a PNG as `image/png` beside the text, the HTML and the
+  blob, one selection (`set_clipboard_typed_image`), which the other client
+  reads back byte for byte;
 - an offer of plain text alone pastes no types."""
 import argparse
 import json
@@ -29,12 +32,18 @@ from wayland_pointer import VirtualPointer  # noqa: E402
 from sway_host import sway_config
 
 # The example's buttons, in its window's points.
-PASTE, COPY = (80, 52), (208, 52)
+PASTE, COPY, COPY_IMAGE = (80, 52), (208, 52), (336, 52)
 KIND = "application/x-zgx-notes"
 OFFERED = {KIND: 'Pasted <source id="p1" /> é 😀\n\nfrom a page', "application/x-other": ""}
 COPIED = {KIND: 'Copied <source id="s1" /> 😀\n\nwith a blank line'}
 COPIED_HTML = "<p>Copied [1]</p>"
 COPIED_TEXT = "Copied [1]"
+# Copy image's PNG: 2 by 1, red then blue.
+PNG = bytes([
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 66, 255,
+    1, 15, 249, 3, 253, 133, 17, 153, 118, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+])
 
 
 def pickle(types):
@@ -128,6 +137,16 @@ def main():
             unpickle(blob) == COPIED and blob == pickle(COPIED))
         checks[f"{name}: its text and HTML go in the same change"] = (
             text.decode() == COPIED_TEXT and html.decode() == COPIED_HTML)
+        # The image with them, in one selection: each read from it.
+        click(*COPY_IMAGE)
+        until(f"{name}: the image's copy", lambda: re.search(r"^COPIED image written=true$", log.read_text(), re.M))
+        png = until(f"{name}: the copy's image read back", lambda: read("png"))
+        blob = until(f"{name}: the image copy's web custom data", lambda: read("custom"))
+        text, html = read("text"), read("html")
+        checks[f"{name} image read back"] = [len(png), unpickle(blob), text and text.decode(), html and html.decode()]
+        checks[f"{name}: the image reaches another client as image/png, byte for byte"] = png == PNG
+        checks[f"{name}: its text, HTML and types go in the same change"] = (
+            unpickle(blob) == COPIED and text == COPIED_TEXT.encode() and html == COPIED_HTML.encode())
         # Plain text alone: no types paste.
         offer(b"only text", "text")
         count = len(pasted())
@@ -153,7 +172,8 @@ def main():
             x11 = dict(base, DISPLAY=":" + xvfb.stdout.readline().strip())
             launch("openbox", ["openbox"], x11)
             wait_for_wm(x11)
-            x11_types = {"html": "text/html", "text": "UTF8_STRING", "custom": "chromium/x-web-custom-data"}
+            x11_types = {"html": "text/html", "text": "UTF8_STRING", "custom": "chromium/x-web-custom-data",
+                         "png": "image/png"}
 
             def x11_offer(data, kind):
                 # xclip serves it until another client takes the selection.
@@ -192,7 +212,7 @@ def main():
             wayland = dict(sway_env, WAYLAND_DISPLAY=socket)
             pointer = VirtualPointer(private, socket)
             wayland_types = {"html": "text/html", "text": "text/plain;charset=utf-8",
-                             "custom": "chromium/x-web-custom-data"}
+                             "custom": "chromium/x-web-custom-data", "png": "image/png"}
 
             def wayland_offer(data, kind):
                 # wl-copy serves it, forked, until the selection is replaced.
@@ -222,7 +242,8 @@ def main():
         failed = [key for key, value in checks.items() if value is False]
         assert not failed, f"failed: {failed}\n{json.dumps(checks, indent=2)}"
         print("PASS: a page's web custom data pastes as its types, plain text alone pastes none, and a copy's "
-              "types reach another client as Chromium packs them, with its text and HTML (X11, Wayland)")
+              "types reach another client as Chromium packs them, with its text and HTML, and with an image "
+              "(X11, Wayland)")
     finally:
         for process in reversed(processes):
             stop(process)

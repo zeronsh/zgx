@@ -35,6 +35,7 @@ extern "C" {
         html: Option<String>,
         types: Vec<String>,
     ) -> bool;
+    pub(crate) fn zgx_clipboard_write_image(text: &str, html: Option<String>, png: &[u8]) -> bool;
     pub(crate) fn zgx_clipboard_types() -> Vec<String>;
     pub(crate) fn zgx_clipboard_typed(mime: &str) -> Option<String>;
     pub(crate) fn zgx_copy_atoms(text: &str, atoms: Option<&str>);

@@ -375,3 +375,70 @@ fn types_go_with_a_copy_and_read_back() {
     assert_eq!(written.types, types(&[("application/x-notes", "[Alpha]")]));
     assert_eq!(h.error(), None);
 }
+
+/// `ui.clipboard.write { text, html, types, image }` puts the image beside
+/// the text, HTML and types in one write, settling with whether it took
+/// them; an image that isn't a PNG is an error and writes nothing.
+#[test]
+fn an_image_goes_with_its_text_and_types_in_one_write() {
+    let mut h = Harness::with_desktop(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r##"local shown = ui.state("shown", "")
+            -- A 2 by 1 PNG: red, then blue.
+            local png =
+                "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\2\0\0\0\1\8\6\0\0\0\244\34\127\138\0\0\0\14IDATx\156c\248\207\192\0B\255\1\15\249\3\253\133\17\153v\0\0\0\0IEND\174B`\130"
+            return ui.column {
+                ui.button { "Copy", id = "copy", on_click = function()
+                    ui.clipboard.write({
+                        text = "Figure 1 [1]",
+                        html = "<p>Figure 1 [1]</p>",
+                        types = { ["application/x-notes"] = "<source id=\"s1\" />" },
+                        image = png,
+                    }):after(function(took)
+                        shown:set(`took {took}`)
+                    end)
+                end },
+                ui.button { "Bad", id = "bad", on_click = function()
+                    local ok, err = pcall(ui.clipboard.write, { text = "x", image = "GIF89a" })
+                    shown:set(`{ok} {string.find(tostring(err), "PNG") ~= nil}`)
+                end },
+                ui.text { shown, id = "label" },
+            }"##,
+        )
+    });
+    h.settle();
+    h.ui.prepare_frame();
+    let desktop = h.desktop.clone().unwrap();
+    h.click("copy");
+    for _ in 0..20 {
+        h.settle();
+        if !h.text("label").is_empty() {
+            break;
+        }
+    }
+    assert_eq!(h.text("label"), "took true");
+    assert_eq!(desktop.clipboard(), "Figure 1 [1]");
+    assert_eq!(
+        desktop.clipboard_html().as_deref(),
+        Some("<p>Figure 1 [1]</p>")
+    );
+    let types = vec![(
+        "application/x-notes".to_owned(),
+        "<source id=\"s1\" />".to_owned(),
+    )];
+    assert_eq!(desktop.types(), types);
+    let (w, hgt, pixels) = desktop.clipboard_image().expect("the image");
+    assert_eq!((w, hgt), (2, 1));
+    assert_eq!(pixels, [255, 0, 0, 255, 0, 0, 255, 255]);
+    h.click("bad");
+    h.settle();
+    assert_eq!(h.text("label"), "false true");
+    assert_eq!(
+        desktop.clipboard(),
+        "Figure 1 [1]",
+        "a refused write writes nothing"
+    );
+    assert_eq!(h.error(), None);
+}

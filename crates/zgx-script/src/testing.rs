@@ -256,6 +256,21 @@ impl zgx::platform::Platform for FakeDesktop {
         self.image_only.set(true);
         Box::pin(async { true })
     }
+    fn set_clipboard_typed_image(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+        png: std::sync::Arc<[u8]>,
+    ) -> zgx::platform::Pending<bool> {
+        // The text, HTML, types and image of one copy, side by side.
+        let Ok(image) = zgx_gpu::assets::decode_image(&png) else {
+            return Box::pin(async { false });
+        };
+        self.copy_typed(text, html, types.to_vec());
+        *self.image.borrow_mut() = Some(image);
+        Box::pin(async { true })
+    }
     fn open_files(
         &self,
         picker: zgx::platform::FilePicker,

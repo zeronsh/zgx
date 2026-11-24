@@ -47,6 +47,21 @@ impl Platform for Browser {
             .collect();
         js::zgx_clipboard_write_typed(&text, html, types)
     }
+    /// One `ClipboardItem`: the PNG as `image/png` beside the text and
+    /// HTML. A page's own types can't go with an image (a copy event's
+    /// data takes none), so here they are left out; whether the write was
+    /// asked, as `set_clipboard_text`'s is.
+    fn set_clipboard_typed_image(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+        png: std::sync::Arc<[u8]>,
+    ) -> Pending<bool> {
+        let _ = types;
+        let asked = js::zgx_clipboard_write_image(&text, html, &png);
+        Box::pin(async move { asked })
+    }
     fn clipboard_types(&self) -> Vec<String> {
         js::zgx_clipboard_types().into_iter().step_by(2).collect()
     }

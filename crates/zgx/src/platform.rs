@@ -283,6 +283,26 @@ pub trait Platform {
         let _ = image;
         Box::pin(async { false })
     }
+    /// Put `png` (an encoded PNG) on the clipboard as the platform's image
+    /// beside `text`, its `html` where given and `types` (as
+    /// `set_clipboard_typed`'s), all in one change of the clipboard: a copy
+    /// a paste takes as the image where an image goes (an image editor, a
+    /// document) and as the text, HTML or types elsewhere. Later, as a
+    /// platform that pastes its images decoded (Windows' DIB) decodes it
+    /// off the UI thread. Whether it took them. None takes the text, HTML
+    /// and types alone.
+    #[doc(hidden)]
+    fn set_clipboard_typed_image(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+        png: Arc<[u8]>,
+    ) -> Pending<bool> {
+        let _ = png;
+        let took = self.set_clipboard_typed(text, html, types);
+        Box::pin(async move { took })
+    }
     /// The files the user picks to open: none if they cancel.
     fn open_files(&self, picker: FilePicker) -> Pending<Result<Vec<PathBuf>, String>>;
     /// Where the user chooses to save: none if they cancel.
@@ -399,6 +419,7 @@ pub fn unforwarded(wrap: impl FnOnce(PlatformService) -> PlatformService) -> Vec
     let _ = w.clipboard_typed("");
     drop(w.clipboard_image());
     drop(w.set_clipboard_image(Arc::new(image)));
+    drop(w.set_clipboard_typed_image(String::new(), None, &[], Arc::from(&[][..])));
     drop(w.open_files(picker()));
     drop(w.save_file(picker()));
     drop(w.open_folder(picker()));
@@ -423,7 +444,7 @@ struct Probe {
 }
 impl Probe {
     /// Every `Platform` method, in the trait's order.
-    const METHODS: [&'static str; 34] = [
+    const METHODS: [&'static str; 35] = [
         "clipboard_text",
         "set_clipboard_text",
         "primary_text",
@@ -449,6 +470,7 @@ impl Probe {
         "clipboard_typed",
         "clipboard_image",
         "set_clipboard_image",
+        "set_clipboard_typed_image",
         "open_files",
         "save_file",
         "open_folder",
@@ -559,6 +581,16 @@ impl Platform for Probe {
     }
     fn set_clipboard_image(&self, _: Arc<crate::image::ImageData>) -> Pending<bool> {
         self.heard("set_clipboard_image");
+        Box::pin(async { true })
+    }
+    fn set_clipboard_typed_image(
+        &self,
+        _: String,
+        _: Option<String>,
+        _: &[(String, String)],
+        _: Arc<[u8]>,
+    ) -> Pending<bool> {
+        self.heard("set_clipboard_typed_image");
         Box::pin(async { true })
     }
     fn open_files(&self, _: FilePicker) -> Pending<Result<Vec<PathBuf>, String>> {

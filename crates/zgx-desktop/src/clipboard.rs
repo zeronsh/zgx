@@ -456,12 +456,86 @@ pub(crate) fn read_image(images: &Images) -> Result<zgx::image::ImageData> {
     if let Some(image) = windows_dib() {
         return Ok(image);
     }
-    let image = arboard::Clipboard::new()?.get_image()?;
+    let mut clipboard = arboard::Clipboard::new()?;
+    // A PNG where one is there (a typed image's copy, a screenshot, a
+    // browser's Copy Image): arboard reads macOS's TIFF alone.
+    #[cfg(target_os = "macos")]
+    if let Ok(png) = clipboard.get().raw(PNG_FORMAT) {
+        return decoded(&png);
+    }
+    let image = clipboard.get_image()?;
     Ok(zgx::image::ImageData::new(
         image.width.try_into()?,
         image.height.try_into()?,
         image.bytes.into_owned(),
     )?)
+}
+
+/// The platform's name for an encoded PNG on the clipboard: what browsers,
+/// image editors and screenshots put there.
+#[cfg(target_os = "macos")]
+const PNG_FORMAT: &str = "public.png";
+#[cfg(windows)]
+const PNG_FORMAT: &str = "PNG";
+#[cfg(not(any(target_os = "macos", windows)))]
+const PNG_FORMAT: &str = "image/png";
+
+/// `png` decoded to straight RGBA.
+fn decoded(png: &[u8]) -> Result<zgx::image::ImageData> {
+    let image = zgx_gpu::assets::decode_image(png).map_err(|e| e.to_string())?;
+    // A copy sharing the pixels.
+    Ok(image.transformed(zgx::affine::Affine::IDENTITY))
+}
+
+/// Put `png`, an encoded PNG, on the clipboard as the platform's image,
+/// beside `text`, its `html` where given and `types` (as
+/// `Clipboard::set_typed` writes them), in one change, on the calling
+/// thread: the PNG as apps paste one (`public.png` on macOS, `image/png` on
+/// X11 and Wayland, `PNG` on Windows with a DIB of it beside, which Paint
+/// and the like paste alone).
+pub(crate) fn write_typed_image(
+    images: &Images,
+    text: String,
+    html: Option<String>,
+    types: &[(String, String)],
+    png: &[u8],
+) -> Result<()> {
+    if let Images::Memory(memory) = images {
+        let image = decoded(png)?;
+        memory.set_typed(Some(text), html, types.to_vec());
+        memory.with(|held| held.image = Some(image));
+        return Ok(());
+    }
+    let custom = (!types.is_empty()).then(|| web_custom::encode(types));
+    #[cfg(target_os = "linux")]
+    if let Images::Wayland(clipboard) = images {
+        return Ok(clipboard.store_typed(text, html, custom, Some(png.into()))?);
+    }
+    let _ = images;
+    let mut raw: Vec<(&str, &[u8])> = vec![(PNG_FORMAT, png)];
+    if let Some(custom) = &custom {
+        raw.push((web_custom::FORMAT, custom));
+    }
+    // Windows' apps that paste a DIB alone take one made of it.
+    #[cfg(windows)]
+    let dib = {
+        let image = decoded(png)?;
+        let pixels = image.pixels_now();
+        Some(arboard::ImageData {
+            width: image.width() as usize,
+            height: image.height() as usize,
+            bytes: pixels.to_vec().into(),
+        })
+    };
+    #[cfg(not(windows))]
+    let dib = None;
+    arboard::Clipboard::new()?.set().formats_with_dib(
+        platform_text(text).into(),
+        html.map(Into::into),
+        &raw,
+        dib,
+    )?;
+    Ok(())
 }
 
 /// Put `image` on the clipboard, encoded on the calling thread: on Windows
@@ -506,25 +580,36 @@ pub(crate) fn write_image(images: &Images, image: &zgx::image::ImageData) -> Res
 #[cfg(windows)]
 fn windows_dib() -> Option<zgx::image::ImageData> {
     use windows::{
-        Win32::{
-            Foundation::HGLOBAL,
-            System::{
-                DataExchange::{
-                    CloseClipboard, EnumClipboardFormats, GetClipboardData,
-                    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
-                },
-                Memory::{GlobalLock, GlobalSize, GlobalUnlock},
-                Ole::CF_DIBV5,
-            },
-        },
+        Win32::System::DataExchange::{IsClipboardFormatAvailable, RegisterClipboardFormatW},
         core::w,
+    };
+    // SAFETY: a format registered and a format asked after: neither reads
+    // memory, nor needs the clipboard open.
+    if unsafe { IsClipboardFormatAvailable(RegisterClipboardFormatW(w!("PNG"))).is_ok() } {
+        return None;
+    }
+    windows_dib_of_any()
+}
+
+/// The clipboard's DIB on Windows, as `windows_dib` reads it, whether or
+/// not a PNG is there too.
+#[cfg(windows)]
+fn windows_dib_of_any() -> Option<zgx::image::ImageData> {
+    use windows::Win32::{
+        Foundation::HGLOBAL,
+        System::{
+            DataExchange::{
+                CloseClipboard, EnumClipboardFormats, GetClipboardData, IsClipboardFormatAvailable,
+                OpenClipboard,
+            },
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Ole::CF_DIBV5,
+        },
     };
     // SAFETY: the clipboard is opened and closed around the read; the block
     // is read within its locked size and copied before it is unlocked.
     unsafe {
-        if IsClipboardFormatAvailable(RegisterClipboardFormatW(w!("PNG"))).is_ok()
-            || IsClipboardFormatAvailable(u32::from(CF_DIBV5.0)).is_err()
-        {
+        if IsClipboardFormatAvailable(u32::from(CF_DIBV5.0)).is_err() {
             return None;
         }
         // Another app may hold the clipboard a moment, as arboard allows for.
@@ -772,6 +857,100 @@ mod tests {
         assert!(
             clipboard.get_types().is_err(),
             "types left behind plain text"
+        );
+    }
+
+    /// A 2 by 1 PNG: red, then blue.
+    const PNG: [u8; 71] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0,
+        66, 255, 1, 15, 249, 3, 253, 133, 17, 153, 118, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+        130,
+    ];
+    const RED_BLUE: [u8; 8] = [255, 0, 0, 255, 0, 0, 255, 255];
+
+    /// An image with its text, HTML and types through the system clipboard
+    /// (macOS, Windows, X11), in one change: `write_typed_image` writes them,
+    /// and the image reads back (`read_image`) with the text, HTML and
+    /// types beside it, the PNG as the platform names one. Ignored: it
+    /// replaces the clipboard of whoever runs it. CI runs it on each
+    /// (`--ignored --exact`; Linux as `clipboard-typed-image-x11`).
+    #[test]
+    #[ignore]
+    fn an_image_with_its_text_and_types_round_trips_through_the_system_clipboard() {
+        // Held across the write, as a window's is for the app's life: on
+        // X11 the last of arboard's clipboards to go takes the selection's
+        // owner with it.
+        let mut clipboard = super::Clipboard {
+            backend: super::Backend::Native(arboard::Clipboard::new().expect("the clipboard")),
+        };
+        let types = vec![(
+            "application/x-anara-citations".to_owned(),
+            "<source id=\"s1\" />".to_owned(),
+        )];
+        super::write_typed_image(
+            &super::Images::Native,
+            "Figure 1 [1]".into(),
+            Some("<p>Figure 1 [1]</p>".into()),
+            &types,
+            &PNG,
+        )
+        .expect("written");
+        let image = super::read_image(&super::Images::Native).expect("the image read back");
+        assert_eq!((image.width(), image.height()), (2, 1));
+        assert_eq!(&image.pixels_now()[..], RED_BLUE);
+        assert_eq!(clipboard.get_text().expect("its text"), "Figure 1 [1]");
+        assert!(
+            clipboard
+                .get_html()
+                .expect("its HTML")
+                .contains("<p>Figure 1 [1]</p>")
+        );
+        assert_eq!(clipboard.get_types().expect("its types"), types);
+        let super::Backend::Native(native) = &mut clipboard.backend else {
+            unreachable!()
+        };
+        assert_eq!(native.get().raw(super::PNG_FORMAT).expect("the PNG"), PNG);
+        // Windows: a DIB of it too, for the apps that paste one alone.
+        #[cfg(windows)]
+        assert_eq!(
+            super::windows_dib_of_any().map(|image| image.pixels_now().to_vec()),
+            Some(RED_BLUE.to_vec())
+        );
+        // Text written over it: no image is left to read.
+        clipboard.set_text("plain".into()).expect("text written");
+        assert!(
+            super::read_image(&super::Images::Native).is_err(),
+            "an image left behind text"
+        );
+    }
+
+    /// The memory clipboard keeps an image written with text, HTML and
+    /// types as one copy; a PNG that isn't one is refused, writing nothing.
+    #[test]
+    fn the_memory_clipboard_keeps_an_image_with_its_text_and_types() {
+        let mut clipboard = super::Clipboard {
+            backend: super::Backend::Memory(super::Memory::default()),
+        };
+        let images = clipboard.images();
+        let types = vec![("application/x-notes".to_owned(), "n".to_owned())];
+        super::write_typed_image(&images, "t".into(), Some("<b>t</b>".into()), &types, &PNG)
+            .unwrap();
+        let image = super::read_image(&images).unwrap();
+        assert_eq!(&image.pixels_now()[..], RED_BLUE);
+        assert_eq!(clipboard.get_text().unwrap(), "t");
+        assert_eq!(clipboard.get_html().unwrap(), "<b>t</b>");
+        assert_eq!(clipboard.get_types().unwrap(), types);
+        assert!(super::write_typed_image(&images, "u".into(), None, &[], b"not a png").is_err());
+        assert_eq!(
+            clipboard.get_text().unwrap(),
+            "t",
+            "a refused write changes nothing"
+        );
+        clipboard.set_text("plain".into()).unwrap();
+        assert!(
+            super::read_image(&images).is_err(),
+            "text replaced the image"
         );
     }
 
