@@ -54,6 +54,8 @@ int main(void) {
     AT(zgx_api, settle);
     AT(zgx_api, promise_release);
     AT(zgx_api, promise_host);
+    AT(zgx_api, shared_upsert);
+    AT(zgx_api, shared_remove);
     SIZE(zgx_registrar);
     AT(zgx_registrar, size);
     AT(zgx_registrar, host);

@@ -221,6 +221,30 @@ pub struct Api {
     /// (let go with [`host_release`](Self::host_release)): how a thread
     /// holding the promise posts its settling back. Any thread.
     pub promise_host: unsafe extern "C" fn(promise: *const c_void) -> *mut c_void,
+    /// Writes `rows` (a list, taken) into the list the shared state holds,
+    /// each row by its field `key` (a string, `key_len` bytes): a row whose
+    /// key the list has replaces the first row of that key where it is,
+    /// the others are added at the end in the order given, and of two rows
+    /// given with one key the last is written. One pass over the list;
+    /// only the rows given are new (`Shared::upsert`). [`DONE`], or
+    /// [`FAILED`] with why in `out` (a row with no string at `key`: nothing
+    /// written).
+    pub shared_upsert: unsafe extern "C" fn(
+        shared: *const c_void,
+        key: *const u8,
+        key_len: usize,
+        rows: *mut Raw,
+        out: *mut Raw,
+    ) -> u32,
+    /// Removes the rows of the list it holds whose field `key` is one of
+    /// the `len` strings `keys` (lent), every such row: not 0 if any was.
+    pub shared_remove: unsafe extern "C" fn(
+        shared: *const c_void,
+        key: *const u8,
+        key_len: usize,
+        keys: *const Bytes,
+        len: usize,
+    ) -> u32,
 }
 
 /// A shared state's observer ([`Api::shared_observe`]): `value` is what it
