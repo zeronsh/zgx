@@ -170,7 +170,7 @@ To build, in this order, each already a method of `ScriptHost`:
 | a call back onto the interface's thread, from any thread | a module's worker threads | Built: `Api::post` (a host handle, `Registrar::host_ref`), drained by one task that waits on a waker, made the first time a module asks |
 | async actions: a promise the module settles later | `ui.call` | Built: `Registrar::async_action`, `Api::settle` (the interface's thread) and `promise_release` (any thread: a dropped promise rejects, naming the module and the action) |
 | timers | a module that waits | Built: `Api::after`, on the host's timers (zgx's clock: a test's, frozen, virtual or the wall's) |
-| images by name | a module that decodes or draws | `ScriptHost::image` (`lib.rs:2761`) |
+| images by name | a module that decodes or draws | Built: `Api::image_buffer` (any thread: RGBA8, allocated as the image's `Arc<[u8]>`, so set uncopied), `image_set` (the interface's thread, its length checked against width × height × 4), `image_drop`, `image_remove`; named `<module>.<name>`, gone with the host or the module's next load into it |
 
 Zeron's host makes 107 actions, 181 async actions, 11 functions and 128 shared states, and reaches zgx's own Rust beyond them mostly for the thread hand-off and timers (59 uses). With the rows above, that surface is covered.
 

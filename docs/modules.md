@@ -200,6 +200,21 @@ feed.remove("id", ["c-41", "c-7"]);   // every row with one of these ids
 
 `upsert(key, rows)` takes rows that each have a string at `key`. A row whose key the list has replaces the first row with that key, where it is, keeping its equal parts; the others are added at the end, in order; of two given with one key, the last is written. The list is walked once (a batch of 500 rows into 10,000 is one walk, not 500), and written in place when nothing else holds it. A state holding `nil` becomes a list of the rows; one holding anything else, or a row without its key, is an error, and nothing is written. `remove(key, keys)` removes every row whose key is one of `keys`, and says whether any was. `append(text)` adds to the end of a string, as a script's `state:append` does. `get` counts what it holds, copying nothing; read while a binding asks the module (`ui.call_sync` in a binding's function), it is followed as a script's `get` is. `observe(|host, now| …)` calls on the interface's thread each time it changes, from the next change on, until the `Observer` is dropped: how a module hears what scripts write. A handle is the interface thread's (`Shared` isn't `Send`); once its host is gone it holds `nil` and sets nothing.
 
+### Images
+
+A module that decodes or draws a picture shows it by name, as `host:<name>` (`ui.image { src = "host:words.cover" }`, `bg_image = "host:words.cover"`). It writes the pixels on any thread into an `ImageBuffer`, whose bytes are allocated as what the image keeps, and sets it from a job, so nothing is copied on the way:
+
+```rust
+let ui = host.ui();
+std::thread::spawn(move || {
+    let mut cover = ImageBuffer::new(width, height).unwrap();
+    decode_into(cover.pixels());             // width * height * 4 bytes
+    ui.post(move |host| host.image("words.cover", cover).unwrap());
+});
+```
+
+The pixels are RGBA8: red, green, blue and alpha a byte each, straight (not premultiplied), rows top to bottom with nothing between them (a row is `width * 4` bytes). A buffer starts all 0. It is the module's to write, from one thread at a time, until it is given to `host.image` (on the interface's thread) or dropped (anywhere). An image a module sets is named `<module>.<name>`, as its functions are; `host.remove_image(name)` removes it. What a module sets goes with its host, and as the module is loaded into its host again, so nothing is left from its last load. (`zgx run` restarts the app when a module changes, a new process.) From C, `image_buffer`, `image_set`, `image_drop` and `image_remove` are the same, and `image_set` checks the buffer's length against `width * height * 4`.
+
 ### Timers
 
 `host.after(delay, |host| …)` calls once, `host.every(period, |host| …)` every period, on the interface's thread and on zgx's clock: a test's (its frames move it), devtools' frozen one, video's virtual one, else the wall's. Each returns a `Timer`, which stops it when dropped (`forget` lets it run on until its host goes). A module's state is reached from a job or a timer's call as from setup, `host.state::<T>()`.

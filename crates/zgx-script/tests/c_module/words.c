@@ -1,5 +1,7 @@
 /* A zgx module in C, for tests/native_modules.rs: zgx_module.h alone, no
  * Rust. Its manifest's bytes are made by the test (manifest.h). */
+#include <pthread.h>
+
 #include "zgx_module.h"
 #include "manifest.h"
 
@@ -85,6 +87,77 @@ static void nothing(void *user) { (void)user; }
 
 #define NAME(text) (const uint8_t *)(text), sizeof(text) - 1
 
+/* The host's handle, kept as the module loads. */
+static void *host_of_module;
+
+/* cwords.dot(width, height, len): a picture of `len` bytes, each 0x7f, set
+ * as `host:cwords.dot`: "set", or why not. */
+static uint32_t dot(void *user, const zgx_value *args, size_t len, zgx_value *out) {
+    (void)user;
+    if (len < 3 || args[0].kind != ZGX_NUM || args[1].kind != ZGX_NUM || args[2].kind != ZGX_NUM)
+        return failed(out, "dot(width, height, len) takes three numbers");
+    size_t bytes = (size_t)args[2].held.number;
+    uint8_t *data = NULL;
+    void *buffer = api->image_buffer(bytes, &data);
+    if (!buffer) return failed(out, "no buffer");
+    memset(data, 0x7f, bytes);
+    if (api->image_set(host_of_module, NAME("cwords.dot"), (uint32_t)args[0].held.number,
+                       (uint32_t)args[1].held.number, buffer, out) != ZGX_DONE)
+        return ZGX_FAILED;
+    api->string(NAME("set"), out);
+    return ZGX_DONE;
+}
+
+/* A 2x2 picture of 0x01s set as `host:cwords.dot` from the thread this
+ * runs on: its status, and whether `out` was left nil. */
+struct set_off {
+    uint32_t status;
+    int nil;
+};
+static void *set_from_here(void *arg) {
+    struct set_off *said = arg;
+    uint8_t *data = NULL;
+    void *buffer = api->image_buffer(16, &data);
+    memset(data, 0x01, 16);
+    zgx_value out;
+    zgx_num(&out, 1);
+    said->status = api->image_set(host_of_module, NAME("cwords.dot"), 2, 2, buffer, &out);
+    said->nil = out.kind == ZGX_NIL;
+    return NULL;
+}
+/* cwords.dot_off_thread(): the same set from a thread of the module's own:
+ * "refused" if it failed with `out` nil, else "set". */
+static uint32_t dot_off_thread(void *user, const zgx_value *args, size_t len, zgx_value *out) {
+    (void)user;
+    (void)args;
+    (void)len;
+    struct set_off said = {0, 0};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, set_from_here, &said) != 0) return failed(out, "no thread");
+    pthread_join(thread, NULL);
+    const char *what = said.status == ZGX_FAILED && said.nil ? "refused" : "set";
+    api->string((const uint8_t *)what, strlen(what), out);
+    return ZGX_DONE;
+}
+/* Called by the test from the library once the host is gone (no script is
+ * left to call it): the same set, on the host's thread. 1 if it failed
+ * saying its host is gone. */
+uint32_t cwords_dot_past_host(void);
+uint32_t cwords_dot_past_host(void) {
+    uint8_t *data = NULL;
+    void *buffer = api->image_buffer(16, &data);
+    memset(data, 0x01, 16);
+    zgx_value out;
+    zgx_num(&out, 1);
+    uint32_t status = api->image_set(host_of_module, NAME("cwords.dot"), 2, 2, buffer, &out);
+    size_t bytes = 0;
+    const char *why = zgx_str(&out, &bytes);
+    const char *said = "`cwords.dot` wasn't set: its host is gone";
+    uint32_t told = status == ZGX_FAILED && why && bytes == strlen(said) && memcmp(why, said, bytes) == 0;
+    zgx_release(api, &out);
+    return told;
+}
+
 #undef api
 ZGX_MODULE_ENTRY(cwords) {
     if (api->abi != ZGX_MODULE_ABI || api->size < sizeof(zgx_api) ||
@@ -99,5 +172,8 @@ ZGX_MODULE_ENTRY(cwords) {
                            kept_init, kept_free);
     r->action(r->host, NAME("cwords.keep"), keep, state, nothing);
     r->function(r->host, NAME("cwords.kept"), kept, state, nothing);
+    host_of_module = r->host_ref(r->host);
+    r->function(r->host, NAME("cwords.dot"), dot, NULL, nothing);
+    r->function(r->host, NAME("cwords.dot_off_thread"), dot_off_thread, NULL, nothing);
     return 0;
 }
