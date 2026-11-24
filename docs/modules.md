@@ -198,7 +198,21 @@ feed.upsert("id", changed)?;          // replace by `id` in place, add the new a
 feed.remove("id", ["c-41", "c-7"])?;  // every row with one of these ids
 ```
 
-`upsert(key, rows)` takes rows that each have a string at `key`. A row whose key the list has replaces the first row with that key, where it is, keeping its equal parts; the others are added at the end, in order; of two given with one key, the last is written. The list is walked once (a batch of 500 rows into 10,000 is one walk, not 500), and written in place when nothing else holds it. A state holding `nil` becomes a list of the rows; one holding anything else, or a row without its key, is an error, and nothing is written. `remove(key, keys)` removes every row whose key is one of `keys`, and says whether any was. `append(text)` adds to the end of a string, as a script's `state:append` does. `get` counts what it holds, copying nothing; read while a binding asks the module (`ui.call_sync` in a binding's function), it is followed as a script's `get` is. `observe(|host, now| …)` calls on the interface's thread each time it changes, from the next change on, until the `Observer` is dropped: how a module hears what scripts write. A handle is the interface thread's (`Shared` isn't `Send`). Once its host is gone it holds `nil`, and every write (`set`, `append`, `upsert`, `remove`) is an error saying its host is gone, so a module can tell that what it wrote went nowhere.
+`upsert(key, rows)` takes rows that each have a string at `key`. A row whose key the list has replaces the first row with that key, where it is, keeping its equal parts; the others are added at the end, in order; of two given with one key, the last is written. The list is walked once (a batch of 500 rows into 10,000 is one walk, not 500), and written in place when nothing else holds it. A state holding `nil` becomes a list of the rows; one holding anything else, or a row without its key, is an error, and nothing is written. `remove(key, keys)` removes every row whose key is one of `keys`, and says whether any was.
+
+A list whose order changes (a row made lands at its sorted place, one moves to the top) needn't go whole either. `upsert_at(key, rows)` gives each row a `Place`: `Before(key)` just before that key's row, `End` at the end, or `Stay` where its key's row is (as `upsert`). A row the list has moves to its place, so a module that diffs a reordered list posts only the rows that moved, each placed before the row that follows it:
+
+```rust
+use zgx_module::Place;
+feed.upsert_at("id", [
+    (made, Place::Before("c-12")),     // a chat made, at its sorted place
+    (bumped, Place::Before("c-3")),    // one moved up
+])?;
+```
+
+A row placed before another goes wherever that one goes, after the rows placed before it in turn; rows placed before one key go in the order given. The list is walked once. A row placed before itself, before a key neither the list nor the rows have, or rows placed before one another (`a` before `b` before `a`) are an error, and nothing is written.
+
+`append(text)` adds to the end of a string, as a script's `state:append` does. `get` counts what it holds, copying nothing; read while a binding asks the module (`ui.call_sync` in a binding's function), it is followed as a script's `get` is. `observe(|host, now| …)` calls on the interface's thread each time it changes, from the next change on, until the `Observer` is dropped: how a module hears what scripts write. A handle is the interface thread's (`Shared` isn't `Send`). Once its host is gone it holds `nil`, and every write (`set`, `append`, `upsert`, `upsert_at`, `remove`) is an error saying its host is gone, so a module can tell that what it wrote went nowhere.
 
 ### Images
 

@@ -2925,6 +2925,276 @@ pub(crate) fn upsert_rows(
     Ok(changed)
 }
 
+/// Where a row given to [`Shared::upsert_at`] goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// Where the list's row of its key is, or at the end if it has none:
+    /// as [`Shared::upsert`] writes it.
+    Stay,
+    /// Just before the row with this key: one of the list's, or one given
+    /// with it (placed where that one goes).
+    Before(String),
+    /// At the end of the list.
+    End,
+}
+
+/// Whether `row` is `was` still: the same parts (as `reconcile` gives an
+/// equal one back), told without comparing them again.
+fn same_row(row: &Value, was: &Value) -> bool {
+    match (row, was) {
+        (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
+        (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b),
+        (a, b) => a == b,
+    }
+}
+
+/// Puts the rows placed before `key` (`anchored`'s, in the order given),
+/// each after the rows placed before it in turn, by `put`: no recursion,
+/// so a long chain (a burst of rows each before the next) costs no stack.
+fn put_before(
+    key: &str,
+    anchored: &mut rustc_hash::FxHashMap<Str, Vec<usize>>,
+    ids: &[Str],
+    mut put: impl FnMut(usize),
+) {
+    let Some(first) = anchored.remove(key) else {
+        return;
+    };
+    let mut stack: Vec<(Option<usize>, std::vec::IntoIter<usize>)> =
+        vec![(None, first.into_iter())];
+    while let Some((_, rows)) = stack.last_mut() {
+        match rows.next() {
+            Some(n) => {
+                let before = anchored.remove(&*ids[n]).unwrap_or_default();
+                stack.push((Some(n), before.into_iter()));
+            }
+            None => {
+                if let Some((Some(n), _)) = stack.pop() {
+                    put(n);
+                }
+            }
+        }
+    }
+}
+
+/// [`upsert_rows`] with a place for each row ([`Place`]): a row placed
+/// before a key goes just before that key's row (the list's first of it,
+/// or one given, wherever that goes), one placed at the end at the end,
+/// each in the order given; one that stays is written as `upsert` writes
+/// it. A row of the list given with a place moves there. The list is
+/// walked once, and the rest of it shared. Of two rows given with one key
+/// the last is written, with its place. An error, nothing written, if a
+/// row has no string at `key`, is placed before itself, before a key
+/// neither the list nor the rows have, or rows are placed before one
+/// another (`a` before `b` before `a`). Whether anything changed.
+pub(crate) fn place_rows(
+    signal: &Signal<Value>,
+    key: &str,
+    given: Vec<(Value, Place)>,
+) -> Result<bool, String> {
+    use rustc_hash::{FxHashMap, FxHashSet};
+    // Nothing placed (rows that changed where they are): `upsert`, which
+    // writes a list held nowhere else in place.
+    if given.iter().all(|(_, place)| *place == Place::Stay) {
+        return upsert_rows(signal, key, given.into_iter().map(|(row, _)| row).collect());
+    }
+    // The rows by key, the last of a key kept (with its place), in the
+    // order first given; `said` is the row's number as given.
+    let mut ids: Vec<Str> = Vec::with_capacity(given.len());
+    let mut rows: Vec<Value> = Vec::with_capacity(given.len());
+    let mut places: Vec<Place> = Vec::with_capacity(given.len());
+    let mut said: Vec<usize> = Vec::with_capacity(given.len());
+    let mut at: FxHashMap<Str, usize> = Default::default();
+    at.reserve(given.len());
+    for (i, (row, place)) in given.into_iter().enumerate() {
+        let Some(Value::Str(id)) = row.field(key) else {
+            return Err(format!("row {} has no string `{key}`", i + 1));
+        };
+        let id = id.clone();
+        match at.get(&id) {
+            Some(&n) => (rows[n], places[n], said[n]) = (row, place, i + 1),
+            None => {
+                at.insert(id.clone(), ids.len());
+                ids.push(id);
+                rows.push(row);
+                places.push(place);
+                said.push(i + 1);
+            }
+        }
+    }
+    let listed = signal.with_untracked(|held| match held {
+        Value::List(_) | Value::Nil => true,
+        Value::Map(fields) => fields.is_empty(),
+        _ => false,
+    });
+    if !listed {
+        return Err("it holds no list".into());
+    }
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    // Before itself, or before one another: told from the rows alone. A
+    // row placed before one that stays or goes to the end is placed where
+    // that one is; before one placed before another, it follows it.
+    let anchor = |n: usize| match &places[n] {
+        Place::Before(key) => Some(key.as_str()),
+        _ => None,
+    };
+    for n in 0..ids.len() {
+        if anchor(n) == Some(&*ids[n]) {
+            return Err(format!(
+                "row {} is placed before itself (`{}`)",
+                said[n], ids[n]
+            ));
+        }
+    }
+    let placed_before = |n: usize| {
+        anchor(n)
+            .and_then(|key| at.get(key).copied())
+            .filter(|m| anchor(*m).is_some())
+    };
+    // 0 not yet seen, 1 on the chain being followed, 2 followed.
+    let mut seen = vec![0u8; ids.len()];
+    for start in 0..ids.len() {
+        let mut chain = Vec::new();
+        let mut n = Some(start);
+        while let Some(at_n) = n {
+            match seen[at_n] {
+                2 => break,
+                1 => {
+                    let from = chain.iter().position(|m| *m == at_n).unwrap_or(0);
+                    let mut keys: Vec<String> = chain[from..]
+                        .iter()
+                        .map(|m: &usize| format!("`{}`", ids[*m]))
+                        .collect();
+                    keys.push(format!("`{}`", ids[at_n]));
+                    return Err(format!(
+                        "rows are placed before one another: {}",
+                        keys.join(" before ")
+                    ));
+                }
+                _ => {
+                    seen[at_n] = 1;
+                    chain.push(at_n);
+                    n = placed_before(at_n);
+                }
+            }
+        }
+        for m in chain {
+            seen[m] = 2;
+        }
+    }
+    // The rows placed before each key, in the order given.
+    let mut anchored: FxHashMap<Str, Vec<usize>> = Default::default();
+    for n in 0..ids.len() {
+        if let Some(key) = anchor(n) {
+            anchored.entry(Str::from(key)).or_default().push(n);
+        }
+    }
+    let placed: FxHashSet<usize> = (0..ids.len())
+        .filter(|n| places[*n] != Place::Stay)
+        .collect();
+    /// The list being made, and where each given row is in it.
+    struct Making<'a> {
+        items: &'a [Value],
+        next: Vec<Value>,
+        rows: Vec<Value>,
+        /// Where its row was in the list, once the walk has met it.
+        old: Vec<Option<usize>>,
+        /// Where it is in `next`, once put.
+        put_at: Vec<Option<usize>>,
+    }
+    impl Making<'_> {
+        /// Given row `n` put next: reconciled with its old one if that is
+        /// known yet (a row moved up meets it later, in the walk).
+        fn put(&mut self, n: usize) {
+            let row = std::mem::replace(&mut self.rows[n], Value::Nil);
+            let row = match self.old[n] {
+                Some(i) => row.reconcile(&self.items[i]),
+                None => row,
+            };
+            self.put_at[n] = Some(self.next.len());
+            self.next.push(row);
+        }
+    }
+    let mut failed = None;
+    let count = ids.len();
+    let changed = signal.mutate(|held| {
+        let items: &[Value] = match &*held {
+            Value::List(items) => items,
+            _ => &[],
+        };
+        let mut m = Making {
+            items,
+            next: Vec::with_capacity(items.len() + count),
+            rows: std::mem::take(&mut rows),
+            old: vec![None; count],
+            put_at: vec![None; count],
+        };
+        for (i, item) in items.iter().enumerate() {
+            let id = match item.field(key) {
+                Some(Value::Str(id)) => Some(&**id),
+                _ => None,
+            };
+            if let Some(id) = id {
+                if let Some(&n) = at.get(id)
+                    && m.old[n].is_none()
+                {
+                    m.old[n] = Some(i);
+                    if placed.contains(&n) {
+                        // Moved: put where it goes (already, if that came
+                        // first: reconciled now).
+                        if let Some(pos) = m.put_at[n] {
+                            m.next[pos] =
+                                std::mem::replace(&mut m.next[pos], Value::Nil).reconcile(item);
+                        }
+                        continue;
+                    }
+                    put_before(id, &mut anchored, &ids, |r| m.put(r));
+                    m.put(n);
+                    continue;
+                }
+                put_before(id, &mut anchored, &ids, |r| m.put(r));
+            }
+            m.next.push(item.clone());
+        }
+        // At the end, in the order given: the new rows that stay, and the
+        // rows placed at the end (each after the rows placed before it).
+        for n in 0..ids.len() {
+            let ends = match places[n] {
+                Place::End => true,
+                Place::Stay => m.old[n].is_none(),
+                Place::Before(_) => false,
+            };
+            if ends {
+                put_before(&ids[n], &mut anchored, &ids, |r| m.put(r));
+                m.put(n);
+            }
+        }
+        // A row placed before a key neither the list nor the rows have
+        // was never put.
+        if let Some(n) = (0..count).find(|n| m.put_at[*n].is_none()) {
+            failed = Some(format!(
+                "row {} is placed before `{}`, which isn't in the list",
+                said[n],
+                anchor(n).unwrap_or("")
+            ));
+            return false;
+        }
+        let next = m.next;
+        let changed = next.len() != items.len()
+            || next.iter().zip(items).any(|(row, was)| !same_row(row, was));
+        if changed {
+            *held = Value::List(Slice::from(next));
+        }
+        changed
+    });
+    match failed {
+        Some(why) => Err(why),
+        None => Ok(changed),
+    }
+}
+
 /// The rows of the list `signal` holds whose `key` field is one of `keys`
 /// removed, every such row; one pass. Whether any was.
 pub(crate) fn remove_rows(signal: &Signal<Value>, key: &str, keys: &[&str]) -> bool {
@@ -2986,6 +3256,14 @@ impl Shared {
     /// has no string at `key`.
     pub fn upsert(&self, key: &str, rows: Vec<Value>) -> Result<bool, String> {
         upsert_rows(&self.0, key, rows)
+    }
+    /// [`Shared::upsert`] with a place for each row ([`Place`]): before a
+    /// key's row, at the end, or where its key's row is. A row the list has
+    /// moves to its place; the list is walked once. An error, nothing
+    /// written, if a row is placed before itself, before a key neither the
+    /// list nor the rows have, or rows are placed before one another.
+    pub fn upsert_at(&self, key: &str, rows: Vec<(Value, Place)>) -> Result<bool, String> {
+        place_rows(&self.0, key, rows)
     }
     /// The rows of the list it holds whose `key` field is one of `keys`
     /// removed (every such row); whether any was.

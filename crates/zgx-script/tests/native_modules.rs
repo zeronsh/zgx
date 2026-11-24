@@ -894,6 +894,10 @@ fn the_c_header_is_the_rust_interface() {
         ("zgx_api.image_set", offset_of!(Api, image_set)),
         ("zgx_api.image_drop", offset_of!(Api, image_drop)),
         ("zgx_api.image_remove", offset_of!(Api, image_remove)),
+        (
+            "zgx_api.shared_upsert_at",
+            offset_of!(Api, shared_upsert_at),
+        ),
         ("sizeof(zgx_registrar)", size_of::<Registrar>()),
         ("zgx_registrar.size", offset_of!(Registrar, size)),
         ("zgx_registrar.host", offset_of!(Registrar, host)),
@@ -1749,6 +1753,46 @@ mod reach {
             remover.post(move |host| *UNPAINTED.lock().unwrap() = Some(host.remove_image(&name)));
             Value::NIL
         });
+        // Rows placed, from a thread: `{ {id, title, before?, at_end?}... }`;
+        // what writing them said (`Some(None)`: written).
+        let placer = host.ui();
+        host.function("reach.place", move |given| {
+            let text = |r: Option<Ref<'_>>| r.and_then(|r| r.str()).map(str::to_owned);
+            let rows: Vec<(String, String, Option<String>, bool)> = given
+                .items()
+                .map(|r| {
+                    let at_end = r.field("at_end").and_then(|e| e.bool()).unwrap_or(false);
+                    (
+                        text(r.field("id")).unwrap_or_default(),
+                        text(r.field("title")).unwrap_or_default(),
+                        text(r.field("before")),
+                        at_end,
+                    )
+                })
+                .collect();
+            let ui = placer.clone();
+            std::thread::spawn(move || {
+                ui.post(move |host| {
+                    let feed = host.shared("feed", Value::NIL).unwrap();
+                    let placed = rows.iter().map(|(id, title, before, at_end)| {
+                        let row = Value::record([
+                            ("id", Value::from(id.as_str())),
+                            ("title", Value::from(title.as_str())),
+                        ]);
+                        let place = match (before, at_end) {
+                            (Some(key), _) => zgx_module::Place::Before(key),
+                            (None, true) => zgx_module::Place::End,
+                            (None, false) => zgx_module::Place::Stay,
+                        };
+                        (row, place)
+                    });
+                    *PLACED.lock().unwrap() = Some(feed.upsert_at("id", placed).err().map(|f| f.0));
+                });
+            })
+            .join()
+            .unwrap();
+            Value::NIL
+        });
         // A row with no `id`: refused, saying why.
         let unkeyed = host.shared("feed", Value::NIL).unwrap();
         host.function("reach.patch_unkeyed", move |_| {
@@ -1823,6 +1867,8 @@ mod reach {
     /// it said (`Some(None)`: set).
     pub static PAINTED: Mutex<usize> = Mutex::new(0);
     pub static IMAGE_SAID: Mutex<Option<Option<String>>> = Mutex::new(None);
+    /// What `reach.place` writing its rows said (`Some(None)`: written).
+    pub static PLACED: Mutex<Option<Option<String>>> = Mutex::new(None);
     /// Whether `reach.unpaint` removed one.
     pub static UNPAINTED: Mutex<Option<bool>> = Mutex::new(None);
 
@@ -2154,6 +2200,65 @@ fn a_modules_pictures_go_with_its_host_and_its_reload() {
     let held = std::sync::Arc::downgrade(&app.host.hosted_image("reach.cover").unwrap());
     drop(app);
     assert!(held.upgrade().is_none(), "gone with its host");
+}
+
+/// A module's thread posts rows with places: one moved to the end, one of
+/// the list's and one new placed before it, which go with it; scripts
+/// show the list in its new order. One placed before itself is refused, saying so.
+#[test]
+fn a_module_places_rows_by_key() {
+    let mut app = reaching();
+    let row = |id: &str, title: &str| {
+        Value::record([("id", Value::from(id)), ("title", Value::from(title))])
+    };
+    let place = |app: &TestApp, rows: Vec<Value>| -> Option<String> {
+        *reach::PLACED.lock().unwrap() = None;
+        called(app, "reach.place", Value::List(Slice::from(rows)));
+        app.settle();
+        reach::PLACED.lock().unwrap().take().expect("the job ran")
+    };
+    let placed = |id: &str, title: &str, place: (&str, Value)| {
+        Value::record([
+            ("id", Value::from(id)),
+            ("title", Value::from(title)),
+            (place.0, place.1),
+        ])
+    };
+    assert_eq!(
+        place(&app, vec![row("a", "A"), row("b", "B"), row("c", "C")]),
+        None
+    );
+    assert_eq!(
+        place(
+            &app,
+            vec![
+                placed("c", "C", ("before", Value::from("a"))),
+                placed("a", "A", ("at_end", Value::Bool(true))),
+                placed("n", "N", ("before", Value::from("a"))),
+            ]
+        ),
+        None
+    );
+    assert!(app.wait_until(|app| app.text("rows") == "4 rows"));
+    assert_eq!(app.text("first"), "B");
+    let order: Vec<String> = app
+        .host
+        .shared("feed", Value::Nil)
+        .get()
+        .list()
+        .iter()
+        .map(|r| match r.field("id") {
+            Some(Value::Str(id)) => id.to_string(),
+            _ => "-".into(),
+        })
+        .collect();
+    // (`c` and `n` are placed before `a`, which moves to the end: they go
+    // with it.)
+    assert_eq!(order, ["b", "c", "n", "a"]);
+    assert_eq!(
+        place(&app, vec![placed("b", "B", ("before", Value::from("b")))]).as_deref(),
+        Some("row 1 is placed before itself (`b`)")
+    );
 }
 
 /// Text added to a shared string shows; added to a list, it is refused.
