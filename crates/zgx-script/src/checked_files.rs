@@ -160,6 +160,13 @@ impl Checked {
         (ready, self.0.ahead.workers.load(Ordering::Acquire) == 0)
     }
 
+    /// Whether its manifest names the file `rel` (its path under `ui/`, with
+    /// `/`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn names(&self, rel: &str) -> bool {
+        self.0.sums.contains_key(rel)
+    }
+
     /// The file at `path`, under its `ui/`, if it is the one its manifest
     /// names: a file the manifest doesn't name isn't there; one changed
     /// since the build is refused. A script read ahead is the bytes that

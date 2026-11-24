@@ -222,12 +222,27 @@ fn options_of(config: &AppConfig, window: WindowConfig) -> WindowOptions {
 }
 
 /// The options of the window `window` names among the `named_windows` of
-/// the `zgx.json` beside `script` (none: the one its `first` names, else
-/// its top level's), on this platform, as zgx-run opens it: for a Rust host
-/// that opens its own windows from what its app's `zgx.json` says, and the
-/// script that window opens, if one of its own. An error names what the
-/// file says wrong, or the names it has. (Hidden from the docs until this
-/// Rust interface is settled.)
+/// a bundle's `zgx.json` (none: the one its `first` names, else its top
+/// level's), on this platform, as zgx-run opens it, and the script that
+/// window opens, if one of its own: for a Rust host that opens its own
+/// windows from what its app's `zgx.json` says. The file is checked as
+/// the bundle's others are: changed or removed since it was built, it is
+/// an error. So is what the file says wrong, or a name it doesn't have.
+/// (Hidden from the docs until this Rust interface is settled.)
+#[doc(hidden)]
+pub fn window_options_in(
+    bundle: &zgx_script::app_bundle::Opened,
+    window: Option<&str>,
+) -> Result<(WindowOptions, Option<PathBuf>), String> {
+    let (config, _, mut window) = AppConfig::read_bundle(bundle, window)?;
+    let own = window.script.take();
+    Ok((
+        options_of(&config, window),
+        own.map(|own| bundle.ui.join(own)),
+    ))
+}
+
+/// [`window_options_in`] for an app run from its folder.
 #[doc(hidden)]
 pub fn window_options(
     script: &Path,
@@ -311,13 +326,7 @@ impl AppConfig {
         platform: &str,
         window: Option<&str>,
     ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
-        use zgx_script::window_look::PLATFORMS;
         let dir = script.parent().unwrap_or(Path::new("."));
-        let name = dir
-            .canonicalize()
-            .ok()
-            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "app".into());
         // Or, for one release, the name it had before the rename to zgx.
         let old = dir.join("zgui.json"); // rename-to-zgx: keep
         let mut path = dir.join("zgx.json");
@@ -325,15 +334,50 @@ impl AppConfig {
             eprintln!("zgx: {} is deprecated; name it zgx.json", old.display());
             path = old;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let text = std::fs::read_to_string(&path).ok();
+        Self::read_text(dir, &path, text, platform, window)
+    }
+    /// As [`read_window`](Self::read_window), a bundle's `zgx.json` read
+    /// through its checked files: one its manifest doesn't name is none,
+    /// and one changed or removed since it was built is refused.
+    fn read_bundle(
+        bundle: &zgx_script::app_bundle::Opened,
+        window: Option<&str>,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        let path = bundle.ui.join("zgx.json");
+        let text = match bundle.file("zgx.json")? {
+            None => None,
+            Some(bytes) => {
+                Some(String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?)
+            }
+        };
+        let platform = zgx_script::window_look::this_platform();
+        Self::read_text(&bundle.ui, &path, text, platform, window)
+    }
+    /// The window `window` names of the `zgx.json` `text` (none: there is
+    /// none), read from `path` in `dir`, on `platform`.
+    fn read_text(
+        dir: &Path,
+        path: &Path,
+        text: Option<String>,
+        platform: &str,
+        window: Option<&str>,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        use zgx_script::window_look::PLATFORMS;
+        let name = dir
+            .canonicalize()
+            .ok()
+            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "app".into());
+        let Some(text) = text else {
             if let Some(window) = window {
                 return Err(format!(
-                    "no zgx.json beside {} names a window `{window}` (`named_windows`)",
-                    script.display()
+                    "no {} names a window `{window}` (`named_windows`)",
+                    path.display()
                 ));
             }
             let empty = serde_json::Map::new();
-            let (config, window) = Self::resolve(&name, &path, &empty, platform, None)?;
+            let (config, window) = Self::resolve(&name, path, &empty, platform, None)?;
             return Ok((config, Default::default(), window));
         };
         let fail = |e: String| format!("{}: {e}", path.display());
@@ -398,14 +442,14 @@ impl AppConfig {
         for named in std::iter::once(None).chain(windows.keys().map(|name| Some(name.as_str()))) {
             for other in PLATFORMS {
                 let window = named.and_then(|name| windows.get(name)?.as_object());
-                Self::resolve(&name, &path, object, other, window).map_err(|e| match named {
+                Self::resolve(&name, path, object, other, window).map_err(|e| match named {
                     Some(named) => format!("{e} (window `{named}`, on {other})"),
                     None => format!("{e} (on {other})"),
                 })?;
             }
         }
         let named = chosen.and_then(|name| windows.get(name)?.as_object());
-        let (config, window) = Self::resolve(&name, &path, object, platform, named)?;
+        let (config, window) = Self::resolve(&name, path, object, platform, named)?;
         let app = zgx_script::app_config::from_object(dir, object).map_err(fail)?;
         Ok((config, app, window))
     }
@@ -776,7 +820,11 @@ pub fn run_hosting(
     // `first`, else its top level's; a named window may open a script of
     // its own, beside the app's.
     let window = LAUNCH.lock().unwrap().window.take();
-    let (config, app_host, mut window_config) = AppConfig::read_window(&script, window.as_deref())?;
+    let (config, app_host, mut window_config) = match &bundle {
+        // A bundle's zgx.json, checked as its other files are.
+        Some(bundle) => AppConfig::read_bundle(bundle, window.as_deref())?,
+        None => AppConfig::read_window(&script, window.as_deref())?,
+    };
     let mut entry = bundle.as_ref().map(|bundle| bundle.entry.clone());
     if let Some(own) = window_config.script.take() {
         let dir = script.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -1576,6 +1624,59 @@ mod tests {
         let error = AppConfig::read_window(&script, Some("main")).unwrap_err();
         assert!(error.contains("names a window `main`"), "{error}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A bundle's windows are read through its checked files: a zgx.json
+    /// changed, or removed, on the disk since it was built is refused (it
+    /// would be another app's window), and a bundle with none opens the
+    /// defaults.
+    #[test]
+    fn a_bundles_windows_are_read_checked() {
+        let dir =
+            std::env::temp_dir().join(format!("zgx-run-bundle-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("app.luau"), "return ui.text 'x'").unwrap();
+        std::fs::write(
+            app.join("zgx.json"),
+            r#"{ "title": "Bundled", "first": "intro", "named_windows": { "intro": { "transparent": true, "decorations": false } } }"#,
+        )
+        .unwrap();
+        let made = |name: &str| {
+            let out = dir.join(name);
+            zgx_script::app_bundle::write(
+                &app,
+                &zgx_script::app_bundle::Options {
+                    out: Some(out.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            zgx_script::app_bundle::open(&out).unwrap()
+        };
+        let bundle = made("whole");
+        let (options, own) = window_options_in(&bundle, None).unwrap();
+        assert!(options.transparent && !options.decorations, "first's");
+        assert_eq!((options.title.as_str(), own), ("Bundled", None));
+        // Changed on the disk: refused, whatever it says now.
+        let on_disk = bundle.ui.join("zgx.json");
+        std::fs::write(&on_disk, r#"{ "title": "Other", "named_windows": {} }"#).unwrap();
+        let error = window_options_in(&bundle, None).unwrap_err();
+        assert!(
+            error.contains("isn't the file its bundle's manifest names"),
+            "{error}"
+        );
+        // Removed: refused too, not read as none.
+        std::fs::remove_file(&on_disk).unwrap();
+        assert!(window_options_in(&bundle, None).is_err(), "removed");
+        // A bundle built without one: the defaults, and no window by name.
+        std::fs::remove_file(app.join("zgx.json")).unwrap();
+        let bare = made("bare");
+        assert_eq!(window_options_in(&bare, None).unwrap().0.title, "ui");
+        let error = window_options_in(&bare, Some("intro")).unwrap_err();
+        assert!(error.contains("names a window `intro`"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
