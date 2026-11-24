@@ -50,6 +50,8 @@ mod editor_external_edits;
 mod editor_focus_snapshot;
 #[path = "../editor_gap_cursor.rs"]
 mod editor_gap_cursor;
+#[path = "../editor_group_leaves.rs"]
+mod editor_group_leaves;
 #[path = "../editor_hints.rs"]
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]
