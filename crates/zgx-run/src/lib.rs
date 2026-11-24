@@ -12,6 +12,7 @@ use zgx_script::{Command, ScriptHost};
 pub mod audit;
 #[cfg(feature = "fetch")]
 mod fetch;
+pub mod schema;
 /// Give `host` the fetcher `run` gives a script (feature `fetch`, on by
 /// default): `ui.fetch` and remote images over HTTP and HTTPS, each request
 /// on a thread of its own, its body streamed to the script as it arrives,
@@ -165,7 +166,7 @@ struct WindowConfig {
 /// `zgx.json`'s window keys: those a platform's block (`"macos"`,
 /// `"windows"`, `"linux"`) may hold, besides the look's
 /// (`zgx_script::window_look::LOOK_KEYS`).
-const WINDOW_KEYS: [&str; 12] = [
+pub(crate) const WINDOW_KEYS: [&str; 12] = [
     "title",
     "width",
     "height",
@@ -178,6 +179,17 @@ const WINDOW_KEYS: [&str; 12] = [
     "traffic_lights",
     "frame_autosave",
     "visible",
+];
+
+/// `zgx.json`'s keys of the app as a whole, besides its window's (and
+/// `zgx_script::app_config::KEYS`, its host's): none of them may differ by
+/// platform.
+pub(crate) const APP_KEYS: [&str; 5] = [
+    "$schema",
+    "app_id",
+    "application_id",
+    "named_windows",
+    "first",
 ];
 
 /// The window's options, as `config` and `window` say them.
@@ -449,7 +461,7 @@ impl AppConfig {
         blocks_of(object, "")?;
         for key in object.keys() {
             if !window_keys.contains(&key.as_str())
-                && !["app_id", "application_id", "named_windows", "first"].contains(&key.as_str())
+                && !APP_KEYS.contains(&key.as_str())
                 && !PLATFORMS.contains(&key.as_str())
                 && !zgx_script::app_config::KEYS.contains(&key.as_str())
             {
