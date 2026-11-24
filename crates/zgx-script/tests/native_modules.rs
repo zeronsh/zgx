@@ -885,6 +885,9 @@ fn the_c_header_is_the_rust_interface() {
             offset_of!(Api, shared_unobserve),
         ),
         ("zgx_api.shared_release", offset_of!(Api, shared_release)),
+        ("zgx_api.settle", offset_of!(Api, settle)),
+        ("zgx_api.promise_release", offset_of!(Api, promise_release)),
+        ("zgx_api.promise_host", offset_of!(Api, promise_host)),
         ("sizeof(zgx_registrar)", size_of::<Registrar>()),
         ("zgx_registrar.size", offset_of!(Registrar, size)),
         ("zgx_registrar.host", offset_of!(Registrar, host)),
@@ -896,6 +899,10 @@ fn the_c_header_is_the_rust_interface() {
         ("zgx_registrar.action", offset_of!(Registrar, action)),
         ("zgx_registrar.state", offset_of!(Registrar, state)),
         ("zgx_registrar.host_ref", offset_of!(Registrar, host_ref)),
+        (
+            "zgx_registrar.async_action",
+            offset_of!(Registrar, async_action),
+        ),
     ];
     for (name, rust) in expected {
         assert_eq!(number(name), rust, "{name}");
@@ -1524,6 +1531,8 @@ mod reach {
     fn query_kept() -> zgx_module::Shared {
         QUERY.with_borrow_mut(|q| q.take()).expect("a query kept")
     }
+    /// A promise held for `reach.hold`.
+    pub static HELD: Mutex<Option<zgx_module::Promise>> = Mutex::new(None);
     /// How many jobs were dropped, run or not.
     pub static DROPPED: AtomicUsize = AtomicUsize::new(0);
 
@@ -1662,6 +1671,25 @@ mod reach {
             *KEPT_SHARED.lock().unwrap() = Some(SharedKept(query_kept()));
             Value::NIL
         });
+        // `n` doubled later, by a thread.
+        host.async_action("reach.later", |n, promise| {
+            let n = n.num().unwrap_or(0.);
+            std::thread::spawn(move || promise.resolve_with(move |_| Ok(Value::from(n * 2.))));
+        });
+        // Refused later, saying why.
+        host.async_action("reach.refuse", |_, promise| {
+            let ui = promise.ui();
+            ui.post(move |host| promise.reject(host, "has no such row"));
+        });
+        // Dropped on a thread, unsettled.
+        host.async_action("reach.drop_it", |_, promise| {
+            std::thread::spawn(move || drop(promise)).join().unwrap();
+        });
+        // Held on a thread until `reach.release`, then settled: past its
+        // host, in the test of one gone.
+        host.async_action("reach.hold", |_, promise| {
+            *HELD.lock().unwrap() = Some(promise);
+        });
         // A handle kept past the host.
         let keep = host.ui();
         host.function("reach.keep", move |_| {
@@ -1690,14 +1718,25 @@ const REACHING: &str = r#"
 local feed = ui.shared("feed")
 local query = ui.shared("query", "")
 local log = ui.shared("log", "")
+local said = ui.state("said", "")
 return ui.column {
     ui.text { id = "out", "x" },
     ui.text { id = "rows", function() local f = feed:get(); return if f then `{#f} rows` else "none" end },
     ui.text { id = "first", function() local f = feed:get(); return if f and f[1] then f[1].title else "-" end },
     ui.text { id = "len", function() return tostring(ui.call_sync("reach.feed_len")) end },
     ui.text { id = "log", function() return log:get() end },
+    ui.text { id = "said", function() return said:get() end },
+    ui.row {
     ui.button { id = "ask", on_click = function() query:set("first") end, "ask" },
     ui.button { id = "again", on_click = function() query:set("second") end, "again" },
+    ui.button { id = "later", on_click = function() ui.call("reach.later", 21):after(function(v) said:set(`got {v}`) end) end, "later" },
+    ui.button { id = "member", on_click = function() ui.module("reach").later(4):after(function(v) said:set(`member {v}`) end) end, "member" },
+    },
+    ui.row {
+    ui.button { id = "refuse", on_click = function() ui.call("reach.refuse"):after(nil, function(e) said:set(e.message) end) end, "refuse" },
+    ui.button { id = "drop", on_click = function() ui.call("reach.drop_it"):after(nil, function(e) said:set(e.message) end) end, "drop" },
+    ui.button { id = "hold", on_click = function() ui.call("reach.hold"):after(function() said:set("held settled") end) end, "hold" },
+    },
 }
 "#;
 
@@ -1883,4 +1922,97 @@ fn a_shared_handle_past_its_host_holds_nothing() {
     let kept = reach::KEPT_SHARED.lock().unwrap().take().unwrap().0;
     assert!(kept.get().get().is_nil());
     assert!(!kept.set(zgx_module::Value::from("late")));
+}
+
+/// A module's async action settles later, from a thread of its own: the
+/// script that called (`ui.call`, or the module's table) gets the value.
+#[test]
+fn an_async_action_settles_later() {
+    let mut app = reaching();
+    app.click("later");
+    assert!(
+        app.wait_until(|app| app.text("said") == "got 42"),
+        "{}",
+        app.text("said")
+    );
+    app.click("member");
+    assert!(
+        app.wait_until(|app| app.text("said") == "member 8"),
+        "{}",
+        app.text("said")
+    );
+}
+
+/// A promise rejected says why, after the action's and the module's names;
+/// one dropped unsettled says the module dropped it.
+#[test]
+fn an_async_actions_rejection_names_it() {
+    let mut app = reaching();
+    app.click("refuse");
+    assert!(app.wait_until(|app| !app.text("said").is_empty()));
+    assert_eq!(
+        app.text("said"),
+        "reach.refuse (module `reach`): has no such row"
+    );
+    app.click("drop");
+    assert!(app.wait_until(|app| app.text("said").contains("dropped")));
+    assert_eq!(
+        app.text("said"),
+        "reach.drop_it (module `reach`): the module dropped its promise unsettled"
+    );
+}
+
+/// A promise settled after its host is gone does nothing.
+#[test]
+fn a_promise_settled_past_its_host_does_nothing() {
+    let mut app = reaching();
+    app.click("hold");
+    app.settle();
+    let held = reach::HELD.lock().unwrap().take().expect("held");
+    drop(app);
+    // (From a thread: its job is refused, the promise dropped unrun.)
+    std::thread::spawn(move || {
+        held.resolve_with(|_| Ok(zgx_module::Value::from("late")));
+    })
+    .join()
+    .unwrap();
+}
+
+/// An async action written with the macros is a member of the module's
+/// table: it resolves to its record, is rejected when it says so, and over
+/// a wrong argument before it runs.
+#[test]
+fn a_typed_async_action_resolves_its_record() {
+    const SCRIPT: &str = r#"
+local out, err, wrong = ui.state("out", ""), ui.state("err", ""), ui.state("wrong", "")
+local typed = ui.module("typed")
+typed.find_later({ id = "ab" }):after(function(f) out:set(`{f.id} {f.n}`) end)
+typed.find_later({ id = "" }):after(nil, function(e) err:set(e.message) end)
+typed.find_later(5):after(nil, function(e) wrong:set(e.message) end)
+return ui.column {
+    ui.text { id = "out", function() return out:get() end },
+    ui.text { id = "err", function() return err:get() end },
+    ui.text { id = "wrong", function() return wrong:get() end },
+}
+"#;
+    let mut app = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", SCRIPT);
+        load_typed(&host);
+        host
+    });
+    assert_eq!(app.error(), None);
+    assert!(app.wait_until(|app| {
+        !app.text("out").is_empty() && !app.text("err").is_empty() && !app.text("wrong").is_empty()
+    }));
+    assert_eq!(app.text("out"), "AB 2");
+    assert_eq!(
+        app.text("err"),
+        "typed.find_later (module `typed`): has no id"
+    );
+    assert!(
+        app.text("wrong")
+            .starts_with("typed.find_later (module `typed`): argument 1 (query)"),
+        "{}",
+        app.text("wrong")
+    );
 }

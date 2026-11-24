@@ -263,6 +263,17 @@ fn written(manifest: &str) -> Result<Written, String> {
             parameters(of, &prefix).join(", ")
         ));
     }
+    for (action, of) in object("async") {
+        let member = of["member"]
+            .as_str()
+            .unwrap_or_else(|| action.rsplit('.').next().unwrap_or(action));
+        let resolves = luau_type(&of["resolves"], &prefix);
+        types.push_str(&comment(&of["doc"], "\t"));
+        types.push_str(&format!(
+            "\t{member}: ({}) -> Promise<{resolves}>,\n",
+            parameters(of, &prefix).join(", ")
+        ));
+    }
     types.push_str("}\n");
     Ok(Written { name, types, table })
 }
