@@ -3,7 +3,7 @@
 //! `zgx new <name> [--template T] [--i18n]` writes a Luau app that runs at
 //! once, with its tests and a CI workflow (`zgx_script::scaffold`).
 //!
-//! `zgx run [--inspect] [--release] <app> [args…]` runs the app by zgx-run
+//! `zgx run [--inspect] [--release] [--window <name>] <app> [args…]` runs the app by zgx-run
 //! (beside this binary, or on PATH), as `zgx audit` audits it: first
 //! building each native module zgx.json names whose sources changed
 //! (`zgx_script::module_build`), and building one again and restarting the
@@ -38,7 +38,7 @@ use std::{path::PathBuf, process::ExitCode};
 use zgx_script::check::{CheckError, Options, Report, check};
 
 const USAGE: &str = "usage: zgx new <name> [--template basic|router|list|form|plugins] [--i18n]
-       zgx run [--inspect] [--release] <app.luau-or-dir> [args...]
+       zgx run [--inspect] [--release] [--window <name>] <app.luau-or-dir> [args...]
        zgx build [--out <dir>] [--target <triple>]... [--version <v>] <app-dir>
        zgx check [--nonstrict] <file-or-dir>...
        zgx lint [--format text|json] <file-or-dir>...
@@ -66,6 +66,8 @@ each --target (the host's by default; built for release if its sources
 changed, else from the cache) and a manifest of hashes. `zgx-run <bundle>`
 runs it.
 --inspect serves devtools (`zgx inspect help`).
+--window <name> opens the window of that name among zgx.json's
+named_windows first.
 
 check: type checks zgx Luau scripts with luau-lsp, the bundled ui/anime
 types, the standard platform and the new type solver. Strict mode applies
@@ -291,7 +293,7 @@ fn zgx_run() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("zgx-run"))
 }
 
-/// `zgx run [--inspect] [--release] <app.luau-or-dir> [args…]`: the app in a
+/// `zgx run [--inspect] [--release] [--window <name>] <app.luau-or-dir> [args…]`: the app in a
 /// window, reloading as it changes, by zgx-run. An app with no native
 /// modules has zgx-run take this process's place (on Unix), so signals and
 /// the exit status are its own. One with modules is watched from here: each
@@ -300,7 +302,14 @@ fn zgx_run() -> PathBuf {
 fn run(args: Vec<String>) -> ExitCode {
     let release = args.iter().any(|a| a == "--release");
     let args: Vec<String> = args.into_iter().filter(|a| a != "--release").collect();
-    let Some(app) = args.iter().find(|a| !a.starts_with("--")) else {
+    // The app: the first word that isn't a flag or a flag's value
+    // (`--window <name>`).
+    let Some(app) = args
+        .iter()
+        .enumerate()
+        .find(|(i, a)| !a.starts_with("--") && (*i == 0 || args[i - 1] != "--window"))
+        .map(|(_, a)| a)
+    else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
