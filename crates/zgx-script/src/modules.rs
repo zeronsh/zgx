@@ -933,12 +933,24 @@ unsafe extern "C" fn shared_get(shared: *const c_void, out: *mut Raw) {
     // SAFETY: `out` takes what is made.
     unsafe { out.cast::<Value>().write(value) }
 }
+/// Why a write to a shared state whose host is gone did nothing.
+const HOST_GONE: &str = "its host is gone";
+/// `out` given why a write failed: its host gone.
+///
+/// # Safety
+/// `out` takes a value.
+unsafe fn host_gone(out: *mut Raw) -> u32 {
+    // SAFETY: The caller's.
+    unsafe { out.cast::<Value>().write(Value::from(HOST_GONE)) };
+    abi::FAILED
+}
 unsafe extern "C" fn shared_set(shared: *const c_void, value: *mut Raw) -> u32 {
     // SAFETY: The module's owned value, taken; a handle, held.
     let (value, handle) = unsafe { (take(value), handle_of(shared)) };
-    handle
-        .signal()
-        .is_some_and(|signal| crate::value::set_reconciled(signal, value)) as u32
+    match handle.signal() {
+        Some(signal) => crate::value::set_reconciled(signal, value) as u32,
+        None => abi::HOST_GONE,
+    }
 }
 unsafe extern "C" fn shared_append(
     shared: *const c_void,
@@ -949,7 +961,8 @@ unsafe extern "C" fn shared_append(
     // SAFETY: A handle, held; the module's UTF-8.
     let (handle, text) = unsafe { (handle_of(shared), name_of(text, len)) };
     let Some(signal) = handle.signal() else {
-        return abi::DONE;
+        // SAFETY: `out` takes why.
+        return unsafe { host_gone(out) };
     };
     match crate::Shared(signal.clone()).append(&text) {
         Ok(()) => abi::DONE,
@@ -970,7 +983,8 @@ unsafe extern "C" fn shared_upsert(
     // SAFETY: A handle, held; the module's `&str`; its owned list, taken.
     let (handle, key, rows) = unsafe { (handle_of(shared), name_of(key, key_len), take(rows)) };
     let Some(signal) = handle.signal() else {
-        return abi::DONE;
+        // SAFETY: `out` takes why.
+        return unsafe { host_gone(out) };
     };
     let rows = match rows {
         Value::List(rows) => rows.to_vec(),
@@ -1000,7 +1014,7 @@ unsafe extern "C" fn shared_remove(
     // SAFETY: A handle, held; the module's `&str`s, `len` of them.
     let (handle, key) = unsafe { (handle_of(shared), name_of(key, key_len)) };
     let Some(signal) = handle.signal() else {
-        return 0;
+        return abi::HOST_GONE;
     };
     let keys: Vec<&str> = (0..len)
         .map(|i| {
@@ -1163,7 +1177,7 @@ unsafe extern "C" fn image_set(
     }
     // SAFETY: On the handle's thread, as checked.
     let Some(host) = (unsafe { host_of(host) }) else {
-        return failed(format!("`{name}` wasn't set: its host is gone"));
+        return failed(format!("`{name}` wasn't set: {HOST_GONE}"));
     };
     let image = match zgx::image::ImageData::new(width, height, pixels) {
         Ok(image) => image,

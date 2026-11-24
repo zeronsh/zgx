@@ -1137,15 +1137,18 @@ impl Shared {
     }
     /// Sets it, keeping the parts of what it held that are equal (publish a
     /// whole model each time: only what changed costs anything); whether
-    /// anything changed.
-    pub fn set(&self, value: Value) -> bool {
+    /// anything changed. An error once its host is gone (nothing set).
+    pub fn set(&self, value: Value) -> Result<bool, Failed> {
         let mut value = std::mem::ManuallyDrop::new(value);
         // SAFETY: A handle, held; `value` owned and given.
-        unsafe { (api().shared_set)(self.0, std::ptr::from_mut(&mut value.raw)) != 0 }
+        match unsafe { (api().shared_set)(self.0, std::ptr::from_mut(&mut value.raw)) } {
+            abi::HOST_GONE => Err(host_gone()),
+            changed => Ok(changed != 0),
+        }
     }
     /// `text` added to the end of the string it holds, as a script's
     /// `state:append(text)`: what follows a long one reads the edit alone.
-    /// An error if it holds something else.
+    /// An error if it holds something else, or its host is gone.
     pub fn append(&self, text: &str) -> Result<(), Failed> {
         let mut out = MaybeUninit::<Raw>::uninit();
         // SAFETY: A handle, held; the runtime writes `out` only failing.
@@ -1168,7 +1171,7 @@ impl Shared {
     /// only `rows` are made: diff a model on the module's own thread and
     /// post the rows that changed. Holding nothing (`nil`) yet, it becomes
     /// a list of them; an error, writing nothing, if it holds something
-    /// else or a row has no string at `key`.
+    /// else, a row has no string at `key`, or its host is gone.
     pub fn upsert(&self, key: &str, rows: impl IntoIterator<Item = Value>) -> Result<(), Failed> {
         let mut rows = std::mem::ManuallyDrop::new(Value::list(rows));
         let mut out = MaybeUninit::<Raw>::uninit();
@@ -1192,8 +1195,13 @@ impl Shared {
         }
     }
     /// The rows of the list it holds whose field `key` is one of `keys`
-    /// removed (every such row); whether any was.
-    pub fn remove<'k>(&self, key: &str, keys: impl IntoIterator<Item = &'k str>) -> bool {
+    /// removed (every such row); whether any was. An error once its host is
+    /// gone.
+    pub fn remove<'k>(
+        &self,
+        key: &str,
+        keys: impl IntoIterator<Item = &'k str>,
+    ) -> Result<bool, Failed> {
         let keys: Vec<Bytes> = keys
             .into_iter()
             .map(|k| Bytes {
@@ -1202,8 +1210,11 @@ impl Shared {
             })
             .collect();
         // SAFETY: A handle, held; the keys' bytes alive for the call.
-        unsafe {
-            (api().shared_remove)(self.0, key.as_ptr(), key.len(), keys.as_ptr(), keys.len()) != 0
+        match unsafe {
+            (api().shared_remove)(self.0, key.as_ptr(), key.len(), keys.as_ptr(), keys.len())
+        } {
+            abi::HOST_GONE => Err(host_gone()),
+            removed => Ok(removed != 0),
         }
     }
     /// Calls `observe` each time it changes, from now, on the interface's
@@ -1419,6 +1430,11 @@ impl Drop for ImageBuffer {
 /// a sentence: `"has no row 12"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failed(pub String);
+/// Why a write to a shared state did nothing: its host is gone (the
+/// runtime's words for it, as `append` and `upsert` say).
+fn host_gone() -> Failed {
+    Failed("its host is gone".to_owned())
+}
 impl From<String> for Failed {
     fn from(why: String) -> Self {
         Failed(why)

@@ -187,7 +187,7 @@ A `&Host` is how a module knows it is on the interface's thread: setup is lent o
 ```rust
 let feed = host.shared("chat.items", Value::NIL).unwrap();
 // …later, in a job a thread posted:
-feed.set(Value::list(rows));      // only what changed costs anything
+feed.set(Value::list(rows))?;     // only what changed costs anything
 ```
 
 `set` keeps the parts of what it held that are equal (publish a whole model each time), and says whether anything changed. A long list needn't be published whole: diff it on the module's thread and post the rows that changed, written by key:
@@ -195,10 +195,10 @@ feed.set(Value::list(rows));      // only what changed costs anything
 ```rust
 // …in a job a thread posted, with only what changed:
 feed.upsert("id", changed)?;          // replace by `id` in place, add the new at the end
-feed.remove("id", ["c-41", "c-7"]);   // every row with one of these ids
+feed.remove("id", ["c-41", "c-7"])?;  // every row with one of these ids
 ```
 
-`upsert(key, rows)` takes rows that each have a string at `key`. A row whose key the list has replaces the first row with that key, where it is, keeping its equal parts; the others are added at the end, in order; of two given with one key, the last is written. The list is walked once (a batch of 500 rows into 10,000 is one walk, not 500), and written in place when nothing else holds it. A state holding `nil` becomes a list of the rows; one holding anything else, or a row without its key, is an error, and nothing is written. `remove(key, keys)` removes every row whose key is one of `keys`, and says whether any was. `append(text)` adds to the end of a string, as a script's `state:append` does. `get` counts what it holds, copying nothing; read while a binding asks the module (`ui.call_sync` in a binding's function), it is followed as a script's `get` is. `observe(|host, now| …)` calls on the interface's thread each time it changes, from the next change on, until the `Observer` is dropped: how a module hears what scripts write. A handle is the interface thread's (`Shared` isn't `Send`); once its host is gone it holds `nil` and sets nothing.
+`upsert(key, rows)` takes rows that each have a string at `key`. A row whose key the list has replaces the first row with that key, where it is, keeping its equal parts; the others are added at the end, in order; of two given with one key, the last is written. The list is walked once (a batch of 500 rows into 10,000 is one walk, not 500), and written in place when nothing else holds it. A state holding `nil` becomes a list of the rows; one holding anything else, or a row without its key, is an error, and nothing is written. `remove(key, keys)` removes every row whose key is one of `keys`, and says whether any was. `append(text)` adds to the end of a string, as a script's `state:append` does. `get` counts what it holds, copying nothing; read while a binding asks the module (`ui.call_sync` in a binding's function), it is followed as a script's `get` is. `observe(|host, now| …)` calls on the interface's thread each time it changes, from the next change on, until the `Observer` is dropped: how a module hears what scripts write. A handle is the interface thread's (`Shared` isn't `Send`). Once its host is gone it holds `nil`, and every write (`set`, `append`, `upsert`, `remove`) is an error saying its host is gone, so a module can tell that what it wrote went nowhere.
 
 ### Images
 
