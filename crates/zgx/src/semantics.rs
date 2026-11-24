@@ -163,7 +163,8 @@ pub enum PopupKind {
 ///
 /// Every node a window labels has one, and most have nothing to say but their
 /// role and name, so what few say ([`SemanticRare`]) takes no room until set.
-/// Its fields read and assign as this struct's own.
+/// Its fields read and assign as this struct's own; they can't be moved out,
+/// named in a pattern or a literal, or two of them borrowed mutably at once.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticNode {
     /// What it is.
