@@ -2819,6 +2819,141 @@ fn raw_path(lua: &Lua, t: &Table) -> Option<Vec<PathKey>> {
     read.ok().and(path)
 }
 
+/// `rows` written into the list `signal` holds, each by its `key` field (a
+/// string): a row whose key a row of the list has replaces the first such
+/// row, kept where it is (reconciled: its equal parts stay); the others
+/// are added at the end, in the order given. Of two rows of `rows` with
+/// one key, the last is written. The list's other rows are shared, and the
+/// list is written in place where nothing else holds it and nothing is
+/// added. One pass over the list, whatever the number of rows (their keys
+/// are looked up, not searched for). What isn't a list counts as an empty
+/// one. Whether anything changed; an error naming a row with no string at
+/// `key`, writing nothing.
+pub(crate) fn upsert_rows(
+    signal: &Signal<Value>,
+    key: &str,
+    rows: Vec<Value>,
+) -> Result<bool, String> {
+    // The rows by key, the last of a key kept, in the order first given.
+    let mut given: Vec<(Str, Value)> = Vec::with_capacity(rows.len());
+    let mut at: rustc_hash::FxHashMap<Str, usize> = Default::default();
+    at.reserve(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        let Some(Value::Str(id)) = row.field(key) else {
+            return Err(format!("row {} has no string `{key}`", i + 1));
+        };
+        let id = id.clone();
+        match at.get(&id) {
+            Some(&n) => given[n].1 = row,
+            None => {
+                at.insert(id.clone(), given.len());
+                given.push((id, row));
+            }
+        }
+    }
+    // A list, or nothing yet (`nil`, or `{}`: both) to be one.
+    let listed = signal.with_untracked(|held| match held {
+        Value::List(_) | Value::Nil => true,
+        Value::Map(fields) => fields.is_empty(),
+        _ => false,
+    });
+    if !listed {
+        return Err("it holds no list".into());
+    }
+    if given.is_empty() {
+        return Ok(false);
+    }
+    let mut written = vec![false; given.len()];
+    let changed = signal.mutate(|held| {
+        // Where each given row goes: the first row of its key.
+        let mut matched: Vec<(usize, usize)> = Vec::new();
+        if let Value::List(items) = &*held {
+            for (i, item) in items.iter().enumerate() {
+                if let Some(Value::Str(id)) = item.field(key)
+                    && let Some(&n) = at.get(&**id)
+                    && !written[n]
+                {
+                    written[n] = true;
+                    matched.push((i, n));
+                }
+            }
+        }
+        let added: Vec<usize> = (0..given.len()).filter(|n| !written[*n]).collect();
+        // A row reconciled to its own is that row again (`reconcile` gives
+        // the old back when equal): told by identity, not compared again.
+        let kept = |row: &Value, was: &Value| match (row, was) {
+            (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
+            (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b),
+            (a, b) => a == b,
+        };
+        let mut changed = false;
+        // In place: nothing added, and the list held here alone.
+        if added.is_empty()
+            && let Value::List(list) = held
+            && let Some(items) = Slice::get_mut(list)
+        {
+            for (i, n) in matched {
+                let row = std::mem::replace(&mut given[n].1, Value::Nil).reconcile(&items[i]);
+                if !kept(&row, &items[i]) {
+                    items[i] = row;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+        let mut next: Vec<Value> = match &*held {
+            Value::List(items) => items.to_vec(),
+            _ => Vec::new(),
+        };
+        for (i, n) in matched {
+            let row = std::mem::replace(&mut given[n].1, Value::Nil).reconcile(&next[i]);
+            if !kept(&row, &next[i]) {
+                next[i] = row;
+                changed = true;
+            }
+        }
+        for n in added {
+            next.push(std::mem::replace(&mut given[n].1, Value::Nil));
+            changed = true;
+        }
+        if changed {
+            *held = Value::List(Slice::from(next));
+        }
+        changed
+    });
+    Ok(changed)
+}
+
+/// The rows of the list `signal` holds whose `key` field is one of `keys`
+/// removed, every such row; one pass. Whether any was.
+pub(crate) fn remove_rows(signal: &Signal<Value>, key: &str, keys: &[&str]) -> bool {
+    if keys.is_empty() {
+        return false;
+    }
+    let gone: rustc_hash::FxHashSet<&str> = keys.iter().copied().collect();
+    signal.mutate(|held| {
+        let Value::List(items) = held else {
+            return false;
+        };
+        let goes =
+            |item: &Value| matches!(item.field(key), Some(Value::Str(id)) if gone.contains(&**id));
+        // One pass: the rows before the first to go are kept as they are.
+        let Some(first) = items.iter().position(goes) else {
+            return false;
+        };
+        let mut kept: Vec<Value> = Vec::with_capacity(items.len() - 1);
+        kept.extend_from_slice(&items[..first]);
+        kept.extend(
+            items[first + 1..]
+                .iter()
+                .filter(|item| !goes(item))
+                .cloned(),
+        );
+        *held = Value::List(Slice::from(kept));
+        true
+    })
+}
+
 /// `signal` set to `value`, keeping the parts of what it held that are
 /// equal (`Shared::set`, and a native module's): whether anything changed.
 #[inline]
@@ -2838,6 +2973,23 @@ impl Shared {
     /// equal; whether anything changed.
     pub fn set(&self, value: Value) -> bool {
         set_reconciled(&self.0, value)
+    }
+    /// `rows` written into the list it holds by their `key` field (a
+    /// string), one pass over the list: a row whose key the list has
+    /// replaces the first row of that key where it is (its equal parts
+    /// kept), the others are added at the end in the order given, and of
+    /// two rows given with one key the last is written. What a model
+    /// diffed elsewhere publishes: only the rows that changed. Whether
+    /// anything changed. Holding nothing (`nil`) yet, it becomes a list of
+    /// them; an error, writing nothing, if it holds something else or a row
+    /// has no string at `key`.
+    pub fn upsert(&self, key: &str, rows: Vec<Value>) -> Result<bool, String> {
+        upsert_rows(&self.0, key, rows)
+    }
+    /// The rows of the list it holds whose `key` field is one of `keys`
+    /// removed (every such row); whether any was.
+    pub fn remove_rows(&self, key: &str, keys: &[&str]) -> bool {
+        remove_rows(&self.0, key, keys)
     }
     /// The signal itself (its `set` replaces without reconciling).
     pub fn signal(&self) -> Signal<Value> {

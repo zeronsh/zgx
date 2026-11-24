@@ -1120,6 +1120,51 @@ impl Shared {
             ))
         }
     }
+    /// `rows` written into the list it holds, each by its field `key` (a
+    /// string): a row whose key the list has replaces the first row of
+    /// that key where it is, the others are added at the end, and of two
+    /// given with one key the last is written. One pass over the list, and
+    /// only `rows` are made: diff a model on the module's own thread and
+    /// post the rows that changed. Holding nothing (`nil`) yet, it becomes
+    /// a list of them; an error, writing nothing, if it holds something
+    /// else or a row has no string at `key`.
+    pub fn upsert(&self, key: &str, rows: impl IntoIterator<Item = Value>) -> Result<(), Failed> {
+        let mut rows = std::mem::ManuallyDrop::new(Value::list(rows));
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: A handle, held; `rows` given; the runtime writes `out`
+        // only failing.
+        unsafe {
+            if (api().shared_upsert)(
+                self.0,
+                key.as_ptr(),
+                key.len(),
+                std::ptr::from_mut(&mut rows.raw),
+                out.as_mut_ptr(),
+            ) == abi::DONE
+            {
+                return Ok(());
+            }
+            let why = Value::owned(out.assume_init());
+            Err(Failed(
+                why.get().str().unwrap_or("couldn't be written").to_owned(),
+            ))
+        }
+    }
+    /// The rows of the list it holds whose field `key` is one of `keys`
+    /// removed (every such row); whether any was.
+    pub fn remove<'k>(&self, key: &str, keys: impl IntoIterator<Item = &'k str>) -> bool {
+        let keys: Vec<Bytes> = keys
+            .into_iter()
+            .map(|k| Bytes {
+                ptr: k.as_ptr(),
+                len: k.len(),
+            })
+            .collect();
+        // SAFETY: A handle, held; the keys' bytes alive for the call.
+        unsafe {
+            (api().shared_remove)(self.0, key.as_ptr(), key.len(), keys.as_ptr(), keys.len()) != 0
+        }
+    }
     /// Calls `observe` each time it changes, from now, on the interface's
     /// thread after the batch that changed it, with what it holds (lent),
     /// until the [`Observer`] is dropped.

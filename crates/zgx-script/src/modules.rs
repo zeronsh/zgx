@@ -171,6 +171,8 @@ static API: Api = Api {
     settle,
     promise_release,
     promise_host,
+    shared_upsert,
+    shared_remove,
 };
 
 /// A registration's `user`, freed with the host's hold on it.
@@ -953,6 +955,59 @@ unsafe extern "C" fn shared_append(
             abi::FAILED
         }
     }
+}
+unsafe extern "C" fn shared_upsert(
+    shared: *const c_void,
+    key: *const u8,
+    key_len: usize,
+    rows: *mut Raw,
+    out: *mut Raw,
+) -> u32 {
+    // SAFETY: A handle, held; the module's `&str`; its owned list, taken.
+    let (handle, key, rows) = unsafe { (handle_of(shared), name_of(key, key_len), take(rows)) };
+    let Some(signal) = handle.signal() else {
+        return abi::DONE;
+    };
+    let rows = match rows {
+        Value::List(rows) => rows.to_vec(),
+        Value::Nil => Vec::new(),
+        _ => {
+            // SAFETY: `out` takes why.
+            unsafe { out.cast::<Value>().write(Value::from("rows are a list")) };
+            return abi::FAILED;
+        }
+    };
+    match crate::value::upsert_rows(signal, &key, rows) {
+        Ok(_) => abi::DONE,
+        Err(why) => {
+            // SAFETY: `out` takes why.
+            unsafe { out.cast::<Value>().write(Value::from(why.as_str())) };
+            abi::FAILED
+        }
+    }
+}
+unsafe extern "C" fn shared_remove(
+    shared: *const c_void,
+    key: *const u8,
+    key_len: usize,
+    keys: *const Bytes,
+    len: usize,
+) -> u32 {
+    // SAFETY: A handle, held; the module's `&str`s, `len` of them.
+    let (handle, key) = unsafe { (handle_of(shared), name_of(key, key_len)) };
+    let Some(signal) = handle.signal() else {
+        return 0;
+    };
+    let keys: Vec<&str> = (0..len)
+        .map(|i| {
+            // SAFETY: Among the `len` the module lent, each UTF-8.
+            unsafe {
+                let key = &*keys.add(i);
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(key.ptr, key.len))
+            }
+        })
+        .collect();
+    crate::value::remove_rows(signal, &key, &keys) as u32
 }
 /// A shared state's observer: its effect, and the module's `user` (freed as
 /// it goes).

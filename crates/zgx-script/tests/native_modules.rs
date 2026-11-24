@@ -888,6 +888,8 @@ fn the_c_header_is_the_rust_interface() {
         ("zgx_api.settle", offset_of!(Api, settle)),
         ("zgx_api.promise_release", offset_of!(Api, promise_release)),
         ("zgx_api.promise_host", offset_of!(Api, promise_host)),
+        ("zgx_api.shared_upsert", offset_of!(Api, shared_upsert)),
+        ("zgx_api.shared_remove", offset_of!(Api, shared_remove)),
         ("sizeof(zgx_registrar)", size_of::<Registrar>()),
         ("zgx_registrar.size", offset_of!(Registrar, size)),
         ("zgx_registrar.host", offset_of!(Registrar, host)),
@@ -1500,7 +1502,7 @@ mod reach {
         thread::ThreadId,
         time::Duration,
     };
-    use zgx_module::{Host, Observer, State, Timer, Ui, Value};
+    use zgx_module::{Host, Observer, Ref, State, Timer, Ui, Value};
 
     /// What the module saw, on the interface's thread.
     #[derive(Default)]
@@ -1633,6 +1635,47 @@ mod reach {
             .join()
             .unwrap();
             Value::NIL
+        });
+        // Rows changed on a thread, posted as a patch: `{ set = { {id,
+        // title}... }, gone = { id... } }`.
+        let patcher = host.ui();
+        host.function("reach.patch", move |patch| {
+            let text = |r: Option<Ref<'_>>| r.and_then(|r| r.str()).unwrap_or("").to_owned();
+            let set: Vec<(String, String)> = patch
+                .field("set")
+                .map(|set| {
+                    set.items()
+                        .map(|r| (text(r.field("id")), text(r.field("title"))))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let gone: Vec<String> = patch
+                .field("gone")
+                .map(|gone| gone.items().map(|id| text(Some(id))).collect())
+                .unwrap_or_default();
+            let ui = patcher.clone();
+            std::thread::spawn(move || {
+                ui.post(move |host| {
+                    let feed = host.shared("feed", Value::NIL).unwrap();
+                    let rows = set.iter().map(|(id, title)| {
+                        Value::record([
+                            ("id", Value::from(id.as_str())),
+                            ("title", Value::from(title.as_str())),
+                        ])
+                    });
+                    feed.upsert("id", rows).unwrap();
+                    feed.remove("id", gone.iter().map(String::as_str));
+                });
+            })
+            .join()
+            .unwrap();
+            Value::NIL
+        });
+        // A row with no `id`: refused, saying why.
+        let unkeyed = host.shared("feed", Value::NIL).unwrap();
+        host.function("reach.patch_unkeyed", move |_| {
+            let refused = unkeyed.upsert("id", [Value::record([("title", Value::from("x"))])]);
+            Value::from(refused.unwrap_err().0.as_str())
         });
         // The same model again: nothing changes.
         let feed = host.shared("feed", Value::NIL).unwrap();
@@ -1875,6 +1918,68 @@ fn a_module_publishes_its_model_in_shared_state() {
         panic!("a list")
     };
     assert_eq!(rows.len(), 3);
+}
+
+/// A module's thread posts only the rows that changed: they replace theirs
+/// in the list where they are, new ones follow, removed ones go, and
+/// scripts show it. A row with no key is refused, saying why.
+#[test]
+fn a_module_patches_a_shared_list_by_key() {
+    let mut app = reaching();
+    let row = |id: &str, title: &str| {
+        Value::record([("id", Value::from(id)), ("title", Value::from(title))])
+    };
+    let patch = |set: Vec<Value>, gone: Vec<&str>| {
+        Value::record([
+            ("set", Value::List(Slice::from(set))),
+            (
+                "gone",
+                Value::List(Slice::from(
+                    gone.into_iter().map(Value::from).collect::<Vec<_>>(),
+                )),
+            ),
+        ])
+    };
+    called(
+        &app,
+        "reach.patch",
+        patch(
+            vec![row("a", "one"), row("b", "two"), row("c", "three")],
+            vec![],
+        ),
+    );
+    assert!(app.wait_until(|app| app.text("rows") == "3 rows"));
+    let before = app.host.shared("feed", Value::Nil).get();
+    called(
+        &app,
+        "reach.patch",
+        patch(vec![row("a", "ONE"), row("d", "four")], vec!["b"]),
+    );
+    assert!(app.wait_until(|app| app.text("first") == "ONE"));
+    assert_eq!(app.text("rows"), "3 rows");
+    let after = app.host.shared("feed", Value::Nil).get();
+    let titles = |list: &Value| -> Vec<String> {
+        list.list()
+            .iter()
+            .map(|r| match r.field("title") {
+                Some(Value::Str(t)) => t.to_string(),
+                _ => "-".into(),
+            })
+            .collect()
+    };
+    assert_eq!(titles(&after), ["ONE", "three", "four"]);
+    let (Value::List(before), Value::List(after)) = (&before, &after) else {
+        panic!("lists")
+    };
+    assert!(
+        matches!((&before[2], &after[1]), (Value::Map(b), Value::Map(a)) if Slice::ptr_eq(b, a)),
+        "c is the row it was"
+    );
+    let refused = called(&app, "reach.patch_unkeyed", Value::Nil);
+    assert!(
+        matches!(&refused, Value::Str(why) if &**why == "row 1 has no string `id`"),
+        "{refused:?}"
+    );
 }
 
 /// Text added to a shared string shows; added to a list, it is refused.
