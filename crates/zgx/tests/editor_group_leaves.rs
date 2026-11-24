@@ -107,7 +107,7 @@ fn note(text: &str, group_of: GroupOf, scrollbar: bool) -> (Ui, EditorHandle) {
             (Vec::new(), if line == "```" { 1 - state } else { state })
         })
         .line_insets(move |_, line: &str, state| match group_of(line, state) {
-            Some(group) => LineInset::new(30., 0., 0.).in_group(group).unwrapped(),
+            Some(group) => LineInset::new(30., 0., 0.).scroll_group(group).nowrap(true),
             None => LineInset::default(),
         });
     if scrollbar {

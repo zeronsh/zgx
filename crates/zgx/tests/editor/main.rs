@@ -64,6 +64,8 @@ mod editor_input_mode;
 mod editor_layer_scroll;
 #[path = "../editor_line_builders.rs"]
 mod editor_line_builders;
+#[path = "../editor_line_images.rs"]
+mod editor_line_images;
 #[path = "../editor_line_marks.rs"]
 mod editor_line_marks;
 #[path = "../editor_long_documents.rs"]
@@ -114,5 +116,7 @@ mod editor_theme_marks;
 mod editor_undo_keys;
 #[path = "../editor_wrap_navigation.rs"]
 mod editor_wrap_navigation;
+#[path = "../editor_wrap_width.rs"]
+mod editor_wrap_width;
 #[path = "../ime_clauses.rs"]
 mod ime_clauses;

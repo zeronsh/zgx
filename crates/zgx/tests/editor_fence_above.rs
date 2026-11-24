@@ -184,7 +184,7 @@ fn note(second: &str) -> (Ui, EditorHandle) {
             })
             .line_insets(|_, line: &str, state| {
                 if state == 1 && line != "```" {
-                    LineInset::new(30., 4., 0.).in_group(GROUP).unwrapped()
+                    LineInset::new(30., 4., 0.).scroll_group(GROUP).nowrap(true)
                 } else {
                     LineInset::default()
                 }
@@ -469,7 +469,7 @@ fn blocks(text: &str) -> (Ui, EditorHandle) {
             .span_highlighter(|line: &str, state| (Vec::new(), state + u32::from(line == "```")))
             .line_insets(|_, line: &str, state| {
                 if state % 2 == 1 && line != "```" {
-                    LineInset::new(30., 4., 0.).in_group(state).unwrapped()
+                    LineInset::new(30., 4., 0.).scroll_group(state).nowrap(true)
                 } else {
                     LineInset::default()
                 }

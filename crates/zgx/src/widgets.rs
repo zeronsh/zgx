@@ -744,6 +744,10 @@ struct CodeAtoms {
     /// Called after each draw (`EditorHandle::on_drawn`): what follows its
     /// atoms under the pointer as a scroll or a new layout moves them.
     on_drawn: RefCell<Option<Box<dyn FnMut()>>>,
+    /// Told the width its text wraps in as it changes
+    /// (`EditorHandle::on_wrap_width`): kept here, where a text area without
+    /// asks nothing more for it.
+    on_wrap_width: RefCell<Option<Box<WrapTold>>>,
     /// How its atoms show (`EditorHandle::set_atom_style`), and the atoms'
     /// and text's revisions the line cache's atom spans are of.
     atom_style: RefCell<Option<std::sync::Arc<crate::editor_atom_style::AtomStyle>>>,
@@ -1095,6 +1099,48 @@ fn washed_atoms(
     marked.sort_by_key(|(range, ..)| range.start);
     marked
 }
+/// The width text area `root`'s text wraps in (`wrap`: whether it does), as
+/// its last draw sized its `viewport`.
+fn wrap_width_drawn(s: &Scene, root: NodeId, viewport: NodeId, wrap: bool) -> Option<f32> {
+    if !wrap || !s.contains(root) || s.bounds(root).width <= 0. {
+        return None;
+    }
+    s.style(viewport).width.map(|width| width.max(1.))
+}
+/// After a text area's draw: the width its text wraps in told if it changed
+/// (`EditorHandle::on_wrap_width`). What the app sets again there draws at
+/// once, in this frame: that draw tells too, the callback out meanwhile.
+/// Once more where that changed the width again, and no more.
+#[cold]
+#[inline(never)]
+fn tell_wrap_width(code: &CodeHint, scene: &RefCell<Scene>, (root, viewport): (NodeId, NodeId)) {
+    let Some(code) = code.atoms() else {
+        return;
+    };
+    for _ in 0..2 {
+        let (mut callback, width) = {
+            let mut slot = code.on_wrap_width.borrow_mut();
+            let Some(wrap) = slot.as_mut() else {
+                return;
+            };
+            let width = wrap_width_drawn(&scene.borrow(), root, viewport, wrap.wrap.get());
+            let Some(width) = width.filter(|width| wrap.told != Some(*width)) else {
+                return;
+            };
+            let Some(callback) = wrap.callback.take() else {
+                return;
+            };
+            wrap.told = Some(width);
+            (callback, width)
+        };
+        callback(width);
+        if let Some(wrap) = code.on_wrap_width.borrow_mut().as_mut()
+            && wrap.callback.is_none()
+        {
+            wrap.callback = Some(callback);
+        }
+    }
+}
 /// After a text area's draw: what happened to its atoms told to its
 /// `on_atoms` (or let go, with none to tell), then its `on_drawn`. Asked
 /// only of one that has either, or changes waiting.
@@ -1205,6 +1251,14 @@ fn context_menu_holds(storage: &std::rc::Weak<UiStorage>, editor: NodeId, tracke
 }
 /// What an editor tells its first line in view (`EditorHandle::on_top_line`).
 type TopLineListener = Box<dyn FnMut(usize)>;
+/// What a text area tells the width its text wraps in
+/// (`EditorHandle::on_wrap_width`), out while it runs, the width it was last
+/// told, and whether it wraps (the editor's own).
+struct WrapTold {
+    callback: Option<Box<dyn FnMut(f32)>>,
+    told: Option<f32>,
+    wrap: Rc<Cell<bool>>,
+}
 /// What an editor tells where its caret is (`EditorHandle::on_caret`).
 type CaretListener = Box<dyn FnMut(Caret)>;
 /// Where an editor's caret is (`EditorHandle::on_caret`): its line and
@@ -1995,6 +2049,42 @@ impl EditorHandle {
         }
         self.hint.line_cache().set_marks(marks);
         self.refresh();
+    }
+    /// The width a text area's text wraps in, before any line's `left`: its
+    /// box less its padding and its line numbers. `None` where it doesn't
+    /// wrap or hasn't been laid out.
+    #[doc(hidden)]
+    pub fn wrap_width(&self) -> Option<f32> {
+        if !self.multiline {
+            return None;
+        }
+        wrap_width_drawn(
+            &self.scene.borrow(),
+            self.node,
+            self.hint.scrolled.viewport,
+            self.wrap.get(),
+        )
+    }
+    /// Call `told` with the width its text wraps in (`wrap_width`) when it
+    /// changes, after layout and before the frame is drawn: line insets set
+    /// again there (`set_line_insets`) are laid out in the same frame. The
+    /// width it has now isn't told; a first layout's is.
+    #[doc(hidden)]
+    pub fn on_wrap_width(&self, told: impl FnMut(f32) + 'static) {
+        if !self.multiline {
+            return;
+        }
+        let now = self.wrap_width();
+        *self
+            .hint
+            .code_made()
+            .atoms_made()
+            .on_wrap_width
+            .borrow_mut() = Some(Box::new(WrapTold {
+            callback: Some(Box::new(told)),
+            told: now,
+            wrap: self.wrap.clone(),
+        }));
     }
     /// Scroll the lines of scroll group `group` (`LineInset::scroll_group`)
     /// sideways to `x`, clamped to 0 through how far its lines reach past
@@ -9253,9 +9343,14 @@ impl Ui {
                     }
                     // Its atoms' listeners: none, and nothing to do, for most.
                     if code.atoms().is_some_and(|atoms| {
-                        atoms.on_atoms.borrow().is_some() || atoms.on_drawn.borrow().is_some()
+                        atoms.on_atoms.borrow().is_some()
+                            || atoms.on_drawn.borrow().is_some()
+                            || atoms.on_wrap_width.borrow().is_some()
                     }) || metric_editor.borrow().atom_changes_pending()
                     {
+                        // The width it wraps in first: the room the app sets
+                        // for it moves what the others tell.
+                        tell_wrap_width(code, &metric_scene, (root, told.scrolled.viewport));
                         tell_atoms(code, &metric_editor);
                     }
                 }
@@ -11601,6 +11696,14 @@ fn place_lines_in_room(
     }
     for (i, id) in pool.iter() {
         let line = lines.line_text(*i);
+        let wrap_width = lines.draw_width(*i, wrap_width);
+        // An aligned line paints where its carets and hits are: in the font
+        // it was shaped in.
+        let aligned = lines.draw_align(*i, wrap_width).map(|align| FontStyle {
+            align,
+            ..font.clone()
+        });
+        let font = aligned.as_ref().unwrap_or(font);
         let colored = cache.spans(lines, *i).and_then(|spans| {
             let style = |looks: &[crate::editor_lines::SpanLook]| {
                 crate::editor_lines::styled_line(&line, &spans, color, size, font, looks)
@@ -11638,7 +11741,6 @@ fn place_lines_in_room(
         s.set_font(*id, font.clone());
         let shaped = lines.line(*i).size();
         let inset = lines.inset(*i);
-        let wrap_width = lines.draw_width(*i, wrap_width);
         let width = wrap_width.unwrap_or(shaped.0 + 2.);
         let mut style = fixed(width, lines.height(*i) - inset.above - inset.below);
         style.text_wrap = text_wrap && !inset.nowrap;

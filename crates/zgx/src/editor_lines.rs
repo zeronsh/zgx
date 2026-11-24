@@ -329,8 +329,21 @@ pub struct LineInset {
     /// shaped once at its full width, it shows as far as its scroll group's
     /// frame, and scrolls with it.
     pub nowrap: bool,
+    /// How its rows align in the width it wraps in (a centred caption); none:
+    /// as the editor's text. Carets, hits and selection follow where its text
+    /// shows. An unwrapped line has no width to align in.
+    pub align: Option<crate::text_layout::TextAlign>,
+    /// The width a scroll group shows, read from its first line; none: what
+    /// the editor's width leaves right of that line's `left`.
+    pub group_width: Option<f32>,
 }
 impl LineInset {
+    /// How a line of `text` with this room aligns, where it has a width
+    /// (`wrap`) to align in: shaped so for its carets and hits, and drawn so.
+    fn aligned(&self, wrap: Option<f32>, text: &str) -> Option<crate::text_layout::TextAlign> {
+        let align = self.align?;
+        (wrap.is_some() && !self.nowrap && !text.is_empty()).then_some(align)
+    }
     /// A line's height with its room: its text's `bare` height, or nothing
     /// when hidden.
     fn height(&self, bare: f32) -> f32 {
@@ -338,17 +351,6 @@ impl LineInset {
             0.
         } else {
             bare + self.above + self.below
-        }
-    }
-    /// A line not shown and taking no room.
-    pub const fn hidden() -> Self {
-        Self {
-            left: 0.,
-            above: 0.,
-            below: 0.,
-            hidden: true,
-            scroll_group: None,
-            nowrap: false,
         }
     }
     /// `left` points before the line's text, `above` over it and `below`
@@ -361,16 +363,58 @@ impl LineInset {
             hidden: false,
             scroll_group: None,
             nowrap: false,
+            align: None,
+            group_width: None,
         }
     }
-    /// In scroll group `group` (`scroll_group`).
-    pub const fn in_group(mut self, group: u32) -> Self {
-        self.scroll_group = Some(group);
+    // A builder for each field, named as the field is: the struct gains
+    // fields, so code outside sets them so.
+    /// With this `left` (see the field).
+    #[must_use]
+    pub const fn left(mut self, left: f32) -> Self {
+        self.left = left;
         self
     }
-    /// Never wrapped (`nowrap`).
-    pub const fn unwrapped(mut self) -> Self {
-        self.nowrap = true;
+    /// With this `above` (see the field).
+    #[must_use]
+    pub const fn above(mut self, above: f32) -> Self {
+        self.above = above;
+        self
+    }
+    /// With this `below` (see the field).
+    #[must_use]
+    pub const fn below(mut self, below: f32) -> Self {
+        self.below = below;
+        self
+    }
+    /// With this `hidden` (see the field).
+    #[must_use]
+    pub const fn hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
+    /// With this `align` (see the field).
+    #[must_use]
+    pub fn align(mut self, align: impl Into<Option<crate::text_layout::TextAlign>>) -> Self {
+        self.align = align.into();
+        self
+    }
+    /// With this `scroll_group` (see the field).
+    #[must_use]
+    pub fn scroll_group(mut self, scroll_group: impl Into<Option<u32>>) -> Self {
+        self.scroll_group = scroll_group.into();
+        self
+    }
+    /// With this `group_width` (see the field).
+    #[must_use]
+    pub fn group_width(mut self, group_width: impl Into<Option<f32>>) -> Self {
+        self.group_width = group_width.into();
+        self
+    }
+    /// With this `nowrap` (see the field).
+    #[must_use]
+    pub const fn nowrap(mut self, nowrap: bool) -> Self {
+        self.nowrap = nowrap;
         self
     }
 }
@@ -383,7 +427,8 @@ impl LineInset {
 pub struct GroupFrame {
     /// Where it starts; none: its first line's `left`.
     pub left: Option<f32>,
-    /// How wide it shows; none: what the area's width leaves right of `left`.
+    /// How wide it shows; none: its first line's `group_width`, else what the
+    /// area's width leaves right of `left`.
     pub width: Option<f32>,
     /// How wide its lines reach from `left`, for how far it scrolls; none:
     /// as far as its lines reach.
@@ -1218,8 +1263,9 @@ impl Group {
 /// the app's frame.
 #[derive(Clone, Copy, Debug)]
 struct GroupLines {
-    /// Its first line's `left`.
+    /// Its first line's `left`, and its `group_width`.
     left: f32,
+    width: Option<f32>,
     /// How far right its lines reach, estimated before they're shaped.
     right: f32,
     first: usize,
@@ -1230,6 +1276,7 @@ struct GroupLines {
 struct LineGroup {
     group: Option<u32>,
     left: f32,
+    width: Option<f32>,
     /// How far right it reaches, estimated (none hidden).
     right: Option<f32>,
 }
@@ -1961,9 +2008,12 @@ impl LineCache {
             }
             wrap => (wrap, text),
         };
-        let inner = match self.styled_at(layout, i, text, (wrap, key)) {
-            Some(inner) => inner,
-            None => self.line_at(text, &layout.shape, (wrap, key)),
+        let inner = match inset.aligned(wrap, text) {
+            Some(align) => self.aligned_at(layout, i, text, (wrap, key), align),
+            None => match self.styled_at(layout, i, text, (wrap, key)) {
+                Some(inner) => inner,
+                None => self.line_at(text, &layout.shape, (wrap, key)),
+            },
         };
         // In a scroll group: moved by its offset after its own layout, and
         // cut to its frame.
@@ -2025,6 +2075,62 @@ impl LineCache {
         evict(&mut styled);
         styled.insert(key, (shaped.clone(), tick));
         Some(shaped)
+    }
+    /// Line `i` shaped with its rows aligned `align` in `wrap`
+    /// (`LineInset::align`): its spans' runs if they shape it, else its text
+    /// as one run, in the editor's font aligned so, kept apart from the same
+    /// text unaligned (`key`).
+    #[cold]
+    #[inline(never)]
+    fn aligned_at(
+        &self,
+        layout: &LinesLayout,
+        i: usize,
+        text: &str,
+        (wrap, key): (Option<f32>, &str),
+        align: crate::text_layout::TextAlign,
+    ) -> Rc<dyn TextLayout> {
+        let spans = self.spans(layout, i);
+        let key = format!(
+            "{align:?}\u{3}{:?}\u{3}{key}",
+            spans.as_deref().and_then(shape_key)
+        );
+        let tick = self.clock.get() + 1;
+        self.clock.set(tick);
+        if let Some((shaped, used)) = self.shaped.borrow_mut().get_mut(&*key) {
+            *used = tick;
+            return shaped.clone();
+        }
+        let (size, mut font) = {
+            let shaping = self.shaping.borrow();
+            let shaping = shaping.as_ref().expect("a layout's shaping");
+            (f32::from_bits(shaping.size), shaping.font.clone())
+        };
+        font.align = align;
+        let color = crate::scene::Color(0, 0, 0, 255);
+        let rich = spans
+            .as_deref()
+            .filter(|spans| spans.iter().any(|(_, style)| style.shapes()))
+            .and_then(|spans| styled_line(text, spans, color, size, &font, &self.looks()));
+        let rich = rich.or_else(|| {
+            let run = crate::rich_text::TextRun {
+                range: 0..text.len(),
+                font,
+                font_size: size,
+                color,
+                ..Default::default()
+            };
+            crate::rich_text::RichText::new(text, vec![run]).ok()
+        });
+        let shaped: Rc<dyn TextLayout> = match rich {
+            Some(rich) => (layout.rich)(&rich, wrap).into(),
+            // Text no runs hold (a control character's): as it lies.
+            None => (layout.shape)(text, wrap).into(),
+        };
+        let mut cache = self.shaped.borrow_mut();
+        evict(&mut cache);
+        cache.insert(key.into(), (shaped.clone(), tick));
+        shaped
     }
     /// Line `text`, shaped (from the cache if it is there).
     fn line(&self, text: &str, shape: &LineShaper, wrap: Option<f32>) -> Rc<dyn TextLayout> {
@@ -2356,6 +2462,7 @@ impl LinesLayout {
         let group = LineGroup {
             group: inset.scroll_group,
             left: inset.left,
+            width: inset.group_width,
             right: (inset.scroll_group.is_some() && !inset.hidden).then(|| {
                 let width = match self.wrap {
                     Some(wrap) if !inset.nowrap => (wrap - inset.left).max(1.),
@@ -2561,6 +2668,15 @@ impl LinesLayout {
         let left = inset.left;
         wrap.map(|w| if left > 0. { (w - left).max(1.) } else { w })
     }
+    /// How line `i`, drawn in `wrap` (`draw_width`), aligns
+    /// (`LineInset::align`): as its carets and hits were shaped.
+    pub(crate) fn draw_align(
+        &self,
+        i: usize,
+        wrap: Option<f32>,
+    ) -> Option<crate::text_layout::TextAlign> {
+        self.inset(i).aligned(wrap, &self.line_text(i))
+    }
     /// Whether a line is in a scroll group (`LineInset::scroll_group`).
     #[inline]
     pub(crate) fn grouped(&self) -> bool {
@@ -2612,6 +2728,7 @@ impl LinesLayout {
             };
             let lines = found.entry(group).or_insert(GroupLines {
                 left: line.left,
+                width: line.width,
                 right: line.left,
                 first: i,
                 last: i,
@@ -2634,6 +2751,7 @@ impl LinesLayout {
         let left = frame.left.unwrap_or(lines.left);
         let view = frame
             .width
+            .or(lines.width)
             .or(self.wrap.map(|w| w - left))
             .unwrap_or(f32::INFINITY)
             .max(1.);
@@ -3209,7 +3327,7 @@ mod tests {
         let cache = Rc::new(LineCache::default());
         cache.set_insets(Some(Rc::new(|i, _: &str, _| {
             if i == 1 {
-                LineInset::hidden()
+                LineInset::default().hidden(true)
             } else {
                 LineInset::default()
             }
@@ -3413,7 +3531,7 @@ mod tests {
     fn block() -> (Rc<LineCache>, Rc<LinesLayout>, Rc<Cell<usize>>) {
         let cache = Rc::new(LineCache::default());
         cache.set_insets(Some(Rc::new(|i, _: &str, _| match i {
-            1 | 2 => LineInset::new(30., 0., 0.).in_group(3).unwrapped(),
+            1 | 2 => LineInset::new(30., 0., 0.).scroll_group(3).nowrap(true),
             _ => LineInset::default(),
         })));
         let shaped = Rc::new(Cell::new(0));
@@ -3733,7 +3851,7 @@ mod tests {
         let cache = Rc::new(LineCache::default());
         cache.set_insets(Some(Rc::new(|i, _: &str, _| {
             if i > 0 {
-                LineInset::new(0., 0., 0.).in_group(3).unwrapped()
+                LineInset::new(0., 0., 0.).scroll_group(3).nowrap(true)
             } else {
                 LineInset::default()
             }

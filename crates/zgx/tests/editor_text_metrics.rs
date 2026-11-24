@@ -310,7 +310,7 @@ fn note(text: &str, arm: Arm, width: f32, told: &[f32]) -> Note {
                 if state == 1 && line != "```" {
                     let inset = LineInset::new(12., 2., 1.);
                     match arm {
-                        Arm::Block => inset.in_group(1).unwrapped(),
+                        Arm::Block => inset.scroll_group(1).nowrap(true),
                         Arm::Wrapped => inset,
                     }
                 } else if line.starts_with('#') {

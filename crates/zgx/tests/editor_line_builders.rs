@@ -16,6 +16,27 @@ use zgx::{
 const INK: Color = Color(1, 2, 3, 255);
 
 #[test]
+fn every_field_of_an_inset_has_a_builder() {
+    let inset = LineInset::default()
+        .left(1.)
+        .above(2.)
+        .below(3.)
+        .hidden(true)
+        .align(TextAlign::Center)
+        .scroll_group(4)
+        .group_width(5.)
+        .nowrap(true);
+    assert_eq!((inset.left, inset.above, inset.below), (1., 2., 3.));
+    assert!(inset.hidden && inset.nowrap);
+    assert_eq!(inset.align, Some(TextAlign::Center));
+    assert_eq!((inset.scroll_group, inset.group_width), (Some(4), Some(5.)));
+    assert_eq!(
+        inset.align(None).scroll_group(None).group_width(None),
+        LineInset::new(1., 2., 3.).hidden(true).nowrap(true)
+    );
+}
+
+#[test]
 fn every_field_of_a_mark_has_a_builder() {
     let image = Arc::new(ImageData::new(1, 1, vec![9_u8; 4]).unwrap());
     let svg = Arc::new(
