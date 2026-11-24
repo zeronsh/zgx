@@ -294,6 +294,7 @@ pub struct GpuStats {
 }
 /// Retained allocation counters for diagnostics; excludes driver/font database allocations.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct DebugCacheStats {
     /// Text nodes whose shaping is cached.
     pub shaped_nodes: usize,
