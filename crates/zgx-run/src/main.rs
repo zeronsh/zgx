@@ -2,7 +2,7 @@
 //! hot reload (`zgx_run::run`).
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: zgx-run [--inspect] <app.luau-or-dir> [args…]
+const USAGE: &str = "usage: zgx-run [--inspect] [--window <name>] <app.luau-or-dir> [args…]
 
 Opens the script (a file, or a directory's app.luau) in a window and
 reloads it as its files change. A zgx.json beside it sets the window
@@ -19,6 +19,10 @@ Its modules ({ \"words\": \"modules/words\" }) are its own Rust libraries
 (docs/modules.md), loaded before its scripts: each crate's newest build,
 or a library's path. `zgx run` builds them as their sources change and
 hands each over with --module <name>=<library>.
+
+--window <name> opens the window of that name among zgx.json's
+named_windows first, rather than the one its first names (or its top
+level's).
 
 --inspect serves devtools for agents: `zgx inspect help` drives the
 running app (its tree, states, clicks, typing, keys) over a socket only
@@ -78,6 +82,11 @@ fn main() -> ExitCode {
                 let notice = args.remove(1);
                 args.remove(0);
                 zgx_run::set_notice(notice);
+            }
+            Some("--window") if args.len() > 1 => {
+                let window = args.remove(1);
+                args.remove(0);
+                zgx_run::set_window(window);
             }
             _ => break,
         }
