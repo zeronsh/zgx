@@ -2,7 +2,8 @@
 //! copy keeps its own (Chromium's web custom data): Paste reads the
 //! clipboard's `application/x-zgx-notes` and the types it holds; Copy puts
 //! text, HTML and that type there in one change, for a browser's page or
-//! another app to read (`scripts/clipboard_types_smoke.py`).
+//! another app to read; Copy image puts a PNG there with them, in one
+//! change too (`scripts/clipboard_types_smoke.py`).
 use std::{cell::RefCell, rc::Rc};
 use zgx::{compose::prelude::*, platform::PlatformService};
 use zgx_desktop::{Application, WindowOptions};
@@ -12,6 +13,12 @@ const KIND: &str = "application/x-zgx-notes";
 const COPIED: &str = "Copied <source id=\"s1\" /> 😀\n\nwith a blank line";
 const COPIED_TEXT: &str = "Copied [1]";
 const COPIED_HTML: &str = "<p>Copied [1]</p>";
+/// What Copy image puts there beside them: a 2 by 1 PNG, red then blue.
+const PNG: [u8; 71] = [
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 66, 255,
+    1, 15, 249, 3, 253, 133, 17, 153, 118, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     Application::new()
@@ -55,6 +62,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     status.set(format!("Copied typed: {written}"));
                 }
             };
+            let copy_image = {
+                let (platform, status) = (platform.clone(), status.clone());
+                move || {
+                    let types = [(KIND.to_owned(), COPIED.to_owned())];
+                    let writing = platform.borrow().as_ref().map(|p| {
+                        let (text, html) = (COPIED_TEXT.into(), Some(COPIED_HTML.into()));
+                        p.0.set_clipboard_typed_image(text, html, &types, PNG[..].into())
+                    });
+                    let status = status.clone();
+                    async move {
+                        let written = match writing {
+                            Some(writing) => writing.await,
+                            None => false,
+                        };
+                        println!("COPIED image written={written}");
+                        status.set(format!("Copied typed with an image: {written}"));
+                    }
+                }
+            };
+            let tasks = cx.tasks.clone();
             cx.render(
                 column()
                     .p(20.)
@@ -67,7 +94,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         row()
                             .gap(8.)
                             .child(button().w(120.).h(40.).child("Paste types").on_click(paste))
-                            .child(button().w(120.).h(40.).child("Copy types").on_click(copy)),
+                            .child(button().w(120.).h(40.).child("Copy types").on_click(copy))
+                            .child(
+                                button()
+                                    .w(120.)
+                                    .h(40.)
+                                    .child("Copy image")
+                                    .on_click(move || tasks.spawn(copy_image())),
+                            ),
                     )
                     .child(text_signal(move || status.get())),
             );

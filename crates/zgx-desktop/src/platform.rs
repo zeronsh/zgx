@@ -230,6 +230,25 @@ impl Platform for Desktop {
                 .unwrap_or(false)
         })
     }
+    fn set_clipboard_typed_image(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+        png: Arc<[u8]>,
+    ) -> Pending<bool> {
+        let (images, types) = (self.images(), types.to_vec());
+        Box::pin(async move {
+            let Some(images) = images else {
+                return false;
+            };
+            off_thread(move || {
+                crate::clipboard::write_typed_image(&images, text, html, &types, &png).is_ok()
+            })
+            .await
+            .unwrap_or(false)
+        })
+    }
     fn open_folder(&self, picker: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
         let dialogs = self.dialogs.clone();
         Box::pin(async move {
