@@ -277,6 +277,24 @@ pub struct Api {
     /// Removes the image `host:<name>` a module set: not 0 if there was one.
     /// On the interface's thread (on another, nothing).
     pub image_remove: unsafe extern "C" fn(host: *mut c_void, name: *const u8, len: usize) -> u32,
+    /// [`Api::shared_upsert`] with a place for each row: `places` (a list,
+    /// taken) as long as `rows`, each `nil` (where its key's row is, or at
+    /// the end if the list has none), a string (just before the row with
+    /// that key: the list's first of it, or one given, wherever that goes)
+    /// or `true` (at the end). A row the list has moves to its place; rows
+    /// placed before one key go in the order given; one walk of the list.
+    /// [`DONE`], or [`FAILED`] with why in `out`, nothing written: a row
+    /// placed before itself, before a key neither the list nor the rows
+    /// have, rows placed before one another (`a` before `b` before `a`),
+    /// what `shared_upsert` refuses, or its host gone.
+    pub shared_upsert_at: unsafe extern "C" fn(
+        shared: *const c_void,
+        key: *const u8,
+        key_len: usize,
+        rows: *mut Raw,
+        places: *mut Raw,
+        out: *mut Raw,
+    ) -> u32,
 }
 
 /// A shared state's observer ([`Api::shared_observe`]): `value` is what it

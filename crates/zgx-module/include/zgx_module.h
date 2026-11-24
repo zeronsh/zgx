@@ -229,6 +229,18 @@ typedef struct zgx_api {
     /* Removes the image `host:<name>` a module set: not 0 if there was one.
      * On the interface's thread (on another, nothing). */
     uint32_t (*image_remove)(void *host, const uint8_t *name, size_t len);
+    /* shared_upsert with a place for each row: `places` (a list, taken) as
+     * long as `rows`, each nil (where its key's row is, or at the end if the
+     * list has none), a string (just before the row with that key: the
+     * list's first of it, or one given, wherever that goes) or true (at the
+     * end). A row the list has moves to its place; rows placed before one
+     * key go in the order given; one walk of the list. ZGX_DONE, or
+     * ZGX_FAILED with why in `out`, nothing written: a row placed before
+     * itself, before a key neither the list nor the rows have, rows placed
+     * before one another (a before b before a), what shared_upsert refuses,
+     * or its host gone. */
+    uint32_t (*shared_upsert_at)(const void *shared, const uint8_t *key, size_t key_len,
+                                 zgx_value *rows, zgx_value *places, zgx_value *out);
 } zgx_api;
 
 /* What a call returns: done, or failed. Failing, it wrote why (a string)
