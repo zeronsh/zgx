@@ -3,8 +3,15 @@
 //! `zgx new <name> [--template T] [--i18n]` writes a Luau app that runs at
 //! once, with its tests and a CI workflow (`zgx_script::scaffold`).
 //!
-//! `zgx run [--inspect] <app> [args…]` runs the app by zgx-run (beside this
-//! binary, or on PATH), as `zgx audit` audits it.
+//! `zgx run [--inspect] [--release] <app> [args…]` runs the app by zgx-run
+//! (beside this binary, or on PATH), as `zgx audit` audits it: first
+//! building each native module zgx.json names whose sources changed
+//! (`zgx_script::module_build`), and building one again and restarting the
+//! app as its sources change.
+//!
+//! `zgx build [--out <dir>] [--target <triple>]… [--version <v>] <app>`
+//! writes the app as a bundle (`zgx_script::app_bundle`), which `zgx-run
+//! <bundle>` runs.
 //!
 //! `zgx check [--nonstrict] <file-or-dir>...` type checks Luau scripts
 //! with luau-lsp and the bundled `ui`/`anime` definitions, printing
@@ -31,7 +38,8 @@ use std::{path::PathBuf, process::ExitCode};
 use zgx_script::check::{CheckError, Options, Report, check};
 
 const USAGE: &str = "usage: zgx new <name> [--template basic|router|list|form|plugins] [--i18n]
-       zgx run [--inspect] <app.luau-or-dir> [args...]
+       zgx run [--inspect] [--release] <app.luau-or-dir> [args...]
+       zgx build [--out <dir>] [--target <triple>]... [--version <v>] <app-dir>
        zgx check [--nonstrict] <file-or-dir>...
        zgx lint [--format text|json] <file-or-dir>...
        zgx lint --rules
@@ -48,6 +56,15 @@ are clean. --i18n writes its text as ui.t messages with locales/en.json.
 
 run: opens the app in a window and reloads it as its files change
 (zgx-run, beside zgx or on PATH; `zgx-run --help` says what zgx.json sets).
+The native modules zgx.json names are built first if their sources changed
+(cached by a hash of them; --release builds them for release), and as their
+sources change while it runs, built again and the app restarted.
+
+build: the app as a bundle (dist/<app_id>, or --out): its scripts compiled
+to bytecode, its other files as they are, each native module's library for
+each --target (the host's by default; built for release if its sources
+changed, else from the cache) and a manifest of hashes. `zgx-run <bundle>`
+runs it.
 --inspect serves devtools (`zgx inspect help`).
 
 check: type checks zgx Luau scripts with luau-lsp, the bundled ui/anime
@@ -274,30 +291,251 @@ fn zgx_run() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("zgx-run"))
 }
 
-/// `zgx run [--inspect] <app.luau-or-dir> [args…]`: the app in a window,
-/// reloading as it changes, by zgx-run. On Unix zgx-run takes this
-/// process's place, so signals and the exit status are its own.
+/// `zgx run [--inspect] [--release] <app.luau-or-dir> [args…]`: the app in a
+/// window, reloading as it changes, by zgx-run. An app with no native
+/// modules has zgx-run take this process's place (on Unix), so signals and
+/// the exit status are its own. One with modules is watched from here: each
+/// is built if its sources changed and handed to zgx-run, and as a
+/// module's sources change it is built again and the app started again.
 fn run(args: Vec<String>) -> ExitCode {
-    if args.is_empty() {
+    let release = args.iter().any(|a| a == "--release");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--release").collect();
+    let Some(app) = args.iter().find(|a| !a.starts_with("--")) else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
-    }
-    let run = zgx_run();
-    let mut command = std::process::Command::new(&run);
-    command.args(&args);
-    #[cfg(unix)]
-    let error = std::os::unix::process::CommandExt::exec(&mut command);
-    #[cfg(not(unix))]
-    let error = match command.status() {
-        Ok(status) => return ExitCode::from(status.code().unwrap_or(2).clamp(0, 255) as u8),
-        Err(error) => error,
     };
+    let path = PathBuf::from(app);
+    let dir = if path.is_dir() {
+        path.clone()
+    } else {
+        path.parent()
+            .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    };
+    let modules = match zgx_script::module_build::modules_of(&dir) {
+        Ok(modules) => modules,
+        Err(error) => {
+            eprintln!("zgx run: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let run = zgx_run();
+    if modules.is_empty() {
+        let mut command = std::process::Command::new(&run);
+        command.args(&args);
+        #[cfg(unix)]
+        let error = std::os::unix::process::CommandExt::exec(&mut command);
+        #[cfg(not(unix))]
+        let error = match command.status() {
+            Ok(status) => return ExitCode::from(status.code().unwrap_or(2).clamp(0, 255) as u8),
+            Err(error) => error,
+        };
+        return cannot_run(&run, &error);
+    }
+    let profile = if release {
+        zgx_script::module_build::Profile::Release
+    } else {
+        zgx_script::module_build::Profile::Dev
+    };
+    supervise(&run, &args, &modules, profile)
+}
+
+fn cannot_run(run: &std::path::Path, error: &std::io::Error) -> ExitCode {
     eprintln!(
         "zgx run: couldn't run {} ({error}); install zgx-run beside zgx or on PATH \
          (cargo install zgx-run)",
         run.display()
     );
     ExitCode::from(2)
+}
+
+/// Each module's library for this run: built if its sources changed, a
+/// library zgx.json names as it is. None if one didn't build (cargo said
+/// why).
+fn modules_built(
+    modules: &[(String, zgx_script::module_build::Source)],
+    profile: zgx_script::module_build::Profile,
+) -> Option<Vec<(String, PathBuf)>> {
+    use zgx_script::module_build::{Source, ensure};
+    let mut libraries = Vec::new();
+    for (name, source) in modules {
+        match source {
+            Source::Library(library) => libraries.push((name.clone(), library.clone())),
+            Source::Crate(dir) => match ensure(name, dir, profile, None) {
+                Ok(built) => {
+                    if built.built {
+                        eprintln!(
+                            "zgx run: module `{name}` built in {:.2} s",
+                            built.built_in.as_secs_f64()
+                        );
+                    }
+                    libraries.push((name.clone(), built.library));
+                }
+                Err(error) => {
+                    eprintln!("zgx run: {error}");
+                    return None;
+                }
+            },
+        }
+    }
+    Some(libraries)
+}
+
+/// A source file as last looked at: its path, length and time of change.
+type Stamp = (PathBuf, u64, Option<std::time::SystemTime>);
+
+/// What each crate's sources were when last looked at.
+fn stamps(modules: &[(String, zgx_script::module_build::Source)]) -> Vec<(String, Vec<Stamp>)> {
+    modules
+        .iter()
+        .filter_map(|(name, source)| match source {
+            zgx_script::module_build::Source::Crate(dir) => Some((
+                name.clone(),
+                zgx_script::module_build::sources(dir)
+                    .into_iter()
+                    .map(|file| {
+                        let meta = std::fs::metadata(&file).ok();
+                        let len = meta.as_ref().map_or(0, |m| m.len());
+                        let modified = meta.and_then(|m| m.modified().ok());
+                        (file, len, modified)
+                    })
+                    .collect(),
+            )),
+            zgx_script::module_build::Source::Library(_) => None,
+        })
+        .collect()
+}
+
+/// zgx-run with the modules' libraries, started again with a notice each
+/// time a module's sources change and it builds; ends as the app does.
+fn supervise(
+    run: &std::path::Path,
+    args: &[String],
+    modules: &[(String, zgx_script::module_build::Source)],
+    profile: zgx_script::module_build::Profile,
+) -> ExitCode {
+    let Some(mut libraries) = modules_built(modules, profile) else {
+        return ExitCode::from(1);
+    };
+    let start = |libraries: &[(String, PathBuf)], notice: Option<&str>| {
+        let mut command = std::process::Command::new(run);
+        for (name, library) in libraries {
+            command
+                .arg("--module")
+                .arg(format!("{name}={}", library.display()));
+        }
+        if let Some(notice) = notice {
+            command.arg("--notice").arg(notice);
+        }
+        command.args(args).spawn()
+    };
+    let mut child = match start(&libraries, None) {
+        Ok(child) => child,
+        Err(error) => return cannot_run(run, &error),
+    };
+    let mut seen = stamps(modules);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if let Ok(Some(status)) = child.try_wait() {
+            return ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8);
+        }
+        let now = stamps(modules);
+        if now == seen {
+            continue;
+        }
+        let changed: Vec<String> = now
+            .iter()
+            .filter(|(name, files)| {
+                seen.iter()
+                    .find(|(n, _)| n == name)
+                    .is_none_or(|(_, before)| before != files)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        // An editor's save can be several writes: once they stop.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        seen = stamps(modules);
+        let names = changed
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let Some(rebuilt) = modules_built(modules, profile) else {
+            eprintln!(
+                "zgx run: module {names} changed and didn't build: the app runs on as it was"
+            );
+            continue;
+        };
+        // The same libraries (a change that made the same key: a file
+        // saved unchanged): nothing to start again.
+        if rebuilt == libraries {
+            continue;
+        }
+        libraries = rebuilt;
+        let notice = format!("module {names} changed, restarting");
+        eprintln!("zgx run: {notice}");
+        let _ = child.kill();
+        let _ = child.wait();
+        child = match start(
+            &libraries,
+            Some(&format!("module {names} changed: restarted")),
+        ) {
+            Ok(child) => child,
+            Err(error) => return cannot_run(run, &error),
+        };
+    }
+}
+
+/// `zgx build [--out <dir>] [--target <triple>]… [--version <v>] <app-dir>`.
+fn build(args: Vec<String>) -> ExitCode {
+    let mut options = zgx_script::app_bundle::Options::default();
+    let mut app = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => options.out = args.next().map(PathBuf::from),
+            "--target" => options.targets.extend(args.next()),
+            "--version" => options.version = args.next(),
+            _ if app.is_none() && !arg.starts_with("--") => app = Some(PathBuf::from(arg)),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(app) = app else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let started = std::time::Instant::now();
+    match zgx_script::app_bundle::write(&app, &options) {
+        Ok(written) => {
+            for module in &written.modules {
+                println!(
+                    "module `{}`: {} ({})",
+                    module.name,
+                    if module.built {
+                        format!("built in {:.2} s", module.built_in.as_secs_f64())
+                    } else {
+                        "unchanged, from the cache".into()
+                    },
+                    module.library.display()
+                );
+            }
+            println!(
+                "wrote {} in {:.2} s: {} files, {} scripts compiled in {:.2} s",
+                written.dir.display(),
+                started.elapsed().as_secs_f64(),
+                written.files,
+                written.scripts,
+                written.ui_in.as_secs_f64()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("zgx build: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `zgx video …`: handed to zgx-video (beside this binary, or on PATH), which
@@ -333,6 +571,7 @@ fn main() -> ExitCode {
         Some("inspect") => return inspect(args.collect()),
         Some("audit") => return audit(args.collect()),
         Some("run") => return run(args.collect()),
+        Some("build") => return build(args.collect()),
         Some("video") => return video(args.collect()),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");

@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 /// The keys this reads from `zgx.json`; a host reading the rest (the
 /// window's) accepts these.
-pub const KEYS: &[&str] = &["packages", "expose", "plugins", "modules"];
+pub const KEYS: &[&str] = &["packages", "expose", "plugins", "modules", "version"];
 
 /// What `zgx.json` says of an app's host (`read`), to give it (`apply`).
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -393,6 +393,20 @@ thread_local! {
     /// (what a script's VM has of its host), kept here so a host that loads
     /// none is no larger.
     static LOADED: RefCell<Vec<(Weak<FunctionsOf>, Rc<Module>)>> = const { RefCell::new(Vec::new()) };
+    /// Those that didn't load, by name, and why: what `ui.module` says of
+    /// one.
+    static REFUSED: RefCell<Vec<(Weak<FunctionsOf>, String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Why the module `name` didn't load into this host, if it was refused.
+fn refused(functions: &crate::Functions, name: &str) -> Option<String> {
+    REFUSED.with_borrow(|all| {
+        all.iter()
+            .find(|(host, refused, _)| {
+                std::ptr::eq(host.as_ptr(), Rc::as_ptr(functions)) && refused == name
+            })
+            .map(|(.., why)| why.clone())
+    })
 }
 type FunctionsOf = <crate::Functions as std::ops::Deref>::Target;
 
@@ -468,6 +482,15 @@ fn manifest_of(json: &str) -> Result<Manifest, String> {
     });
     Ok(Manifest { name, registers })
 }
+/// The name a manifest's JSON gives, read whatever else it says.
+fn name_in(json: &str) -> Option<&str> {
+    // (Its first `"name":"…"`: the manifest's own comes before any record's
+    // or function's, as the macros and `register!` write it.)
+    let at = json.find(r#""name":""#)? + r#""name":""#.len();
+    let name = &json[at..at + json[at..].find('"')?];
+    abi::is_name(name).then_some(name)
+}
+
 /// What a function with no manifest is called on its module's table: its
 /// name's last part.
 fn member_of(name: &str) -> &str {
@@ -673,6 +696,9 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 env.functions.clone()
             };
             let module = loaded(&functions, &name).map_err(|names| {
+                if let Some(why) = refused(&functions, &name) {
+                    return mlua::Error::runtime(format!("module `{name}` didn't load: {why}"));
+                }
                 mlua::Error::runtime(match names.as_slice() {
                     [] => format!("no module named `{name}`: the app loaded none"),
                     names => format!(
@@ -779,6 +805,30 @@ impl ScriptHost {
     #[doc(hidden)]
     pub unsafe fn load_module(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
+        // SAFETY: The caller's.
+        let loaded = unsafe { self.load_module_at(path) };
+        if let Err(why) = &loaded {
+            // Kept, for `ui.module` to say: by the name its manifest gives,
+            // else its file's.
+            let name = std::fs::read(path)
+                .ok()
+                .and_then(|file| abi::manifest_in(&file).and_then(name_in).map(str::to_owned))
+                .unwrap_or_else(|| {
+                    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                    let stem = stem.unwrap_or_default();
+                    stem.strip_prefix("lib").unwrap_or(&stem).to_owned()
+                });
+            REFUSED.with_borrow_mut(|all| {
+                all.retain(|(host, ..)| host.strong_count() > 0);
+                all.push((Rc::downgrade(&self.0.functions), name, why.clone()));
+            });
+        }
+        loaded
+    }
+
+    /// # Safety
+    /// As `load_module`'s.
+    unsafe fn load_module_at(&self, path: &Path) -> Result<(), String> {
         let fail = |why: &dyn std::fmt::Display| format!("{}: {why}", path.display());
         let file = std::fs::read(path).map_err(|e| fail(&e))?;
         let in_file = abi::manifest_in(&file)

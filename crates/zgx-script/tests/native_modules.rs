@@ -1106,3 +1106,359 @@ return ui.text { `{a} {b} {c} {d} {e} {f}` }
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A module that won't load is refused whole, and `ui.module` says why,
+/// where it would otherwise only say there is none.
+#[test]
+fn a_refused_module_is_named_with_why() {
+    let dir = std::env::temp_dir().join(format!("zgx-module-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let library = dir.join("libwords.so");
+    // A manifest for another interface, in a file that is no library.
+    let mut file = vec![0u8; 64];
+    file.extend(zgx_module::abi::manifest_bytes(
+        r#"{"zgx_module":1,"abi":2,"name":"words"}"#,
+    ));
+    std::fs::write(&library, file).unwrap();
+    let mut why = String::new();
+    let mut app = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.text { id = "out", (string.gsub(tostring(select(2, pcall(ui.module, "words"))), "[{}]", "")) }"#,
+        );
+        // SAFETY: Not a library: refused before anything is loaded.
+        why = unsafe { host.load_module(&library) }.unwrap_err();
+        host
+    });
+    assert!(
+        why.ends_with("its manifest is for another module interface than this runtime's (1)"),
+        "{why}"
+    );
+    // (Its first line: the traceback follows.)
+    let out = app.text("out");
+    let first = out.lines().next().unwrap_or("");
+    assert!(
+        first.ends_with(&format!(
+            "module `words` didn't load: {}: its manifest is for another module interface than this runtime's (1)",
+            library.display()
+        )),
+        "{out}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A module's key covers its crate's files, and only those: a change to one
+/// makes another key, saving it as it was makes the first again, and its
+/// build output (`target/`) and hidden files make none.
+#[test]
+fn a_modules_key_follows_its_sources() {
+    use zgx_script::module_build::{Profile, key, sources};
+    let dir = std::env::temp_dir().join(format!("zgx-module-key-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"k\"\n").unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let target = "x86_64-unknown-linux-gnu";
+    let first = key(&dir, Profile::Dev, target).unwrap();
+    assert_eq!(first.len(), 32);
+    assert_eq!(key(&dir, Profile::Dev, target).unwrap(), first);
+    // Another profile, another target: other keys.
+    assert_ne!(key(&dir, Profile::Release, target).unwrap(), first);
+    assert_ne!(
+        key(&dir, Profile::Dev, "aarch64-apple-darwin").unwrap(),
+        first
+    );
+    // What isn't a source makes none.
+    std::fs::write(dir.join("target/debug/libk.so"), "built").unwrap();
+    std::fs::write(dir.join(".editor-swap"), "x").unwrap();
+    assert_eq!(key(&dir, Profile::Dev, target).unwrap(), first);
+    assert_eq!(
+        sources(&dir),
+        [dir.join("Cargo.toml"), dir.join("src/lib.rs")]
+    );
+    // A source's change does, and undoing it is the first key again.
+    std::fs::write(dir.join("src/lib.rs"), "fn b() {}\n").unwrap();
+    assert_ne!(key(&dir, Profile::Dev, target).unwrap(), first);
+    std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    assert_eq!(key(&dir, Profile::Dev, target).unwrap(), first);
+    // So does a new file, moved or not.
+    std::fs::write(dir.join("src/more.rs"), "").unwrap();
+    assert_ne!(key(&dir, Profile::Dev, target).unwrap(), first);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// `zgx build`'s bundle: its scripts as bytecode, run from its folder as
+/// they are asked for, each checked against its manifest's hash as it is
+/// read: one changed, or one its manifest doesn't name, is refused.
+#[test]
+fn a_bundle_runs_its_bytecode_and_checks_each_file_as_it_is_read() {
+    use zgx_script::app_bundle::{Options, open, write};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    std::fs::create_dir_all(app.join("parts")).unwrap();
+    std::fs::write(
+        app.join("app.luau"),
+        "local part = require(\"./parts/part\")\nreturn ui.text { id = \"out\", part.say() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("parts/part.luau"),
+        "return { say = function() return \"from bytecode\" end }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("zgx.json"),
+        r#"{ "app_id": "bundled", "version": "1.2.3" }"#,
+    )
+    .unwrap();
+    let out = base.join("dist");
+    let written = write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((written.files, written.scripts), (3, 2));
+    // Its scripts are bytecode: Luau's first byte is its version, never `l`.
+    let compiled = std::fs::read(out.join("ui/app.luau")).unwrap();
+    assert_ne!(compiled[0], b'l');
+    let manifest_text = std::fs::read(out.join("manifest.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_text).unwrap();
+    assert_eq!(manifest["app_id"], "bundled");
+    assert_eq!(manifest["version"], "1.2.3");
+    assert_eq!(manifest["ui"]["files"], 3);
+    let mut named: Vec<&String> = manifest["ui"]["sha256"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    named.sort();
+    assert_eq!(named, ["app.luau", "parts/part.luau", "zgx.json"]);
+
+    let opened = open(&out).unwrap();
+    assert_eq!(opened.app_id, "bundled");
+    // It runs from its folder, as bytecode.
+    let run_it = |opened: &zgx_script::app_bundle::Opened| {
+        let files = opened.files();
+        TestApp::try_new(move |runtime| {
+            ScriptHost::from_files(
+                runtime,
+                files.clone(),
+                "app.luau",
+                zgx_script::Code::VerifiedBytecode,
+            )
+        })
+    };
+    let mut run = run_it(&opened).unwrap();
+    assert_eq!(run.error(), None);
+    assert_eq!(run.text("out"), "from bytecode");
+    drop(run);
+
+    // A script changed after the bundle was opened is refused as it is
+    // read: one byte, the length kept.
+    let mut tampered = std::fs::read(out.join("ui/parts/part.luau")).unwrap();
+    *tampered.last_mut().unwrap() ^= 1;
+    std::fs::write(out.join("ui/parts/part.luau"), &tampered).unwrap();
+    let refused = run_it(&opened).err().expect("refused");
+    assert!(
+        refused.contains("isn't the file its bundle's manifest names (changed since it was built)"),
+        "{refused}"
+    );
+    // A file its manifest doesn't name isn't there, whatever is on the disk.
+    *tampered.last_mut().unwrap() ^= 1;
+    std::fs::write(out.join("ui/parts/part.luau"), &tampered).unwrap();
+    let mut unnamed = manifest.clone();
+    unnamed["ui"]["sha256"]
+        .as_object_mut()
+        .unwrap()
+        .remove("parts/part.luau");
+    std::fs::write(out.join("manifest.json"), unnamed.to_string()).unwrap();
+    let refused = run_it(&open(&out).unwrap()).err().expect("refused");
+    assert!(refused.contains("not in the app's bundle"), "{refused}");
+    std::fs::write(out.join("manifest.json"), &manifest_text).unwrap();
+    assert_eq!(run_it(&open(&out).unwrap()).unwrap().error(), None);
+    // A folder that is no bundle isn't replaced by one.
+    std::fs::create_dir_all(base.join("other")).unwrap();
+    std::fs::write(base.join("other/keep.txt"), "mine").unwrap();
+    let kept = write(
+        &app,
+        &Options {
+            out: Some(base.join("other")),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        kept.ends_with("not a bundle, and not empty: name another place (--out)"),
+        "{kept}"
+    );
+    assert!(base.join("other/keep.txt").is_file());
+    write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+/// A bundle's scripts read and checked ahead, on workers: a load takes the
+/// bytes a worker checked (a script changed on the disk after that still
+/// runs as checked), what no load took goes as the first load ends, and a
+/// script that didn't check out ahead is refused as it is read.
+#[test]
+fn a_bundles_scripts_read_ahead_are_the_bytes_checked() {
+    use zgx_script::app_bundle::{Opened, Options, open, write};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-ahead-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    std::fs::create_dir_all(app.join("parts")).unwrap();
+    std::fs::write(
+        app.join("app.luau"),
+        "local part = require(\"./parts/part\")\nreturn ui.text { id = \"out\", part.say() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("parts/part.luau"),
+        "return { say = function() return \"as checked\" end }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("parts/unused.luau"), "return 1\n").unwrap();
+    let out = base.join("dist");
+    write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ready = |opened: &Opened, scripts: usize| {
+        let started = std::time::Instant::now();
+        while opened.read_ahead_counts() != (scripts, true) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{:?}",
+                opened.read_ahead_counts()
+            );
+            std::thread::yield_now();
+        }
+    };
+    let run_it = |opened: &Opened| {
+        let files = opened.files();
+        TestApp::try_new(move |runtime| {
+            ScriptHost::from_files(
+                runtime,
+                files.clone(),
+                "app.luau",
+                zgx_script::Code::VerifiedBytecode,
+            )
+        })
+    };
+    let part = out.join("ui/parts/part.luau");
+    let checked = std::fs::read(&part).unwrap();
+    let mut changed = checked.clone();
+    *changed.last_mut().unwrap() ^= 1;
+
+    let opened = open(&out).unwrap();
+    opened.read_ahead();
+    ready(&opened, 3);
+    // Changed on the disk after its check: the load runs what was checked.
+    std::fs::write(&part, &changed).unwrap();
+    let mut run = run_it(&opened).unwrap();
+    assert_eq!(run.text("out"), "as checked");
+    drop(run);
+    // What no load took (`unused.luau`) went as the load ended; a load
+    // after reads the disk, and the change is refused.
+    assert_eq!(opened.read_ahead_counts(), (0, true));
+    let refused = run_it(&opened).err().expect("refused");
+    assert!(
+        refused.contains("isn't the file its bundle's manifest names"),
+        "{refused}"
+    );
+
+    // Changed before the workers read it: not ready, and refused as read.
+    let opened = open(&out).unwrap();
+    opened.read_ahead();
+    ready(&opened, 2);
+    let refused = run_it(&opened).err().expect("refused");
+    assert!(
+        refused.contains("isn't the file its bundle's manifest names"),
+        "{refused}"
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+/// A package a bundled app lends its plugins (a design system in its own
+/// folder) is the bundle's bytecode: a plugin, whose own files are source
+/// on the disk, requires its modules as the app does.
+#[test]
+fn a_bundles_lent_package_is_its_bytecode_for_plugins_too() {
+    use zgx_script::app_bundle::{Options, open, write};
+    use zgx_script::{Capability, Plugin};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-lent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let write_file = |path: &std::path::Path, text: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let app = base.join("app");
+    write_file(
+        &app.join("app.luau"),
+        "local badge = require(\"@ds/badge\")\nreturn ui.column { id = \"app\", ui.text { id = \"mine\", badge(\"app\") } }\n",
+    );
+    write_file(
+        &app.join("ds/badge.luau"),
+        "return function(label) return label .. \" calm\" end\n",
+    );
+    let out = base.join("dist");
+    write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let opened = open(&out).unwrap();
+    assert_ne!(
+        std::fs::read(opened.ui.join("ds/badge.luau")).unwrap()[0],
+        b'r',
+        "bytecode"
+    );
+    let plugins = base.join("plugins");
+    write_file(
+        &plugins.join("p.luau"),
+        "local badge = require(\"@ds/badge\")\nui.contribute { target = \"#mine\", after = ui.text { id = \"theirs\", badge(\"plugin\") } }\n",
+    );
+    let (ui, files) = (opened.ui.clone(), opened.files());
+    let mut run = TestApp::new(move |runtime| {
+        let host = ScriptHost::from_files(
+            runtime,
+            files.clone(),
+            "app.luau",
+            zgx_script::Code::VerifiedBytecode,
+        )
+        .package("ds", ui.join("ds"))
+        .grant_all_plugins(Capability::Package("ds".into()));
+        host.set_plugins(vec![Plugin {
+            name: "p".into(),
+            entry: plugins.join("p.luau"),
+            grants: Vec::new(),
+        }]);
+        host
+    });
+    run.frames(1);
+    assert_eq!(run.error(), None);
+    assert_eq!(run.text("mine"), "app calm");
+    assert_eq!(run.text("theirs"), "plugin calm");
+    drop(run);
+    std::fs::remove_dir_all(base).unwrap();
+}

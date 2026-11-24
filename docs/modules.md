@@ -163,7 +163,30 @@ A module can be linked into the app instead (one crate built as an `rlib` too), 
 { "modules": { "words": "modules/words" } }
 ```
 
-`zgx types` and `zgx check` read them from there. Loading them is still the app's Rust's: `zgx-run` doesn't load modules from `zgx.json` yet.
+`zgx-run` loads them from there before the app's scripts run (`zgx-run --module words=<library>` hands it another library for one). A module `zgx.json` names that has no built library stops `zgx-run` before its window opens, naming it; one that won't load (built for another interface, or not what its manifest says) is shown in the error banner, the scripts' `ui.module` saying why. `zgx types` and `zgx check` read the same key.
+
+### `zgx run`
+
+`zgx run my-app` builds each module whose sources changed, then starts the app with them. A module's **key** is a SHA-256 over every file in its crate's folder (but `target/` and hidden ones), the compiler, the target, the profile and the interface's number; a library built for a key is kept in the cache (`~/.cache/zgx/modules/<name>/<key>/`, or `ZGX_CACHE`) and taken from there whenever that key comes up again, so an unchanged module is never built twice, for any app or checkout. A miss runs cargo with a target directory of the module's own in the cache, so a rebuild compiles only what changed. `--release` builds them for release.
+
+While the app runs, Luau files reload as always. When a module's sources change, `zgx run` builds it again and, since a loaded library can't be replaced, starts the app again: "module `words` changed, restarting" on the terminal, and in the restarted app's banner. A change that doesn't build leaves the app running as it was, cargo's errors on the terminal.
+
+The key can't see a path dependency outside the module's folder: keep those inside it, or depend by version or git, which `Cargo.lock` pins.
+
+### `zgx build`
+
+`zgx build my-app` writes the app as a bundle, `dist/<app_id>/` (or `--out`):
+
+```text
+dist/my-app/
+  manifest.json            the app's id and version, every hash
+  ui/                      the app's folder: .luau as bytecode, themes, images and the rest as they are
+  modules/<platform>/      each module's library: x86_64-linux, aarch64-macos…
+```
+
+Each module is built for release for each `--target` (the host's by default) where its key is new, and taken from the cache otherwise, so a release in which only Luau changed compiles no Rust. `zgx-run dist/my-app` runs it: the scripts are read from `ui/` as they are asked for, as the build compiled them. `--version` sets the bundle's version over `zgx.json`'s `version`.
+
+Luau checks no bytecode it loads, so a bundle is trusted as native code is: zgx-run runs one a person or the app's install names, and nothing a script or a plugin names. It is checked against its manifest, which holds each file's SHA-256: each module's library as the bundle is opened, every launch (it is native code, loaded then), and each file of `ui/` as it is read, so the bytes checked are the bytes run and a launch hashes only what it loads. zgx-run reads and checks the scripts ahead on worker threads while its window is made (`Opened::read_ahead`, as `compile_ahead` compiles an app's sources), and a load takes the bytes a worker checked: no script is read or hashed on the thread that loads, if it was ready in time. A library that isn't the one its manifest names stops zgx-run before a window opens; a script that isn't (changed since the build), or one the manifest doesn't name, fails to load as a missing or broken script does, with the reason, and nothing of it runs.
 
 ## Calling one from Luau
 
