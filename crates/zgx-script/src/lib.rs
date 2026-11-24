@@ -87,6 +87,58 @@ mod lower;
 pub mod markdown;
 mod meter;
 mod modifiers;
+#[cfg(feature = "modules")]
+mod modules;
+#[cfg(feature = "modules")]
+#[doc(hidden)]
+pub use modules::{RegisteredAction, RegisteredFunction};
+/// Without native modules, no call of a host's function fails as a
+/// module's can, and `ui.module` finds none.
+#[cfg(not(feature = "modules"))]
+mod modules {
+    #[inline(always)]
+    pub(crate) fn failure() -> Option<mlua::Error> {
+        None
+    }
+    pub(crate) fn install(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
+        ui.set(
+            "module",
+            lua.create_function(|_, name: String| -> mlua::Result<()> {
+                Err(mlua::Error::runtime(format!(
+                    "no module named `{name}`: this app's runtime loads no native modules"
+                )))
+            })?,
+        )
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod module_types;
+/// In the browser, which loads no library: no module, and none typed.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub mod module_types {
+    use std::path::{Path, PathBuf};
+    const NONE: &str = "native modules don't load in the browser";
+    pub fn manifest_of_library(_: &Path) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn of_app(_: &Path) -> (Vec<(PathBuf, String)>, Vec<String>) {
+        (Vec::new(), Vec::new())
+    }
+    pub fn name_of(_: &str) -> Option<String> {
+        None
+    }
+    pub fn module_definitions(_: &str) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn typed(text: String, _: &[String]) -> (String, Vec<String>) {
+        (text, Vec::new())
+    }
+    pub fn notes(_: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+}
 mod motion;
 mod node;
 mod opens;
@@ -5112,6 +5164,9 @@ impl ScriptHost {
             scene3d::install,
         );
         lazy.ui(&["json", "number", "sort"], data::install);
+        // (A VM whose scripts call no module makes no `ui.module`: one
+        // closure fewer for every VM to hold and its collector to walk.)
+        lazy.ui(&["module"], modules::install);
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
         let webs = self.0.webs.clone();

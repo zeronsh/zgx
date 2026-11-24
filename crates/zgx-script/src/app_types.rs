@@ -302,6 +302,13 @@ fn route_types(text: String, routes: &crate::routes::Routes) -> String {
 
 /// zgx's definitions with the tokens an app's scripts (`sources`) declare.
 pub fn definitions(sources: &[(PathBuf, String)]) -> String {
+    definitions_with(sources, &[])
+}
+
+/// `definitions`, with the app's native modules too, by their manifests
+/// (`module_types::of_app` reads them): each module's types, and `ui.module`,
+/// `ui.call_sync`, `ui.action` and `ui.invoke` typed by them.
+pub fn definitions_with(sources: &[(PathBuf, String)], manifests: &[String]) -> String {
     let read: Vec<_> = sources
         .iter()
         .map(|(path, source)| (path, crate::lint::tokenize(source).0))
@@ -352,6 +359,7 @@ pub fn definitions(sources: &[(PathBuf, String)]) -> String {
         routes if routes.open => text,
         routes => route_types(text, &routes),
     };
+    let (text, _) = crate::module_types::typed(text, manifests);
     format!(
         "-- zgx's definitions with this app's own theme tokens (`ui.theme.tokens`)\n\
          -- and the ids and hooks its plugins may target, its message keys and routes.\n\
@@ -375,7 +383,25 @@ pub fn write_types(dir: &Path) -> Result<bool, CheckError> {
 
 /// As `write_types`, from sources already read.
 pub fn write_types_of(dir: &Path, sources: &[(PathBuf, String)]) -> Result<bool, CheckError> {
-    let text = definitions(sources);
+    // The app's native modules (`zgx.json`'s `modules`), each one's types
+    // written beside its library too.
+    let (modules, _) = crate::module_types::of_app(dir);
+    let manifests: Vec<String> = modules
+        .iter()
+        .map(|(_, manifest)| manifest.clone())
+        .collect();
+    for (library, manifest) in &modules {
+        if let (Ok(own), Some(name)) = (
+            crate::module_types::module_definitions(manifest),
+            crate::module_types::name_of(manifest),
+        ) {
+            let beside = library.with_file_name(format!("{name}.d.luau"));
+            if !std::fs::read_to_string(&beside).is_ok_and(|old| old == own) {
+                let _ = std::fs::write(&beside, own);
+            }
+        }
+    }
+    let text = definitions_with(sources, &manifests);
     let path = types_file(dir);
     if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
         return Ok(false);
