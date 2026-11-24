@@ -19,7 +19,8 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle, SpanText,
+    Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
+    SpanHighlighter, SpanStyle, SpanText,
 };
 
 /// What had keyboard focus, and a text field's selection there, when it
@@ -650,6 +651,10 @@ struct CodeHint {
     lines: RefCell<Option<Rc<crate::editor_lines::LineCache>>>,
     line_layer: Cell<Option<NodeId>>,
     line_nodes: RefCell<Vec<(usize, NodeId)>>,
+    /// Shapes beside the lines in view (`EditorHandle::set_line_marks`):
+    /// layers under and over the lines' (`LineMark::over_text`), and their
+    /// nodes. Made when the first mark shows.
+    marks_drawn: RefCell<Option<Box<MarksDrawn>>>,
     /// The lines last given assistive technology (`Semantics::set_text_lines`).
     told_lines: RefCell<Vec<(usize, NodeId)>>,
     /// Marks behind the selection (the current line, decorations), made
@@ -1633,6 +1638,18 @@ impl EditorHandle {
         self.natural.wrapped.set_insets(insets.clone());
         self.natural.unwrapped.set_insets(insets);
         self.natural.invalidate_spans();
+        self.refresh();
+    }
+    /// Shapes drawn beside each line of a text area laid out by its lines
+    /// (`LineMark`: a list item's number, a quote's rule, a code block's
+    /// wash), given each line's index, text and highlighter state: they
+    /// scroll with their lines. `None`: none.
+    #[doc(hidden)]
+    pub fn set_line_marks(&self, marks: Option<LineMarks>) {
+        if !self.multiline {
+            return;
+        }
+        self.hint.line_cache().set_marks(marks);
         self.refresh();
     }
     /// The caret's colour (`None`: the text's, as by default) and width in
@@ -7556,6 +7573,19 @@ impl Ui {
                             y: -scroll.1,
                         },
                     );
+                    // Marks beside the lines (`set_line_marks`), out of line:
+                    // a text area without draws as ever.
+                    if lines.has_marks() || code.marks_drawn.borrow().is_some() {
+                        place_line_marks(
+                            &mut s,
+                            lines,
+                            code,
+                            (viewport, layer, selection_layer),
+                            shown_lines.clone(),
+                            &font,
+                            (inner_width, *scroll),
+                        );
+                    }
                 }
                 for id in free {
                     s.remove(id);
@@ -10028,6 +10058,209 @@ pub fn debug_editor_draws() -> u64 {
 /// A text area's line nodes for the lines in view, each placed past its
 /// room (`set_line_insets`) in what its indent leaves; a hidden line
 /// (`LineInset::hidden`) has none. The draw's own loop, for an area with
+/// A text area's line marks (`EditorHandle::set_line_marks`), drawn: two
+/// layers beside its lines' (under and over them), placed as that one is,
+/// and their nodes.
+#[derive(Default)]
+struct MarksDrawn {
+    under: Option<NodeId>,
+    over: Option<NodeId>,
+    under_nodes: Vec<NodeId>,
+    over_nodes: Vec<NodeId>,
+}
+/// The marks of the lines `shown` of `lines` drawn in their layers, made in
+/// `viewport` as the first shows (under `selection_layer`, or over
+/// `line_layer`) and placed as the lines' layer is (scroll content, moved
+/// by the scroll), each mark where its line is in the text. With no marks,
+/// any drawn go.
+#[cold]
+#[inline(never)]
+fn place_line_marks(
+    s: &mut Scene,
+    lines: &crate::editor_lines::LinesLayout,
+    code: &CodeHint,
+    (viewport, line_layer, selection_layer): (NodeId, NodeId, NodeId),
+    shown: std::ops::Range<usize>,
+    font: &FontStyle,
+    (inner_width, scroll): (f32, (f32, f32)),
+) {
+    let mut under = Vec::new();
+    let mut over = Vec::new();
+    if lines.has_marks() {
+        for i in shown {
+            let inset = lines.inset(i);
+            if inset.hidden {
+                continue;
+            }
+            let top = lines.top(i) + inset.above;
+            let tall = (lines.height(i) - inset.above).max(0.);
+            for mark in lines.marks(i) {
+                let width = if mark.width.is_finite() {
+                    mark.width
+                } else {
+                    (inner_width - mark.x).max(0.)
+                };
+                let height = if mark.height.is_finite() {
+                    mark.height
+                } else {
+                    (tall - mark.y - mark.bottom).max(0.)
+                };
+                let x = if mark.from_right {
+                    inner_width - mark.x - width
+                } else {
+                    mark.x
+                };
+                let rect = Rect::new(x, top + mark.y, width, height);
+                if mark.over_text {
+                    over.push((rect, mark));
+                } else {
+                    under.push((rect, mark));
+                }
+            }
+        }
+    }
+    let mut drawn = code.marks_drawn.borrow_mut();
+    if under.is_empty() && over.is_empty() {
+        // None now: the layers go with their marks.
+        if let Some(drawn) = drawn.take() {
+            for layer in [drawn.under, drawn.over].into_iter().flatten() {
+                if s.contains(layer) {
+                    s.remove(layer);
+                }
+            }
+        }
+        return;
+    }
+    let drawn = drawn.get_or_insert_default();
+    for (marks, layer, nodes, above) in [
+        (under, &mut drawn.under, &mut drawn.under_nodes, false),
+        (over, &mut drawn.over, &mut drawn.over_nodes, true),
+    ] {
+        if marks.is_empty() && layer.is_none() {
+            continue;
+        }
+        if layer.is_none_or(|layer| !s.contains(layer)) {
+            let made = s.append(
+                viewport,
+                NodeKind::Container(Layout::Overlay),
+                Style::default(),
+            );
+            // Under the selection (which shows over a code block's wash
+            // and a quote's rule, as over an atom's), or just over the
+            // lines' layer (`LineMark::over_text`).
+            let mut order = s.children(viewport).to_vec();
+            order.retain(|id| *id != made);
+            let at = if above {
+                order
+                    .iter()
+                    .position(|id| *id == line_layer)
+                    .map_or(order.len(), |i| i + 1)
+            } else {
+                order
+                    .iter()
+                    .position(|id| *id == selection_layer)
+                    .unwrap_or(0)
+            };
+            order.insert(at, made);
+            s.reorder_children(viewport, &order);
+            // Scroll content, as the lines' layer is: a scroll copies it.
+            s.set_scroll_copy(made, true);
+            *layer = Some(made);
+            nodes.clear();
+        }
+        let layer = layer.expect("made above");
+        paint_line_marks(s, layer, nodes, marks, font);
+        s.set_transform(
+            layer,
+            Transform {
+                x: -scroll.0,
+                y: -scroll.1,
+            },
+        );
+    }
+}
+/// `marks` drawn in `layer`'s `nodes`, made and let go as their count
+/// changes: a quad each, and a text node for each label.
+fn paint_line_marks(
+    s: &mut Scene,
+    layer: NodeId,
+    nodes: &mut Vec<NodeId>,
+    marks: Vec<(Rect, LineMark)>,
+    font: &FontStyle,
+) {
+    let count: usize = marks
+        .iter()
+        .map(|(_, m)| 1 + usize::from(m.label.is_some()))
+        .sum();
+    while nodes.len() > count {
+        s.remove(nodes.pop().expect("longer than count"));
+    }
+    while nodes.len() < count {
+        nodes.push(s.append(layer, NodeKind::Rect(Color(0, 0, 0, 0)), Style::default()));
+    }
+    let mut ids = nodes.iter().copied();
+    for (rect, mark) in marks {
+        let Some(id) = ids.next() else { return };
+        let quad = crate::scene::QuadStyle {
+            fill: mark.fill,
+            radius: mark.radius,
+            border_color: mark.border_color,
+            border_width: mark.border_width,
+            shadow: None,
+            decoration: None,
+            border_over: false,
+            outline: None,
+        };
+        if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
+            s.set_kind(id, NodeKind::Quad(quad));
+        }
+        s.set_style(id, fixed(rect.width, rect.height));
+        s.set_transform(
+            id,
+            Transform {
+                x: rect.x,
+                y: rect.y,
+            },
+        );
+        if let Some((label, label_color, label_size)) = mark.label {
+            let Some(id) = ids.next() else { return };
+            let unchanged = matches!(
+                s.kind(id),
+                NodeKind::Text { text, color: c, font_size }
+                    if **text == *label && *c == label_color && *font_size == label_size
+            );
+            if !unchanged {
+                s.set_kind(
+                    id,
+                    NodeKind::Text {
+                        text: label,
+                        color: label_color,
+                        font_size: label_size,
+                    },
+                );
+            }
+            let mut label_font = font.clone();
+            if mark.mono {
+                label_font.family = crate::text_layout::FontFamily::Monospace;
+            }
+            if mark.tabular {
+                label_font.features = label_font.features.with_feature(*b"tnum", 1);
+            }
+            if mark.height.is_finite() && mark.height > 0. {
+                label_font.line_height = crate::text_layout::LineHeight::px(mark.height);
+            }
+            s.set_font(id, label_font);
+            s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
+            s.set_transform(
+                id,
+                Transform {
+                    x: rect.x,
+                    y: rect.y,
+                },
+            );
+        }
+    }
+}
 /// insets: one without places its lines as before.
 #[cold]
 #[inline(never)]

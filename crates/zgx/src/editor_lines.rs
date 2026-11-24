@@ -350,6 +350,87 @@ impl LineInset {
 /// they are inside it as their colours do.
 #[doc(hidden)]
 pub type LineInsets = Rc<dyn Fn(usize, &str, u32) -> LineInset>;
+/// A shape drawn beside a line of a text area (`EditorHandle::set_line_marks`):
+/// a list item's bullet or number, a quote's rule, the wash behind a code
+/// block's line, a horizontal rule. It scrolls with its line, under the text
+/// (or over it, `over_text`).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct LineMark {
+    /// Its left edge, in points from the text area's left content edge (from
+    /// its right edge with `from_right`).
+    pub x: f32,
+    /// Its top, in points from the top of the line's text (below the line's
+    /// room above).
+    pub y: f32,
+    /// Its width; infinite: to the area's right edge.
+    pub width: f32,
+    /// Its height; infinite: to the bottom of the line, its wrapped rows and
+    /// its room below too, less `bottom`.
+    pub height: f32,
+    /// With an infinite height: how far above the line's bottom it ends.
+    pub bottom: f32,
+    /// The fill colour.
+    pub fill: crate::scene::Color,
+    /// The corner radius.
+    pub radius: f32,
+    /// The border's colour.
+    pub border_color: crate::scene::Color,
+    /// The border's width.
+    pub border_width: f32,
+    /// Its `x` is how far its right edge sits from the area's right edge (a
+    /// code block's language).
+    pub from_right: bool,
+    /// Text drawn from its top left (an ordinal), its colour and size; a
+    /// finite height is its line pitch.
+    pub label: Option<(std::sync::Arc<str>, crate::scene::Color, f32)>,
+    /// Its label in the monospaced font (a code block's line numbers).
+    pub mono: bool,
+    /// Its label in tabular figures (OpenType's `tnum`), each digit a
+    /// figure's width: an ordered list's numbers, lined up as the web's are.
+    pub tabular: bool,
+    /// Drawn over the text, not under it.
+    pub over_text: bool,
+}
+impl Default for LineMark {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            width: 0.,
+            height: 0.,
+            bottom: 0.,
+            fill: crate::scene::Color(0, 0, 0, 0),
+            radius: 0.,
+            border_color: crate::scene::Color(0, 0, 0, 0),
+            border_width: 0.,
+            from_right: false,
+            label: None,
+            mono: false,
+            tabular: false,
+            over_text: false,
+        }
+    }
+}
+impl LineMark {
+    /// A box `width` by `height` at `x`, `y` (see the fields), filled with
+    /// `fill`.
+    pub fn new(x: f32, y: f32, width: f32, height: f32, fill: crate::scene::Color) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            fill,
+            ..Self::default()
+        }
+    }
+}
+/// Each line's marks (`LineMark`), given its index, its text and what the
+/// line before it left its highlighter, as `LineInsets` are.
+#[doc(hidden)]
+pub type LineMarks = Rc<dyn Fn(usize, &str, u32) -> Vec<LineMark>>;
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
 pub type LineSpans = Vec<(Range<usize>, SpanStyle)>;
 /// A `Highlighter` that styles its ranges (`SpanStyle`) beyond colouring
@@ -742,6 +823,8 @@ struct RareLines {
     pictured: bool,
     /// Each line's room (`set_insets`): a note's list items and headings.
     insets: Option<LineInsets>,
+    /// Each line's marks (`set_marks`): a quote's rule, a code block's wash.
+    marks: Option<LineMarks>,
 }
 /// What the lines below an edit left before it (`LineCache::edited`).
 struct Tail {
@@ -927,6 +1010,29 @@ impl LineCache {
     pub(crate) fn has_insets(&self) -> bool {
         self.rare_set.get()
             && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.insets.is_some())
+    }
+    /// Give each line the marks `marks` gives it (none: none).
+    pub(crate) fn set_marks(&self, marks: Option<LineMarks>) {
+        let mut rare = self.rare.borrow_mut();
+        if marks.is_some() || rare.is_some() {
+            rare.get_or_insert_default().marks = marks;
+            self.rare_set.set(true);
+        }
+    }
+    /// Whether its lines have marks (`set_marks`).
+    pub(crate) fn has_marks(&self) -> bool {
+        self.rare_set.get()
+            && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.marks.is_some())
+    }
+    /// Line `i` of `layout`'s marks (`set_marks`).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn marks(&self, layout: &LinesLayout, i: usize) -> Vec<LineMark> {
+        let Some(marks) = (self.rare.borrow().as_ref()).and_then(|rare| rare.marks.clone()) else {
+            return Vec::new();
+        };
+        let before = self.state_before(layout, i);
+        marks(i, &layout.line_text(i), before)
     }
     /// Line `i` of `layout`'s room (`set_insets`): none for an editor
     /// without.
@@ -1668,6 +1774,14 @@ impl LinesLayout {
     /// Whether its lines have room of their own (`set_line_insets`).
     pub(crate) fn has_insets(&self) -> bool {
         self.room
+    }
+    /// Whether its lines have marks (`EditorHandle::set_line_marks`).
+    pub(crate) fn has_marks(&self) -> bool {
+        self.cache.has_marks()
+    }
+    /// Line `i`'s marks (`EditorHandle::set_line_marks`).
+    pub(crate) fn marks(&self, i: usize) -> Vec<LineMark> {
+        self.cache.marks(self, i)
     }
     /// Line `i`'s room (`EditorHandle::set_line_insets`).
     #[inline]
