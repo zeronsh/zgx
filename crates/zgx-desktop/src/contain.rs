@@ -225,6 +225,9 @@ mod tests {
     /// a second, reported once, and the caller goes on each frame.
     #[test]
     fn a_piece_panicking_every_frame_is_reported_once_and_skipped() {
+        // Before the first panic: another test installs the hook, the
+        // process's one, and a panic it notes is another message.
+        crate::application::note_panic_sites();
         let (start, mut fault) = (Instant::now(), None);
         let (runs, reports, frames) = (Cell::new(0), Cell::new(0), Cell::new(0));
         // 120 frames over two seconds, what it draws changing every frame.
@@ -459,6 +462,9 @@ mod tests {
     /// Another panic in the same piece is reported too.
     #[test]
     fn a_different_panic_is_reported_again() {
+        // Before the first panic: another test installs the hook, the
+        // process's one, and a panic it notes is another message.
+        crate::application::note_panic_sites();
         let (start, mut fault) = (Instant::now(), None);
         let reported = std::cell::RefCell::new(Vec::new());
         for (second, message) in [(0, "first"), (2, "first"), (4, "second")] {
@@ -471,8 +477,7 @@ mod tests {
                 || panic!("{message}"),
             );
         }
-        // Each led by where it panicked when the panic hook notes it (another
-        // test installs it; the process has one).
+        // Each led by where it panicked, as the panic hook notes it.
         let reported = reported.borrow();
         assert_eq!(reported.len(), 2, "{reported:?}");
         assert!(
