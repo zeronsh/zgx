@@ -295,6 +295,21 @@ impl Opened {
         crate::ScriptFiles::Folder(self.files.clone())
     }
 
+    /// The file `rel` of its `ui/` (its path there, with `/`), checked
+    /// against its manifest: `None` if the manifest names none, an error if
+    /// it isn't the file the manifest names (changed or removed since it
+    /// was built).
+    #[doc(hidden)]
+    pub fn file(&self, rel: &str) -> Result<Option<Vec<u8>>, String> {
+        if !self.files.names(rel) {
+            return Ok(None);
+        }
+        self.files
+            .read(&self.ui.join(rel))
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", self.ui.join(rel).display()))
+    }
+
     /// Reads and checks its scripts on worker threads now, for the first
     /// load to find them ready, as `compile_ahead` compiles an app's
     /// sources: call it first thing, before the app's window is made. The
