@@ -1659,6 +1659,12 @@ fn require_module<const LENDING: bool>(
         .map_err(|e| fail(format!("{}: {e}", path.display())))?;
     if let Some(host) = host.upgrade() {
         host.required.borrow_mut().push(path.clone());
+        // Watched from now on, though no load required it: a module
+        // required later (a `require` in a build or a handler) reloads
+        // when edited too. A load's many sends come to one look (`latest`).
+        if let Some(rewatch) = &*host.rewatch.borrow() {
+            rewatch.send(());
+        }
         // One more module of a package lent to this plugin.
         if let Some(plugin) = &plugin_name
             && let Some((package, _)) = packages.iter().find(|(_, dir)| within(dir, &path))
@@ -1980,7 +1986,8 @@ struct Inner {
     /// Of `exposed_shared`, the keys plugins only read.
     read_only_shared: ReadOnly,
     exposed_hooks: Exposed,
-    /// Tells `watch` to look at what it watches again (after a reload).
+    /// Tells `watch` to look at what it watches again (after a reload, or
+    /// a module first required since).
     rewatch: RefCell<Option<zgx::task::LatestSender<()>>>,
     /// The window's clipboard and dialogs, once the view mounts in one.
     platform: io::SharedPlatform,
@@ -4344,7 +4351,8 @@ impl ScriptHost {
             // The kernel says when a file changes; nothing runs meanwhile.
             #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
             if let Some(mut events) = file_events::FileEvents::new() {
-                // A reload (new plugins) has the watched files looked at again.
+                // A reload (new plugins), or a module required after it, has
+                // the watched files looked at again.
                 let (rewatch, mut rewatched) = zgx::task::latest::<()>();
                 *host.0.rewatch.borrow_mut() = Some(rewatch);
                 let mut heard = false;
