@@ -5262,6 +5262,7 @@ impl ScriptHost {
             canvas::install,
         );
         lazy.ui(&["glass"], node::install_glass);
+        lazy.ui(&["host_view"], node::install_host_view);
         lazy.ui(&["map"], node::install_map);
         #[cfg(feature = "scene3d")]
         lazy.ui(
