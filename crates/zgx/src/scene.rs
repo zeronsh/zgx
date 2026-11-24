@@ -3523,7 +3523,7 @@ pub struct Scene {
     text_measurer: Option<Box<dyn TextMeasurer>>,
     /// Each `snap` box's size as given, and when it last changed while it's
     /// taken to be moving.
-    snap_sizes: std::collections::HashMap<NodeId, ((f32, f32), Option<std::time::Instant>)>,
+    snap_sizes: std::collections::HashMap<NodeId, ((f32, f32), Option<crate::time::Instant>)>,
     /// The `snap` box being placed, its edges found: one placing it again goes on.
     snap_placing: Option<NodeId>,
     text_shaper: Option<std::rc::Rc<dyn crate::text_layout::TextShaper>>,
@@ -15324,7 +15324,7 @@ impl Scene {
         );
         let moving = match self.snap_sizes.get_mut(&id) {
             Some(last) if last.0 != (w, h) => {
-                *last = ((w, h), Some(std::time::Instant::now()));
+                *last = ((w, h), Some(crate::time::Instant::now()));
                 true
             }
             Some(last) => last.1.is_some(),
@@ -16158,7 +16158,7 @@ impl Scene {
     /// When a `snap` box moving now can be taken to have stopped
     /// ([`Scene::settle_snaps`]). `None` with none moving.
     #[doc(hidden)]
-    pub fn snaps_settle_at(&self) -> Option<std::time::Instant> {
+    pub fn snaps_settle_at(&self) -> Option<crate::time::Instant> {
         self.snap_sizes
             .values()
             .filter_map(|(_, moved)| *moved)
@@ -16168,7 +16168,7 @@ impl Scene {
     /// Lay out as they rest the `snap` boxes whose size hasn't changed for
     /// [`SNAP_SETTLE`] by `now`: whether there were any.
     #[doc(hidden)]
-    pub fn settle_snaps(&mut self, now: std::time::Instant) -> bool {
+    pub fn settle_snaps(&mut self, now: crate::time::Instant) -> bool {
         if self.snap_sizes.is_empty() {
             return false;
         }
