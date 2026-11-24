@@ -875,6 +875,16 @@ fn the_c_header_is_the_rust_interface() {
         ("zgx_api.after", offset_of!(Api, after)),
         ("zgx_api.timer_release", offset_of!(Api, timer_release)),
         ("zgx_api.state", offset_of!(Api, state)),
+        ("zgx_api.shared", offset_of!(Api, shared)),
+        ("zgx_api.shared_get", offset_of!(Api, shared_get)),
+        ("zgx_api.shared_set", offset_of!(Api, shared_set)),
+        ("zgx_api.shared_append", offset_of!(Api, shared_append)),
+        ("zgx_api.shared_observe", offset_of!(Api, shared_observe)),
+        (
+            "zgx_api.shared_unobserve",
+            offset_of!(Api, shared_unobserve),
+        ),
+        ("zgx_api.shared_release", offset_of!(Api, shared_release)),
         ("sizeof(zgx_registrar)", size_of::<Registrar>()),
         ("zgx_registrar.size", offset_of!(Registrar, size)),
         ("zgx_registrar.host", offset_of!(Registrar, host)),
@@ -1483,7 +1493,7 @@ mod reach {
         thread::ThreadId,
         time::Duration,
     };
-    use zgx_module::{Host, State, Timer, Ui, Value};
+    use zgx_module::{Host, Observer, State, Timer, Ui, Value};
 
     /// What the module saw, on the interface's thread.
     #[derive(Default)]
@@ -1496,9 +1506,24 @@ mod reach {
         /// frames it was given).
         pub fired: Vec<String>,
         pub timers: Vec<Timer>,
+        /// What `query` held each time a script set it.
+        pub heard: Vec<String>,
+        pub observer: Option<Observer>,
     }
     /// A host handle kept past its host, for a test of a post after it.
     pub static KEPT: Mutex<Option<Ui>> = Mutex::new(None);
+    /// A shared state's handle kept past its host (the test's own thread
+    /// alone reads it: it isn't `Send`).
+    pub struct SharedKept(pub zgx_module::Shared);
+    // SAFETY: Only the test's thread, the interface's, takes it out.
+    unsafe impl Send for SharedKept {}
+    pub static KEPT_SHARED: Mutex<Option<SharedKept>> = Mutex::new(None);
+    thread_local! {
+        static QUERY: std::cell::RefCell<Option<zgx_module::Shared>> = const { std::cell::RefCell::new(None) };
+    }
+    fn query_kept() -> zgx_module::Shared {
+        QUERY.with_borrow_mut(|q| q.take()).expect("a query kept")
+    }
     /// How many jobs were dropped, run or not.
     pub static DROPPED: AtomicUsize = AtomicUsize::new(0);
 
@@ -1516,6 +1541,7 @@ mod reach {
 
     zgx_module::register!("reach", |host: &Host| {
         let state = seen(host);
+        QUERY.with_borrow_mut(|q| *q = host.shared("query", Value::from("")));
         state.with(|seen| seen.thread = Some(std::thread::current().id()));
         let ui = host.ui();
         // `n` jobs posted from a thread of the module's own, in order.
@@ -1580,6 +1606,62 @@ mod reach {
         host.function("reach.fired", move |_| {
             state.with(|seen| Value::list(seen.fired.iter().map(|f| Value::from(f.as_str()))))
         });
+        // A model published from a thread: `{ n }` rows, set by a job.
+        let publisher = host.ui();
+        host.function("reach.publish", move |n| {
+            let (n, ui) = (n.num().unwrap_or(0.) as usize, publisher.clone());
+            std::thread::spawn(move || {
+                ui.post(move |host| {
+                    let feed = host.shared("feed", Value::NIL).unwrap();
+                    feed.set(Value::list((0..n).map(|i| {
+                        Value::record([
+                            ("id", Value::from(i as f64)),
+                            ("title", Value::from("row")),
+                        ])
+                    })));
+                });
+            })
+            .join()
+            .unwrap();
+            Value::NIL
+        });
+        // The same model again: nothing changes.
+        let feed = host.shared("feed", Value::NIL).unwrap();
+        host.function("reach.republish", move |_| {
+            let same = feed.get().get().to_owned();
+            Value::from(feed.set(same))
+        });
+        // How many rows the feed holds, read in a binding.
+        let counted = host.shared("feed", Value::NIL).unwrap();
+        host.function("reach.feed_len", move |_| {
+            Value::from(counted.get().get().len() as f64)
+        });
+        // Text added to `log`, and to the feed (a list: refused).
+        let (log, not_text) = (
+            host.shared("log", Value::from("")).unwrap(),
+            host.shared("feed", Value::NIL).unwrap(),
+        );
+        host.function("reach.append", move |text| {
+            let text = text.str().unwrap_or("");
+            let listed = not_text.append(text).err().map(|why| why.0);
+            log.append(text).unwrap();
+            listed.map_or(Value::NIL, |why| Value::from(why.as_str()))
+        });
+        // What a script set `query` to, each time.
+        let query = host.shared("query", Value::from("")).unwrap();
+        let observer = query.observe(|host, now| {
+            let now = now.str().unwrap_or("?").to_owned();
+            seen(host).with(|seen| seen.heard.push(now));
+        });
+        state.with(|seen| seen.observer = Some(observer));
+        host.function("reach.heard", move |_| {
+            state.with(|seen| Value::list(seen.heard.iter().map(|h| Value::from(h.as_str()))))
+        });
+        // A handle to `feed` kept past the host.
+        host.function("reach.keep_shared", move |_| {
+            *KEPT_SHARED.lock().unwrap() = Some(SharedKept(query_kept()));
+            Value::NIL
+        });
         // A handle kept past the host.
         let keep = host.ui();
         host.function("reach.keep", move |_| {
@@ -1604,10 +1686,25 @@ mod reach {
     }
 }
 
+const REACHING: &str = r#"
+local feed = ui.shared("feed")
+local query = ui.shared("query", "")
+local log = ui.shared("log", "")
+return ui.column {
+    ui.text { id = "out", "x" },
+    ui.text { id = "rows", function() local f = feed:get(); return if f then `{#f} rows` else "none" end },
+    ui.text { id = "first", function() local f = feed:get(); return if f and f[1] then f[1].title else "-" end },
+    ui.text { id = "len", function() return tostring(ui.call_sync("reach.feed_len")) end },
+    ui.text { id = "log", function() return log:get() end },
+    ui.button { id = "ask", on_click = function() query:set("first") end, "ask" },
+    ui.button { id = "again", on_click = function() query:set("second") end, "again" },
+}
+"#;
+
 /// An app with the `reach` module linked in.
 fn reaching() -> TestApp {
     TestApp::new(|runtime| {
-        let host = ScriptHost::inline(runtime, "app", "return ui.text { id = \"out\", \"x\" }");
+        let host = ScriptHost::inline(runtime, "app", REACHING);
         // SAFETY: The test's own `register!` entry.
         unsafe { host.enter_module(reach::zgx_module_v1, &reach::zgx_module_manifest) }.unwrap();
         host
@@ -1716,4 +1813,74 @@ fn a_module_holding_its_host_costs_an_idle_app_nothing() {
     app.settle();
     assert!(matches!(called(&app, "reach.jobs", Value::Nil), Value::List(l) if l.len() == 1));
     assert_eq!(app.wakes(), at_rest + 1);
+}
+
+/// A module publishes its model in a shared state from a job its thread
+/// posts: scripts show it, and a binding that asks the module for it
+/// follows it. The same model again changes nothing.
+#[test]
+fn a_module_publishes_its_model_in_shared_state() {
+    let mut app = reaching();
+    assert_eq!(app.text("rows"), "none");
+    assert_eq!(app.text("len"), "0");
+    called(&app, "reach.publish", Value::Num(3.));
+    assert!(app.wait_until(|app| app.text("rows") == "3 rows"));
+    assert_eq!(app.text("first"), "row");
+    assert_eq!(app.text("len"), "3", "followed through the module");
+    assert!(matches!(
+        called(&app, "reach.republish", Value::Nil),
+        Value::Bool(false)
+    ));
+    // The host sees the same state.
+    let Value::List(rows) = app.host.shared("feed", Value::Nil).get() else {
+        panic!("a list")
+    };
+    assert_eq!(rows.len(), 3);
+}
+
+/// Text added to a shared string shows; added to a list, it is refused.
+#[test]
+fn a_module_appends_to_a_shared_string() {
+    let mut app = reaching();
+    called(&app, "reach.publish", Value::Num(1.));
+    assert!(app.wait_until(|app| app.text("rows") == "1 rows"));
+    let refused = called(&app, "reach.append", Value::from("one "));
+    called(&app, "reach.append", Value::from("two"));
+    app.settle();
+    assert_eq!(app.text("log"), "one two");
+    assert!(matches!(refused, Value::Str(_)), "{refused:?}");
+}
+
+/// A module hears what scripts write to a shared state, from the first
+/// write after it begins to (not at once).
+#[test]
+fn a_module_observes_what_scripts_set() {
+    let mut app = reaching();
+    let heard = |app: &TestApp| format!("{:?}", called(app, "reach.heard", Value::Nil));
+    let none = format!("{:?}", Value::List(Slice::from(Vec::<Value>::new())));
+    assert_eq!(heard(&app), none);
+    app.click("ask");
+    app.click("again");
+    app.settle();
+    let want = format!(
+        "{:?}",
+        Value::List(Slice::from(vec![
+            Value::from("first"),
+            Value::from("second")
+        ]))
+    );
+    assert_eq!(heard(&app), want);
+}
+
+/// A shared state's handle kept past its host reads nil and sets nothing.
+#[test]
+fn a_shared_handle_past_its_host_holds_nothing() {
+    let mut app = reaching();
+    app.click("ask");
+    app.settle();
+    called(&app, "reach.keep_shared", Value::Nil);
+    drop(app);
+    let kept = reach::KEPT_SHARED.lock().unwrap().take().unwrap().0;
+    assert!(kept.get().get().is_nil());
+    assert!(!kept.set(zgx_module::Value::from("late")));
 }

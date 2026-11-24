@@ -165,7 +165,7 @@ To build, in this order, each already a method of `ScriptHost`:
 
 | | For | The host's today |
 | --- | --- | --- |
-| shared state: make, read, set, append, observe | a module publishing its model to scripts | `ScriptHost::shared` (`lib.rs:3030`), `Shared::set` and `append` (`value.rs:2801`, `2813`) |
+| shared state: make, read, set, append, observe | a module publishing its model to scripts | Built: `Api::shared` and its `get`, `set` (reconciling), `append`, `observe` (an effect on the state, from its next change): the host's own states |
 | a call back onto the interface's thread, from any thread | a module's worker threads | Built: `Api::post` (a host handle, `Registrar::host_ref`), drained by one task that waits on a waker, made the first time a module asks |
 | async actions: a promise the module settles later | `ui.call` | `ScriptHost::async_action` (`lib.rs:2747`) |
 | timers | a module that waits | Built: `Api::after`, on the host's timers (zgx's clock: a test's, frozen, virtual or the wall's) |

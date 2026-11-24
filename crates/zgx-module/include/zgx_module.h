@@ -97,6 +97,9 @@ typedef void (*zgx_job)(void *user, void *host);
 /* A timer's call (zgx_api.after), on the interface's thread, `host` lent: a
  * repeating timer goes on while it returns not 0. */
 typedef uint32_t (*zgx_fire)(void *user, void *host);
+/* A shared state's observer (zgx_api.shared_observe): `value` is what it
+ * holds now, lent; `host` the state's host handle, lent. */
+typedef void (*zgx_observe)(void *user, void *host, const zgx_value *value);
 
 /* What zgx_api.post returns: the job will run, or the host is gone. */
 #define ZGX_POSTED 1u
@@ -146,6 +149,26 @@ typedef struct zgx_api {
      * a host handle: from a job or a timer's call. */
     uint8_t *(*state)(void *host, const uint8_t *name, size_t len, size_t size, size_t align,
                       void (*init)(uint8_t *state), void (*free)(uint8_t *state));
+    /* The host's shared state `key` (scripts' `ui.shared(key)`), made with
+     * `initial` (taken) if there is none: a handle, NULL once the host is
+     * gone. */
+    void *(*shared)(void *host, const uint8_t *key, size_t len, zgx_value *initial);
+    /* What it holds, owned; `nil` once its host is gone. */
+    void (*shared_get)(const void *shared, zgx_value *out);
+    /* Sets it to `value` (taken), keeping the parts that are equal: not 0
+     * if anything changed. */
+    uint32_t (*shared_set)(const void *shared, zgx_value *value);
+    /* Adds text to the string it holds: ZGX_DONE, or ZGX_FAILED with why in
+     * `out`. */
+    uint32_t (*shared_append)(const void *shared, const uint8_t *text, size_t len,
+                              zgx_value *out);
+    /* Calls `call` each time it changes, from now: a subscription, NULL
+     * once its host is gone. */
+    void *(*shared_observe)(const void *shared, zgx_observe call, void *user, zgx_free free);
+    /* Lets go of a subscription. */
+    void (*shared_unobserve)(void *subscription);
+    /* Lets go of a shared state's handle. */
+    void (*shared_release)(void *shared);
 } zgx_api;
 
 /* What a call returns: done, or failed. Failing, it wrote why (a string)
