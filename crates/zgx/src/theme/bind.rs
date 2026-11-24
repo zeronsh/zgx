@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// A style property a token can set. Padding and margin carry the sides
 /// (top 1, right 2, bottom 4, left 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Field {
     /// The background colour, `Styled::bg`.
     Background,

@@ -76,9 +76,6 @@ pub enum GlassMaterial {
     /// A dark, saturated heads-up-display glass.
     #[default]
     Hud,
-    /// The system's newest glass: macOS 26's `NSGlassEffectView`, where it
-    /// has one; elsewhere, as `Hud`.
-    Liquid,
     /// The colourless material under a window's own background.
     UnderWindowBackground,
     /// The material behind a page's content.
@@ -105,6 +102,9 @@ pub enum GlassMaterial {
     FullScreenUi,
     /// The selection's highlight.
     Selection,
+    /// The system's newest glass: macOS 26's `NSGlassEffectView`, where it
+    /// has one; elsewhere, as `Hud`.
+    Liquid,
 }
 impl GlassMaterial {
     /// Its `NSVisualEffectMaterial` value.
