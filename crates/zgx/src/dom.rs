@@ -2772,6 +2772,14 @@ pub fn drawing_with<R>(
     drawn
 }
 
+/// Make `measure` what `canvas::measure_text_outside` measures with: text
+/// at a size in a font, wrapped at a width or not, as the page lays it out.
+pub fn set_text_measure(
+    measure: impl Fn(&str, f32, Option<f32>, &crate::text_layout::FontStyle) -> (f32, f32) + 'static,
+) {
+    crate::canvas::DOM_TEXT_MEASURE.with(|slot| *slot.borrow_mut() = Some(Box::new(measure)));
+}
+
 /// A canvas text's font, as the CSS `font` shorthand Canvas 2D takes.
 pub fn font_css(font: &crate::text_layout::FontStyle, size: f32) -> String {
     format!(

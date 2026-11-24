@@ -1514,6 +1514,18 @@ export type CanvasTextOptions = {
 	-- y' = b x + d y + f) mapping the placed text, as a turned shape's.
 	transform: { number }?,
 }
+-- What `ui.measure_text` measures text in: a canvas text's font options,
+-- and the widest its lines may be (wrapped there).
+export type MeasureTextStyle = {
+	size: number?,
+	weight: number?,
+	italic: boolean?,
+	tabular: boolean?,
+	font: string?,
+	line_height: number?,
+	letter_spacing: number?,
+	max_w: number?,
+}
 -- How `c:image` fills its box, cuts its corners and fades it.
 export type CanvasImageOptions = {
 	fit: Fit?,
@@ -24352,6 +24364,10 @@ declare ui: {
 	-- `width * scale` by `height * scale` pixels, `x`, `y` at its top left.
 	-- (nil with `file`; a `RenderedFile` with `file` and `append`.)
 	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<any>,
+	-- The points `text` takes in `style` (a canvas text's options: size,
+	-- font, weight, italic, tabular, line_height, letter_spacing), wrapped
+	-- at `max_w` if given, as the app lays text out; nothing is mounted.
+	measure_text: (text: string, style: MeasureTextStyle?) -> { w: number, h: number },
 	-- Out from (`cx`, `cy`) to radius `r` (`ry` down, for an ellipse), the
 	-- last colour past it; `transform` ({ a, b, c, d, e, f }) maps it after.
 	radial: (cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,

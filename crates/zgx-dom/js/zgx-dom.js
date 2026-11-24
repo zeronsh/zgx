@@ -1778,6 +1778,32 @@ export function zgx_measure(font, text) {
   return new Float64Array([m.width, m.fontBoundingBoxAscent + m.fontBoundingBoxDescent]);
 }
 
+// Text measured as the page lays it out, nothing of it shown: one hidden
+// box kept off the page, its font, spacing and features set each time, as
+// wide as the text up to `width` (wrapping there; -1 for none). Width and
+// height in CSS pixels.
+let textBox = null;
+export function zgx_measure_text(font, text, width, lineHeight, letterSpacing, features) {
+  if (!textBox) {
+    textBox = document.createElement("div");
+    textBox.setAttribute("aria-hidden", "true");
+    textBox.style.cssText = "position:absolute;left:-100000px;top:0;visibility:hidden;contain:layout style;pointer-events:none";
+    document.body.appendChild(textBox);
+  }
+  const s = textBox.style;
+  s.font = font;
+  s.lineHeight = lineHeight > 0 ? lineHeight + "px" : "normal";
+  s.letterSpacing = letterSpacing ? letterSpacing + "px" : "normal";
+  s.fontFeatureSettings = features || "normal";
+  s.whiteSpace = width >= 0 ? "pre-wrap" : "pre";
+  s.overflowWrap = width >= 0 ? "anywhere" : "normal";
+  s.width = "max-content";
+  s.maxWidth = width >= 0 ? width + "px" : "none";
+  textBox.textContent = text;
+  const r = textBox.getBoundingClientRect();
+  return new Float64Array([r.width, r.height]);
+}
+
 // A secondary click: the nearest element with a context menu (a span's own
 // before its paragraph's) builds its entries, told where and the span it
 // was on; one that opens a menu prevents the browser's.

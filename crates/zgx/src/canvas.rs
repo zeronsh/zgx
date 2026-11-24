@@ -744,6 +744,40 @@ thread_local! {
     /// While a canvas draws in the DOM: what `measure_text` measures with.
     pub(crate) static DOM_MEASURE: RefCell<Option<DomMeasure>> = const { RefCell::new(None) };
 }
+/// How a DOM host measures text anywhere, wrapped at a width or not
+/// (`measure_text_outside`).
+#[cfg(feature = "dom")]
+pub(crate) type DomTextMeasure =
+    Box<dyn Fn(&str, f32, Option<f32>, &crate::text_layout::FontStyle) -> (f32, f32)>;
+#[cfg(feature = "dom")]
+thread_local! {
+    /// What `measure_text_outside` measures with in the DOM: the host's,
+    /// from its start (`dom::set_text_measure`).
+    pub(crate) static DOM_TEXT_MEASURE: RefCell<Option<DomTextMeasure>> =
+        const { RefCell::new(None) };
+}
+/// The width and height `text` takes at `size` in `font`, wrapped to lines
+/// at most `width` wide, outside any canvas's drawing: in the DOM, as the
+/// browser lays it out (its host's measure). `None` where nothing measures:
+/// a desktop host measures in a scene of its own (as `ui.render_canvas`
+/// does), and a DOM host only once it has started.
+#[doc(hidden)]
+pub fn measure_text_outside(
+    text: &str,
+    size: f32,
+    width: Option<f32>,
+    font: &crate::text_layout::FontStyle,
+) -> Option<(f32, f32)> {
+    #[cfg(feature = "dom")]
+    {
+        DOM_TEXT_MEASURE.with(|slot| slot.borrow().as_ref().map(|m| m(text, size, width, font)))
+    }
+    #[cfg(not(feature = "dom"))]
+    {
+        let _ = (text, size, width, font);
+        None
+    }
+}
 /// Runs `draw` with `scene` as what `measure_text` measures in: a canvas's
 /// drawing, or one drawn with no window (`ui.render_canvas`).
 pub fn drawing_for<R>(scene: &Rc<RefCell<crate::scene::Scene>>, draw: impl FnOnce() -> R) -> R {

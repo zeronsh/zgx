@@ -384,6 +384,9 @@ fn start() {
         let event = Closure::<EventFn>::new(element_event);
         let keys = Closure::<dyn FnMut(String, String, String, u32) -> u32>::new(keys);
         js::zgx_init(sheet::BASE_CSS, &dispatch, &flush, &event, &keys);
+        // Text measured outside a canvas (`ui.measure_text`), as the page
+        // lays it out.
+        __dom::set_text_measure(measure_text);
         *started.borrow_mut() = Some(Started {
             _dispatch: dispatch,
             _flush: flush,
@@ -391,6 +394,32 @@ fn start() {
             _keys: keys,
         });
     });
+}
+
+/// The width and height `text` takes at `size` in `font`, wrapped at
+/// `width` or not, as the page lays it out (`zgx_measure_text`).
+fn measure_text(
+    text: &str,
+    size: f32,
+    width: Option<f32>,
+    font: &zgx::text_layout::FontStyle,
+) -> (f32, f32) {
+    let features = font
+        .features
+        .settings()
+        .iter()
+        .map(|(tag, value)| format!("\"{}\" {value}", String::from_utf8_lossy(tag)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let at = js::zgx_measure_text(
+        &__dom::font_css(font, size),
+        text,
+        width.map_or(-1., f64::from),
+        font.line_height.pixels().map_or(0., f64::from),
+        f64::from(font.letter_spacing.pixels()),
+        &features,
+    );
+    (at[0] as f32, at[1] as f32)
 }
 
 /// Apply the DOM operations written since the last flush, now (they are

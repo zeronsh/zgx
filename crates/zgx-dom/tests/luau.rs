@@ -50,6 +50,51 @@ fn a_luau_app_runs_in_the_dom() {
 }
 
 #[wasm_bindgen_test]
+fn luau_measures_text_as_the_page_lays_it_out() {
+    // `ui.measure_text` once a view is mounted: the browser's layout of
+    // the text, wrapped at `max_w` or not.
+    let runtime = Runtime::new();
+    let script = ScriptHost::inline(
+        &runtime,
+        "measure.luau",
+        r#"
+        local said = ui.state("said", "")
+        return ui.column {
+            ui.button { "Measure", on_click = function()
+                local short = ui.measure_text("Name")
+                local long = ui.measure_text("Name and surname")
+                local big = ui.measure_text("Name", { size = 28 })
+                local text = "one two three four five six seven eight nine ten"
+                local line = ui.measure_text(text)
+                local wrapped = ui.measure_text(text, { max_w = 80 })
+                said:set(table.concat({
+                    tostring(short.w > 0 and short.h > 0),
+                    tostring(long.w > short.w * 2),
+                    tostring(big.w > short.w * 1.5),
+                    tostring(wrapped.w <= 80),
+                    tostring(wrapped.h >= line.h * 3),
+                }, " "))
+            end },
+            ui.text { said },
+        }
+        "#,
+    );
+    script.reload().expect("the script loads");
+    let host = host();
+    let _mounted = zgx_dom::mount(&runtime, &host, script.view());
+    let button: web_sys::HtmlElement = host
+        .query_selector("button")
+        .unwrap()
+        .expect("a button")
+        .dyn_into()
+        .unwrap();
+    button.click();
+    zgx_dom::flush();
+    let text = host.text_content().unwrap_or_default();
+    assert!(text.contains("true true true true true"), "{text}");
+}
+
+#[wasm_bindgen_test]
 fn script_errors_are_caught_in_the_browser() {
     // Luau throws on a script error (a C++ exception, through WebAssembly's
     // exception handling): the host reports it rather than the page dying.
