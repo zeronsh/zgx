@@ -2,6 +2,8 @@
 
 Ready-made visual effects for [zgx](../zgx), made with its public API alone: an app that doesn't depend on this crate links none of it. Luau apps copy `luau/fx.luau` beside their scripts.
 
+It isn't on crates.io yet: use it from the repository (`zgx-fx = { git = "https://github.com/zeronsh/zgx" }`), with every other zgx crate from the same revision, as one from crates.io would be a second zgx. `luau/fx.luau` needs no crate.
+
 ```rust
 use zgx_fx::{FxExt, Glow};
 div().size(200., 80.).rounded(12.).fx(Glow::neon())

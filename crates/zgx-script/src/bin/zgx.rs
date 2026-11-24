@@ -561,7 +561,7 @@ fn video(args: Vec<String>) -> ExitCode {
         Err(error) => {
             eprintln!(
                 "zgx video: couldn't run {} ({error}); install zgx-video beside zgx or on PATH \
-                 (cargo install zgx-video)",
+                 (from zgx's repository: cargo install --path crates/zgx-video)",
                 video.display()
             );
             ExitCode::from(2)

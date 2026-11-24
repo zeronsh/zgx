@@ -12,7 +12,7 @@ zgx 0.1.10 is on crates.io (2026-11-04, tag `v0.1.10`; 0.1.0, the first, on 2026
 
 ## What is published
 
-zgx's crates: `zgx`, `zgx-components`, `zgx-text`, `zgx-gpu`, `zgx-3d`, `zgx-audio`, `zgx-fx`, `zgx-video`, `zgx-module`, `zgx-module-macros`, `zgx-desktop`, `zgx-script`, `zgx-run`, `zgx-terminal` and `zgx-ghostty-sys` (its declarations only; its `link` feature builds Ghostty from a pinned source with Zig). Not published (`publish = false`): `zgx-dom`, `zgx-demo` and `zgx-workload` (the benchmarks in `comparisons/`), `zgx-fingerprint` (the perf gate's) and `zgx-module`'s two test fixtures. Of those published, 0.1.10 had no `zgx-text`, `zgx-audio`, `zgx-fx`, `zgx-video`, `zgx-module` or `zgx-module-macros`: the next release is their first.
+zgx's crates: `zgx`, `zgx-components`, `zgx-text`, `zgx-gpu`, `zgx-3d`, `zgx-audio`, `zgx-module`, `zgx-module-macros`, `zgx-desktop`, `zgx-script`, `zgx-run`, `zgx-terminal` and `zgx-ghostty-sys` (its declarations only; its `link` feature builds Ghostty from a pinned source with Zig). Not published (`publish = false`): `zgx-fx` and `zgx-video` (held: a held crate can be published later, a published name can't be taken back), `zgx-dom`, `zgx-demo` and `zgx-workload` (the benchmarks in `comparisons/`), `zgx-fingerprint` (the perf gate's) and `zgx-module`'s two test fixtures. Of those published, 0.1.10 had no `zgx-text`, `zgx-audio`, `zgx-module` or `zgx-module-macros`: the next release is their first.
 
 And nine forks, as zgx's own crates, published first (0.1.10 had no `zgx-vte`, `zgx-swash` or `zgx-arboard`):
 
@@ -93,10 +93,10 @@ A crate on crates.io can't be deleted, only yanked: a version published is publi
 
 crates.io limits how fast one account publishes, new names apart from new versions: five new names at once, then one each 10 minutes; thirty new versions at once, then one a minute (the defaults in [crates.io's `rate_limiter.rs`](https://github.com/rust-lang/crates.io/blob/main/src/rate_limiter.rs), read 2026-11-24; an account can have limits of its own, so check it again). `cargo publish --workspace` orders crates by their dependencies, not by that limit, so a release with more than five new names publishes one crate at a time, each once the one before is in the index.
 
-The next release has nine names crates.io had none of on 2026-11-24 (`zgx-swash`, `zgx-vte`, `zgx-arboard`, `zgx-audio`, `zgx-module-macros`, `zgx-module`, `zgx-text`, `zgx-fx`, `zgx-video`). Nothing reserves them until they are published. In order, the new ones in bold:
+The next release has seven names crates.io had none of on 2026-11-24 (`zgx-swash`, `zgx-vte`, `zgx-arboard`, `zgx-audio`, `zgx-module-macros`, `zgx-module`, `zgx-text`). Nothing reserves them until they are published. In order, the new ones in bold:
 
 - [ ] Forks: `zgx-harfrust`, **`zgx-swash`**, `zgx-cosmic-text`, `zgx-taffy`, `zgx-mlua`, **`zgx-vte`**, `zgx-alacritty-terminal`, **`zgx-arboard`**. `zgx-zune-jpeg` is unchanged.
 - [ ] `zgx`, **`zgx-audio`**, **`zgx-module-macros`**: the first five new names.
 - [ ] **`zgx-module`**, once the limit lets a sixth through, then **`zgx-text`**, 10 minutes after it.
 - [ ] `zgx-gpu`, `zgx-components`, `zgx-3d`, `zgx-ghostty-sys`, `zgx-script`, `zgx-terminal`, `zgx-desktop`, `zgx-run`, each after the crates it depends on.
-- [ ] **`zgx-fx`** and **`zgx-video`**, 10 minutes apart, last: no published crate waits on them. They are the only two of the nine that can be held with `publish = false` alone. Holding `zgx-video` means changing what tells people to run `cargo install zgx-video` (`zgx video`'s error, in `crates/zgx-script/src/bin/zgx.rs`). The others can't be: Cargo needs every dependency on crates.io, optional ones too.
+- [ ] Not `zgx-fx` or `zgx-video`: held with `publish = false`, as no published crate needs them (`zgx-gpu`'s path dev-dependency on `zgx-fx` is left out of its package). Their names stay unclaimed, and their docs and `zgx video`'s error say "from the repository"; publishing them later changes those. The other new zgx crates can't be held this way: Cargo needs every dependency on crates.io, optional ones too.

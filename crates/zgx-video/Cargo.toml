@@ -6,6 +6,8 @@ license.workspace = true
 repository.workspace = true
 readme = "README.md"
 rust-version.workspace = true
+# Held from crates.io for now: used from the repository (docs/releasing.md).
+publish = false
 description = "Programmatic video for zgx: an interface played on a virtual clock, rendered frame by frame to a video file, with a studio to preview it. Optional: an app that doesn't depend on it pays nothing."
 keywords = ["gui", "video", "animation", "motion-graphics", "luau"]
 categories = ["multimedia::video", "rendering"]
