@@ -2668,6 +2668,7 @@ struct HitMemo {
 /// How long a `snap` box's size holds still before it's taken to have stopped:
 /// longer than a slow hand leaves between moves (an eighth of a second, and
 /// frames between them), or it would settle and move again by turns.
+#[doc(hidden)]
 pub const SNAP_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
 struct Measurement {
     constraints: Constraints,
@@ -16156,6 +16157,7 @@ impl Scene {
     }
     /// When a `snap` box moving now can be taken to have stopped
     /// ([`Scene::settle_snaps`]). `None` with none moving.
+    #[doc(hidden)]
     pub fn snaps_settle_at(&self) -> Option<std::time::Instant> {
         self.snap_sizes
             .values()
@@ -16165,6 +16167,7 @@ impl Scene {
     }
     /// Lay out as they rest the `snap` boxes whose size hasn't changed for
     /// [`SNAP_SETTLE`] by `now`: whether there were any.
+    #[doc(hidden)]
     pub fn settle_snaps(&mut self, now: std::time::Instant) -> bool {
         if self.snap_sizes.is_empty() {
             return false;
