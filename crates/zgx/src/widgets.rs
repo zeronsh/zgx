@@ -1909,11 +1909,40 @@ impl EditorHandle {
         if !self.multiline {
             return;
         }
+        if insets.is_none() {
+            self.release_groups();
+        }
         self.hint.line_cache().set_insets(insets.clone());
         self.natural.wrapped.set_insets(insets.clone());
         self.natural.unwrapped.set_insets(insets);
         self.natural.invalidate_spans();
         self.refresh();
+    }
+    /// Its lines have no insets now, so none is in a scroll group: their
+    /// groups' layers go, with the line nodes in them, and its group
+    /// scrollbar shows none (the draw of an area without insets looks for
+    /// no group).
+    #[cold]
+    #[inline(never)]
+    fn release_groups(&self) {
+        let Some(code) = self.hint.code() else {
+            return;
+        };
+        let mut drawn = code.groups_drawn.borrow_mut();
+        let Some(drawn) = drawn.as_mut() else {
+            return;
+        };
+        let mut s = self.scene.borrow_mut();
+        for (_, (clip, _)) in drawn.layers.drain(..) {
+            if s.contains(clip) {
+                s.remove(clip);
+            }
+        }
+        (code.line_nodes.borrow_mut()).retain(|(_, node)| s.contains(*node));
+        drawn.moved.clear();
+        if let Some(bar) = &drawn.bar {
+            bar.shown.set(None);
+        }
     }
     /// Shapes drawn beside each line of a text area laid out by its lines
     /// (`LineMark`: a list item's number, a quote's rule, a code block's
@@ -11064,9 +11093,11 @@ fn place_lines_in_room(
 ) {
     // Each shown group's layer (made as it first shows), and those that no
     // longer show gone, with their lines.
-    let groups = lines
-        .grouped()
-        .then(|| place_groups(s, lines, code, (layer, scroll), shown.clone(), free));
+    // An area that had groups and has none now lets go of their layers too.
+    let groups = (lines.grouped() || code.groups_drawn.borrow().is_some()).then(|| {
+        let nodes = (&mut *pool, &mut *free);
+        place_groups(s, lines, code, (layer, scroll), shown.clone(), nodes)
+    });
     // Where line `i` goes: its group's layer, from its frame, or the lines'.
     let home = |i: usize| -> (NodeId, f32, f32) {
         let placed = groups.as_ref().and_then(|groups| {
@@ -11199,14 +11230,16 @@ type BarShown = (u32, (f32, f32), f32, f32);
 /// The layers of the scroll groups with lines in `shown`, in the lines'
 /// `layer`: made as each first shows, each clip placed at its group's frame
 /// and its lines' layer moved by its offset. Those that no longer show go
-/// (their nodes taken out of `free`). Each shown group and its layers.
+/// with the line nodes in them, shown ones (`pool`: its line left the group)
+/// and free ones alike, each taken out of what holds it. Each shown group
+/// and its layers.
 fn place_groups(
     s: &mut Scene,
     lines: &crate::editor_lines::LinesLayout,
     code: &CodeHint,
     (layer, scroll): (NodeId, (f32, f32)),
     shown: std::ops::Range<usize>,
-    free: &mut Vec<NodeId>,
+    (pool, free): (&mut Vec<(usize, NodeId)>, &mut Vec<NodeId>),
 ) -> Vec<(u32, (NodeId, NodeId))> {
     let mut wanted: Vec<(u32, crate::editor_lines::Group)> = Vec::new();
     for i in shown {
@@ -11222,13 +11255,14 @@ fn place_groups(
     }
     let drawn = drawn.get_or_insert_default();
     // Those not shown now go, with their lines.
-    drawn.layers.retain(|(id, (clip, content))| {
+    drawn.layers.retain(|(id, (clip, _))| {
         let keep = s.contains(*clip) && wanted.iter().any(|(group, _)| group == id);
         if !keep {
-            free.retain(|node| s.contains(*node) && s.parent(*node) != Some(*content));
             if s.contains(*clip) {
                 s.remove(*clip);
             }
+            pool.retain(|(_, node)| s.contains(*node));
+            free.retain(|node| s.contains(*node));
         }
         keep
     });
