@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **A window's glass, frame and level from `zgx.json` and `ui.window`, by platform** (zgx-script, zgx-run): `glass` takes a material and `plain` (`{ "material": "under_window_background", "plain": true }`), beside `true`; `decorations`, `resizable`, `transparent`, `shadow`, `covers_display` and `level` (`"always_on_top"`) are new keys of both, asked of the platform as a Rust host's `WindowOptions` asks them. `"macos"`, `"windows"` and `"linux"` blocks replace a window's keys on that platform, key by key (a table such as `glass` whole); a block holds window keys only, and every block is checked on every platform. `ui.window`'s types and the lint know them all (the lint no longer warns on `visible` or the size limits). [Native](docs/reference/native.md#windows) lists them.

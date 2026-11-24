@@ -1686,17 +1686,35 @@ export type CommandOptions = {
 	[number]: never,
 }
 
--- `ui.window { id, open = state, node }`: a window of the app's own (a
--- settings window), open while `open` is true; closing it sets `open` false.
--- Its node is its content. It shares the app's state.
-export type WindowOptions = {
-	read id: string,
+-- A glass's material (`ui.window`'s and zgx.json's `glass`): the platform's
+-- blur behind the window (macOS's `NSVisualEffectMaterial`; elsewhere the
+-- nearest the platform has).
+export type GlassMaterial =
+	"hud"
+	| "liquid"
+	| "under_window_background"
+	| "under_page_background"
+	| "window_background"
+	| "content_background"
+	| "titlebar"
+	| "header_view"
+	| "sidebar"
+	| "menu"
+	| "popover"
+	| "sheet"
+	| "tool_tip"
+	| "full_screen_ui"
+	| "selection"
+
+-- A window's keys: what `ui.window` takes besides its id, its `open` and its
+-- content, and what a platform's block (`macos`, `windows`, `linux`) may
+-- hold to replace them there.
+export type WindowKeys = {
 	-- Defaults to the id.
 	read title: string?,
 	-- Points; 480 by 360 by default.
 	read width: number?,
 	read height: number?,
-	read open: State<boolean>,
 	-- Its frame saved under this name as it moves and resizes, and reopened
 	-- where it was left (macOS).
 	read frame_autosave: string?,
@@ -1717,8 +1735,38 @@ export type WindowOptions = {
 	read min_height: number?,
 	read max_width: number?,
 	read max_height: number?,
-	read [number]: Node | ((win: OwnWindow) -> Node),
+	-- The desktop blurred behind it: true (the HUD material), false, or a
+	-- material, `plain` for the blur alone (no tint or saturation of the
+	-- platform's).
+	read glass: (boolean | { read material: GlassMaterial?, read plain: boolean? })?,
+	-- The platform's own frame and title bar (true by default).
+	read decorations: boolean?,
+	-- Whether the person can resize it (true by default).
+	read resizable: boolean?,
+	-- See-through where nothing is drawn (false by default).
+	read transparent: boolean?,
+	-- The platform's shadow around it (true by default).
+	read shadow: boolean?,
+	-- Over the whole display, the menu bar and dock included (false by
+	-- default).
+	read covers_display: boolean?,
+	-- Where it sits among windows.
+	read level: ("normal" | "always_on_top")?,
 }
+
+-- `ui.window { id, open = state, node }`: a window of the app's own (a
+-- settings window), open while `open` is true; closing it sets `open` false.
+-- Its node is its content. It shares the app's state. A platform's block
+-- replaces its keys there, per key (a table such as `glass` whole):
+-- `macos = { decorations = true }`.
+export type WindowOptions = Merge<WindowKeys, {
+	read id: string,
+	read open: State<boolean>,
+	read macos: WindowKeys?,
+	read windows: WindowKeys?,
+	read linux: WindowKeys?,
+	read [number]: Node | ((win: OwnWindow) -> Node),
+}>
 
 -- A window's own state, as its content reads it: whether it is the active
 -- window, whether it shows, and its size in points. `ui.window.active` and the

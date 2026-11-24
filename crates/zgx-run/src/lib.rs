@@ -154,6 +154,69 @@ struct WindowConfig {
     /// button's top left in the content's points (`traffic_lights`,
     /// `{ "x": 18, "y": 22 }`; `WindowOptions::traffic_lights`).
     traffic_lights: Option<(f64, f64)>,
+    /// Its glass, frame, level and the rest
+    /// (`zgx_script::window_look::LOOK_KEYS`).
+    look: zgx_script::window_look::WindowLook,
+}
+
+/// `zgx.json`'s window keys: those a platform's block (`"macos"`,
+/// `"windows"`, `"linux"`) may hold, besides the look's
+/// (`zgx_script::window_look::LOOK_KEYS`).
+const WINDOW_KEYS: [&str; 12] = [
+    "title",
+    "width",
+    "height",
+    "min_width",
+    "max_width",
+    "max_height",
+    "min_height",
+    "titlebar",
+    "caption_height",
+    "traffic_lights",
+    "frame_autosave",
+    "visible",
+];
+
+/// `look` laid onto `options`: what it says replaces the option's default.
+fn apply_look(options: &mut WindowOptions, look: &zgx_script::window_look::WindowLook) {
+    use zgx_script::window_look::{Level, Material};
+    if let Some(glass) = look.glass {
+        let material = match glass.material {
+            Material::Hud => zgx_desktop::GlassMaterial::Hud,
+            Material::Liquid => zgx_desktop::GlassMaterial::Liquid,
+            Material::UnderWindowBackground => zgx_desktop::GlassMaterial::UnderWindowBackground,
+            Material::UnderPageBackground => zgx_desktop::GlassMaterial::UnderPageBackground,
+            Material::WindowBackground => zgx_desktop::GlassMaterial::WindowBackground,
+            Material::ContentBackground => zgx_desktop::GlassMaterial::ContentBackground,
+            Material::Titlebar => zgx_desktop::GlassMaterial::Titlebar,
+            Material::HeaderView => zgx_desktop::GlassMaterial::HeaderView,
+            Material::Sidebar => zgx_desktop::GlassMaterial::Sidebar,
+            Material::Menu => zgx_desktop::GlassMaterial::Menu,
+            Material::Popover => zgx_desktop::GlassMaterial::Popover,
+            Material::Sheet => zgx_desktop::GlassMaterial::Sheet,
+            Material::ToolTip => zgx_desktop::GlassMaterial::ToolTip,
+            Material::FullScreenUi => zgx_desktop::GlassMaterial::FullScreenUi,
+            Material::Selection => zgx_desktop::GlassMaterial::Selection,
+        };
+        let made = zgx_desktop::Glass::new(material);
+        options.glass = Some(if glass.plain { made.plain() } else { made });
+    }
+    let set = |option: &mut bool, given: Option<bool>| {
+        if let Some(given) = given {
+            *option = given;
+        }
+    };
+    set(&mut options.decorations, look.decorations);
+    set(&mut options.resizable, look.resizable);
+    set(&mut options.transparent, look.transparent);
+    set(&mut options.shadow, look.shadow);
+    set(&mut options.covers_display, look.covers_display);
+    if let Some(level) = look.level {
+        options.level = match level {
+            Level::Normal => zgx_desktop::WindowLevel::Normal,
+            Level::AlwaysOnTop => zgx_desktop::WindowLevel::AlwaysOnTop,
+        };
+    }
 }
 impl AppConfig {
     /// The config for the script at `script`: its directory's `zgx.json`
@@ -167,6 +230,25 @@ impl AppConfig {
     fn read(
         script: &Path,
     ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        Self::read_for(script, zgx_script::window_look::this_platform())
+    }
+    /// As [`read`](Self::read), on `platform` (its block's keys over the
+    /// window's own). The other platforms' blocks are read too, so what
+    /// one says wrong is told on every platform.
+    fn read_for(
+        script: &Path,
+        platform: &str,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        Self::read_on(script, platform, true)
+    }
+    /// [`read_for`](Self::read_for), the other platforms' blocks read too
+    /// if `others`.
+    fn read_on(
+        script: &Path,
+        platform: &str,
+        others: bool,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        use zgx_script::window_look::{Given, LOOK_KEYS, PLATFORMS, WindowLook, check_block};
         let dir = script.parent().unwrap_or(Path::new("."));
         let name = dir
             .canonicalize()
@@ -195,6 +277,7 @@ impl AppConfig {
                 config,
                 Default::default(),
                 WindowConfig {
+                    look: WindowLook::default(),
                     frame_autosave: None,
                     visible: true,
                     max_size: None,
@@ -209,8 +292,42 @@ impl AppConfig {
         let object = json
             .as_object()
             .ok_or_else(|| fail("not an object".into()))?;
+        // The window's keys a platform's block may hold; every block is
+        // checked, this platform's or not.
+        let window_keys: Vec<&str> = WINDOW_KEYS
+            .iter()
+            .copied()
+            .chain(LOOK_KEYS.iter().map(|key| key.name))
+            .collect();
+        for name in PLATFORMS {
+            match object.get(name) {
+                None => {}
+                Some(serde_json::Value::Object(block)) => {
+                    check_block(name, block.keys().map(String::as_str), &window_keys)
+                        .map_err(fail)?
+                }
+                Some(_) => return Err(fail(format!("`{name}` is not an object of window keys"))),
+            }
+        }
+        // Each other platform's block as that platform reads it: what it
+        // says wrong is an error here too.
+        if others {
+            for other in PLATFORMS {
+                if other != platform && object.contains_key(other) {
+                    Self::read_on(script, other, false).map_err(|e| format!("{e} (on {other})"))?;
+                }
+            }
+        }
+        // A window key: this platform's block's, else the window's own
+        // (shallow: a table such as `glass` is the block's whole).
+        let block = object.get(platform).and_then(serde_json::Value::as_object);
+        let get = |key: &str| {
+            block
+                .and_then(|block| block.get(key))
+                .or_else(|| object.get(key))
+        };
         let number = |key: &str| -> Result<Option<f64>, String> {
-            match object.get(key) {
+            match get(key) {
                 None => Ok(None),
                 Some(v) => v
                     .as_f64()
@@ -219,7 +336,7 @@ impl AppConfig {
             }
         };
         let string = |key: &str| -> Result<Option<String>, String> {
-            match object.get(key) {
+            match get(key) {
                 None => Ok(None),
                 Some(v) => v
                     .as_str()
@@ -228,24 +345,9 @@ impl AppConfig {
             }
         };
         for key in object.keys() {
-            if ![
-                "title",
-                "width",
-                "height",
-                "min_width",
-                "max_width",
-                "max_height",
-                "min_height",
-                "titlebar",
-                "caption_height",
-                "traffic_lights",
-                "glass",
-                "app_id",
-                "application_id",
-                "frame_autosave",
-                "visible",
-            ]
-            .contains(&key.as_str())
+            if !window_keys.contains(&key.as_str())
+                && !["app_id", "application_id"].contains(&key.as_str())
+                && !PLATFORMS.contains(&key.as_str())
                 && !zgx_script::app_config::KEYS.contains(&key.as_str())
             {
                 return Err(fail(format!("unknown key `{key}`")));
@@ -273,7 +375,7 @@ impl AppConfig {
             height => height,
         };
         // `{ "x": 18, "y": 22 }`: the close button's top left.
-        let traffic_lights = match object.get("traffic_lights") {
+        let traffic_lights = match get("traffic_lights") {
             None => None,
             Some(value) => {
                 let at = value.as_object().filter(|at| at.len() == 2);
@@ -301,13 +403,9 @@ impl AppConfig {
                 )));
             }
         };
-        config.glass = match object.get("glass") {
-            None => false,
-            Some(v) => v
-                .as_bool()
-                .ok_or_else(|| fail("`glass` is not a boolean".into()))?,
-        };
-        let visible = match object.get("visible") {
+        let look = WindowLook::parse(|key| get(key).map(Given::from)).map_err(fail)?;
+        config.glass = look.glass.is_some();
+        let visible = match get("visible") {
             None => true,
             Some(v) => v
                 .as_bool()
@@ -317,7 +415,7 @@ impl AppConfig {
             config.app_id = id;
         }
         config.application_id = string("application_id")?;
-        let frame_autosave = match object.get("frame_autosave") {
+        let frame_autosave = match get("frame_autosave") {
             None | Some(serde_json::Value::Bool(false)) => None,
             Some(serde_json::Value::Bool(true)) => Some(config.app_id.clone()),
             Some(serde_json::Value::String(name)) if !name.is_empty() => Some(name.clone()),
@@ -330,6 +428,7 @@ impl AppConfig {
             config,
             app,
             WindowConfig {
+                look,
                 frame_autosave,
                 visible,
                 max_size,
@@ -510,13 +609,14 @@ pub fn run_hosting(
     let bundle = bundle.map(|bundle| (bundle.files(), bundle.entry));
     let notice = LAUNCH.lock().unwrap().notice.take();
     let WindowConfig {
+        look,
         frame_autosave,
         visible,
         max_size,
         caption_height,
         traffic_lights,
     } = window_config;
-    let options = WindowOptions {
+    let mut options = WindowOptions {
         title: config.title.clone(),
         width: config.width,
         height: config.height,
@@ -530,6 +630,7 @@ pub fn run_hosting(
         visible,
         ..Default::default()
     };
+    apply_look(&mut options, &look);
     let launched: Vec<PathBuf> = args
         .iter()
         .map(PathBuf::from)
@@ -815,7 +916,7 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
             if wanted && !shown {
                 let (min_size, max_size) = host.window_size_limits(&window.id);
                 let extras = host.window_extras(&window.id);
-                let options = WindowOptions {
+                let mut options = WindowOptions {
                     title: window.title.clone(),
                     min_size,
                     max_size,
@@ -834,6 +935,7 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                         .is_none_or(|visible| visible.with_untracked(Value::truthy)),
                     ..Default::default()
                 };
+                apply_look(&mut options, &extras.look);
                 let (view_host, state, id) = (host.clone(), window.open.clone(), window.id.clone());
                 let own = extras.state.clone();
                 let visible = extras.visible.clone();
@@ -1033,6 +1135,155 @@ mod tests {
                 "{wrong}: {error}"
             );
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A platform's block replaces the window's keys on that platform,
+    /// shallow and per key: a table (`glass`) is the block's whole, and
+    /// the keys it doesn't have stay the window's.
+    #[test]
+    fn a_platforms_block_replaces_the_window_keys_it_has() {
+        use zgx_script::window_look::{Glass, Level, Material};
+        let dir = std::env::temp_dir().join(format!("zgx-run-platforms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "title": "A", "decorations": false, "level": "always_on_top",
+                 "glass": { "material": "sidebar", "plain": true },
+                 "macos": { "decorations": true, "glass": { "material": "hud" } },
+                 "windows": { "title": "B", "caption_height": 38 } }"#,
+        )
+        .unwrap();
+        let on = |platform: &str| AppConfig::read_for(&script, platform).unwrap();
+        let (mac, _, mac_window) = on("macos");
+        assert_eq!(mac_window.look.decorations, Some(true));
+        assert_eq!(
+            mac_window.look.glass,
+            Some(Glass {
+                material: Material::Hud,
+                plain: false
+            }),
+            "the block's glass whole: its `plain` isn't the window's"
+        );
+        assert_eq!(
+            (mac.title.as_str(), mac_window.look.level),
+            ("A", Some(Level::AlwaysOnTop))
+        );
+        let (linux, _, linux_window) = on("linux");
+        assert_eq!(linux_window.look.decorations, Some(false));
+        assert_eq!(
+            linux_window.look.glass,
+            Some(Glass {
+                material: Material::Sidebar,
+                plain: true
+            })
+        );
+        assert_eq!(
+            (linux.title.as_str(), linux_window.caption_height),
+            ("A", None)
+        );
+        let (windows, _, windows_window) = on("windows");
+        assert_eq!(
+            (windows.title.as_str(), windows_window.caption_height),
+            ("B", Some(38.))
+        );
+        assert_eq!(windows_window.look.decorations, Some(false));
+        // What a block may not hold, told on every platform (a slip in
+        // `"windows"` on a Mac too).
+        for (json, said) in [
+            (
+                r#"{ "macos": { "app_id": "x" } }"#,
+                "`macos` has `app_id`, which isn't a window key that can differ by platform",
+            ),
+            (
+                r#"{ "linux": { "windows": {} } }"#,
+                "`linux` holds `windows`: a platform's block holds window keys, not another block",
+            ),
+            (
+                r#"{ "windows": 3 }"#,
+                "`windows` is not an object of window keys",
+            ),
+            (
+                r#"{ "windows": { "titel": "x" } }"#,
+                "`windows` has `titel`",
+            ),
+            (r#"{ "ios": { "title": "x" } }"#, "unknown key `ios`"),
+            (
+                r#"{ "linux": { "glass": "yes" } }"#,
+                "`glass` is not a boolean or { material, plain }",
+            ),
+        ] {
+            std::fs::write(dir.join("zgx.json"), json).unwrap();
+            for platform in zgx_script::window_look::PLATFORMS {
+                let error = AppConfig::read_for(&script, platform).unwrap_err();
+                assert!(error.contains(said), "{json} on {platform}: {error}");
+            }
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The look's keys reach the window's options as the platform's calls
+    /// take them; what they don't say keeps the options' defaults.
+    #[test]
+    fn a_windows_look_reaches_its_options() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-look-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        let options = |json: &str| {
+            std::fs::write(dir.join("zgx.json"), json).unwrap();
+            let (_, _, window) = AppConfig::read(&script).unwrap();
+            let mut options = WindowOptions::default();
+            apply_look(&mut options, &window.look);
+            options
+        };
+        let plain = options("{}");
+        let defaults = WindowOptions::default();
+        assert_eq!(
+            (
+                plain.glass,
+                plain.decorations,
+                plain.resizable,
+                plain.transparent,
+                plain.shadow,
+                plain.covers_display,
+                plain.level
+            ),
+            (
+                defaults.glass,
+                defaults.decorations,
+                defaults.resizable,
+                defaults.transparent,
+                defaults.shadow,
+                defaults.covers_display,
+                defaults.level
+            )
+        );
+        let intro = options(
+            r#"{ "transparent": true, "decorations": false, "resizable": false, "covers_display": true,
+                 "level": "always_on_top", "shadow": false,
+                 "glass": { "material": "under_window_background", "plain": true } }"#,
+        );
+        assert!(
+            intro.transparent
+                && !intro.decorations
+                && !intro.resizable
+                && intro.covers_display
+                && !intro.shadow
+        );
+        assert_eq!(intro.level, zgx_desktop::WindowLevel::AlwaysOnTop);
+        assert_eq!(
+            intro.glass,
+            Some(
+                zgx_desktop::Glass::new(zgx_desktop::GlassMaterial::UnderWindowBackground).plain()
+            )
+        );
+        assert_eq!(
+            options(r#"{ "glass": true }"#).glass,
+            Some(zgx_desktop::Glass::default())
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
