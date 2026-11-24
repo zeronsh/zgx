@@ -497,6 +497,9 @@ fn supervise(
     }
 }
 
+/// How many of the files `zgx build` left out it names.
+const LEFT_OUT_SHOWN: usize = 50;
+
 /// `zgx build [--out <dir>] [--target <triple>]… [--version <v>]
 /// [--ui <bytecode|source>] [--allow <file>]… <app-dir>`.
 fn build(args: Vec<String>) -> ExitCode {
@@ -571,6 +574,20 @@ fn build(args: Vec<String>) -> ExitCode {
                 },
                 written.ui_in.as_secs_f64()
             );
+            // Told, so a file the app reads at run time isn't missed there.
+            if !written.left_out.is_empty() {
+                println!(
+                    "left out {} of the app's files, not of a kind a host reads, or hidden \
+                     (--ui source keeps every file):",
+                    written.left_out.len()
+                );
+                for file in written.left_out.iter().take(LEFT_OUT_SHOWN) {
+                    println!("  {file}");
+                }
+                if written.left_out.len() > LEFT_OUT_SHOWN {
+                    println!("  and {} more", written.left_out.len() - LEFT_OUT_SHOWN);
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {

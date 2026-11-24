@@ -1506,12 +1506,13 @@ fn a_bundle_of_source_runs_as_its_folder_and_checks_its_modules() {
             ..Default::default()
         };
         let written = write(&app, &options).unwrap();
-        let every = if ui == Ui::Source { 2 } else { 0 };
+        // (The licence in both.)
+        let every = if ui == Ui::Source { 2 } else { 1 };
         assert_eq!((written.files, written.scripts), (4 + every, 3));
         out
     };
-    // Files no host reads, which source keeps, and what isn't the app's,
-    // which neither does.
+    // Files no host reads, which source keeps (bytecode the licence alone),
+    // and what isn't the app's, which neither does.
     write_file(&app.join("assets/LICENSE.symbols"), "a licence");
     write_file(&app.join("templates/.base.json"), "{}");
     write_file(&app.join(".zgx/types.d.luau"), "");
@@ -1757,6 +1758,80 @@ fn a_bundle_of_source_runs_as_its_folder_and_checks_its_modules() {
         refused.contains("isn't the library its manifest names"),
         "{refused}"
     );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+/// A bundle of bytecode keeps the licences beside the files it ships, and
+/// says which of the app's files it left out; one of source leaves out none.
+#[test]
+fn a_bundle_keeps_licences_and_says_what_it_left_out() {
+    use zgx_script::app_bundle::{Options, Ui, write};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-left-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let write_file = |path: &std::path::Path| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{}").unwrap();
+    };
+    let app = base.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("app.luau"), "return ui.text 'x'").unwrap();
+    std::fs::write(
+        app.join("zgx.json"),
+        r#"{ "packages": { "kit": "../kit" } }"#,
+    )
+    .unwrap();
+    let licences = [
+        "LICENSE",
+        "icons/LICENSE.symbols",
+        "icons/Licence-MIT.md",
+        "fonts/COPYING",
+        "fonts/NOTICES.txt",
+        "LICENSES/MIT.txt",
+    ];
+    let left = [
+        ".base.json",
+        ".cache/",
+        "noticeboard.txt",
+        "licensed.txt",
+        "sounds/click.wav",
+        "templates/v2/.base.json",
+    ];
+    for name in licences.iter().chain(&left) {
+        let name = name.replace(".cache/", ".cache/deep/file.json");
+        write_file(&app.join(name));
+    }
+    for name in ["LICENSE", "readme.txt", ".hidden"] {
+        write_file(&base.join("kit").join(name));
+    }
+    // Not the app's: not told.
+    for name in [".git/config", ".zgx/types.d.luau", ".DS_Store"] {
+        write_file(&app.join(name));
+    }
+    let made = |ui: Ui| {
+        let out = base.join("dist");
+        let options = Options {
+            out: Some(out.clone()),
+            ui,
+            ..Default::default()
+        };
+        (out, write(&app, &options).unwrap().left_out)
+    };
+    let (out, told) = made(Ui::Bytecode);
+    for name in licences.iter().chain(&[".packages/kit/LICENSE"]) {
+        assert!(out.join("ui").join(name).is_file(), "{name}");
+    }
+    let mut expected: Vec<String> = left.iter().map(|&name| name.to_owned()).collect();
+    expected.extend([".packages/kit/.hidden", ".packages/kit/readme.txt"].map(str::to_owned));
+    expected.sort();
+    assert_eq!(told, expected);
+    for name in &told {
+        assert!(!out.join("ui").join(name).exists(), "{name}");
+    }
+    let (out, told) = made(Ui::Source);
+    assert_eq!(told, Vec::<String>::new());
+    for name in &expected {
+        assert!(out.join("ui").join(name).exists(), "{name}");
+    }
     std::fs::remove_dir_all(base).unwrap();
 }
 
