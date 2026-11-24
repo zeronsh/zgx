@@ -53,6 +53,7 @@ ui.contribute("panel:notes", Notes {})
             name: "notes".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -72,6 +73,7 @@ fn plugins_are_set_at_runtime_and_load_on_reload() {
         name: "late".into(),
         entry,
         grants: vec![],
+        app_root: None,
     }]);
     h.host.reload().unwrap();
     h.settle();
@@ -110,6 +112,7 @@ ui.contribute("bar", ui.text { "peeked", id = "peeked" })
                 name: "peek".into(),
                 entry,
                 grants,
+                app_root: None,
             }]);
             host
         }
@@ -160,6 +163,7 @@ fn plugins_reach_only_what_the_app_exposes() {
                 name: "nosy".into(),
                 entry,
                 grants: vec![],
+                app_root: None,
             }]);
             host
         });
@@ -199,11 +203,13 @@ fn a_slot_from_a_plugin_shows_only_what_it_contributes() {
                 name: "mine".into(),
                 entry: mine,
                 grants: vec![],
+                app_root: None,
             },
             Plugin {
                 name: "other".into(),
                 entry: other,
                 grants: vec![],
+                app_root: None,
             },
         ]);
         host
@@ -228,6 +234,7 @@ fn a_plugin_named_as_the_app_does_not_read_its_saved_state() {
             name: "app".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -254,6 +261,7 @@ return ui.column {}"#,
             name: "keys".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -297,6 +305,7 @@ return ui.column {}"#,
             name: "failing".into(),
             entry,
             grants: vec![Capability::Windows],
+            app_root: None,
         }]);
         host
     });
@@ -339,6 +348,7 @@ return ui.column { ui.text { function() return page.url end, id = "app" }, ui.sl
             name: "pages".into(),
             entry,
             grants: vec![Capability::Web],
+            app_root: None,
         }]);
         host
     });
@@ -366,6 +376,7 @@ fn a_plugin_of_bytecode_is_read_as_source_and_never_runs() {
             name: "bytecode".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -393,6 +404,7 @@ fn a_plugin_shows_remote_images_only_with_the_fetch_grant() {
                 name: name.into(),
                 entry,
                 grants,
+                app_root: None,
             }]);
             host
         });
@@ -445,6 +457,7 @@ ui.contribute("bar", ui.column {{
                 name: format!("viewer-{name}"),
                 entry,
                 grants: vec![Capability::Folders],
+                app_root: None,
             }]);
             host
         });
@@ -499,6 +512,7 @@ ui.contribute("bar", ui.text { tostring(ok) .. " " .. tostring(got), id = "got" 
             name: "linked".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -539,6 +553,7 @@ end }})"#,
         name: "peek".into(),
         entry,
         grants: vec![],
+        app_root: None,
     }]);
     h.host.reload().unwrap();
     h.frames(1);
@@ -566,6 +581,7 @@ fn a_plugins_images_come_from_its_directory() {
             name: "pictures".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -602,6 +618,7 @@ ui.contribute("bar", ui.text {
                 name: name.into(),
                 entry,
                 grants,
+                app_root: None,
             }]);
             host
         });
@@ -633,6 +650,7 @@ ui.contribute("bar", ui.column {
             name: "lightbox".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -678,6 +696,7 @@ fn a_plugin_given_more_memory_holds_past_the_default() {
             name: name.into(),
             entry: holding(name, 48),
             grants: vec![],
+            app_root: None,
         };
         host.set_plugins(vec![plugin("big"), plugin("small")]);
         host.plugin_memory("big", 64 << 20);
@@ -738,6 +757,7 @@ ui.contribute("bar", ui.text {{ id = "made", function() return tostring(made:get
             name: "pictures".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -811,6 +831,7 @@ result:set(`{made} {memory(made_error)} {pushed} {memory(push_error)} {rewrites}
             name: "hoarder".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -852,6 +873,7 @@ result:set(`{small} {kept} {short}`)
             name: "painter".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -875,6 +897,7 @@ ui.contribute("bar", ui.text { `{ok} {tostring(err):find("the app's") ~= nil} {#
             name: "opener".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -899,6 +922,7 @@ return ui.column {}"#,
             name: "reserver".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });

@@ -17,6 +17,7 @@ fn plugin(name: &str, code: &str, grants: Vec<Capability>) -> Plugin {
         name: name.into(),
         entry,
         grants,
+        app_root: None,
     }
 }
 

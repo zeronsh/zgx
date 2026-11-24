@@ -88,19 +88,21 @@ What a plugin adds reads what the app provides above where it lands (`provide`, 
 
 ## The trust model
 
-Capabilities are what the host grants each plugin (`Plugin { name, entry, grants }`), and the example's host grants them per plugin:
+Capabilities are what the host grants each plugin (`Plugin { name, entry, grants, app_root }`), and the example's host grants them per plugin:
 
 ```rust
-Plugin { name: "focus".into(), entry, grants: vec![Capability::OverrideElement("#tasks".into())] },
+Plugin { name: "focus".into(), entry, grants: vec![Capability::OverrideElement("#tasks".into())], app_root: None },
 Plugin { name: "stamps".into(), entry, grants: vec![
     Capability::OverrideElement("#empty".into()),
     Capability::OverrideModule("@app/components/task_row".into()),
-] },
+], app_root: None },
 ```
 
 **`OverrideElement`** lets a plugin change what that element shows: its replacement or its filtered props. The plugin's code still runs in its own VM, seeing only what it was given. It can change how the element looks and reads, but not reach the app's state or handlers. Grant it for elements whose content you are willing to let the plugin decide.
 
 **`OverrideModule` is a trust grant.** The replacement runs in the app's VM as the app's own code, with everything the app's scripts may do: its state, its actions, its packages. That is why stamps' row can `require("@app-original/components/task_row")` (the module it replaces; only the replacement may reach it) and `require("@kit/badge")`. Grant `OverrideModule("@app/…")` as you would install the plugin's code into the app, and `Override("*")` only to a plugin you trust with the whole app.
+
+**Its modules' names.** A replacement and the files it requires are named by their full path on the disk: in errors, and in their states' keys (`ui.state("open")` in one is `/home/…/card.luau::open`), so what it saves changes name when the plugin moves. A host gives a plugin it ships `Plugin { app_root: Some(dir), … }`, a folder of the plugin laid out as the app's root, to name those under it as the app names its own: `dir/ds/map.luau` is `ds/map.luau`, its `open` is `ds/map.luau::open`, as before the app moved the module into the plugin. Their requires still start from where their files are (`./`, `@self`). A name one of the app's own files has stays that file's, and the plugin's keeps its full path, as does one another plugin's module took first: two files never share a name or a state. It names only what the app runs as its own, which takes `OverrideModule`: the plugin's own VM names its files by their path in its folder, as always.
 
 `"*"` stands for any target in `OverrideElement("*")`, and for any module in `OverrideModule("*")`, which trusts the plugin with the whole app. The two are apart so that a plugin trusted to restyle elements isn't trusted with the app's code. The older `Override` reads by what it names: a target or `"*"` is an element's, `"@app/…"` that module's.
 

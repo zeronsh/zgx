@@ -175,6 +175,7 @@ fn as_plugin(code: &str, rules: &Rules) -> TestApp {
             name: "plug".into(),
             entry,
             grants: vec![Capability::Fetch],
+            app_root: None,
         }]);
         host
     })
@@ -487,6 +488,7 @@ return ui.column {{
             name: "plug".into(),
             entry,
             grants: vec![Capability::Fetch],
+            app_root: None,
         }]);
         host
     });

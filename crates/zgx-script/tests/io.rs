@@ -700,6 +700,7 @@ fn files_on_the_clipboard_reach_on_paste_and_can_be_read() {
             name: "paste".into(),
             entry: entry.clone(),
             grants: vec![zgx_script::Capability::Clipboard],
+            app_root: None,
         }]);
         host
     });

@@ -305,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name: "plugin".into(),
                 entry: plugin_entry(plugin),
                 grants: Vec::new(),
+                app_root: None,
             }]);
             let clicked = host.shared("clicked", Value::Num(0.));
             let _ = host.reload();

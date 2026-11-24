@@ -22,6 +22,7 @@ fn with_grants(test: &str, app: &'static str, code: &str, grants: Vec<Capability
             name: "marks".into(),
             entry,
             grants,
+            app_root: None,
         }]);
         host
     })

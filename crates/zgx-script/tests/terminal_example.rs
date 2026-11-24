@@ -943,6 +943,7 @@ fn with_notes(status: &'static str) -> App {
                 name: "notes".into(),
                 entry,
                 grants: vec![zgx_script::Capability::Clipboard],
+                app_root: None,
             }]);
         }
     })
@@ -1102,6 +1103,7 @@ fn a_saved_panel_pane_opens_again_without_a_shell() {
             name: "notes".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
     });
     assert_eq!(again.panes().len(), 1, "one terminal, one panel");
@@ -1135,6 +1137,7 @@ fn example_plugin(name: &str, grants: Vec<zgx_script::Capability>) -> zgx_script
             .join(name)
             .join("init.luau"),
         grants,
+        app_root: None,
     }
 }
 fn listed(id: &str, panel: &str, title: &str) -> String {

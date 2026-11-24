@@ -123,6 +123,7 @@ fn plugins_do_not_reach_the_apps_packages() {
             name: "reach".into(),
             entry: plugin.join("init.luau"),
             grants: Vec::new(),
+            app_root: None,
         }]);
         host
     });

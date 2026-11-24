@@ -89,6 +89,7 @@ fn a_plugin_ignores_the_proxy_the_app_uses() {
             name: "plug".into(),
             entry,
             grants: vec![Capability::Fetch],
+            app_root: None,
         }]);
         host
     });
