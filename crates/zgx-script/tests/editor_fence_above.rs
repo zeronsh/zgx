@@ -844,3 +844,20 @@ fn a_first_fence_deleted_flips_the_blocks_below() {
     edited(&mut checks, &mut e, &editor, last, "flip", (6..10, ""));
     checks.done();
 }
+
+/// A block's text cut short by the app, the caret elsewhere: its group isn't
+/// scrolled past its lines.
+#[test]
+fn a_block_cut_short_is_not_scrolled_past_its_lines() {
+    let mut checks = Checks::default();
+    let start = doc(&["intro", "```", "LA1", "```", "LP0"]);
+    let (mut e, editor) = blocks(&start);
+    let last = &watched(&editor);
+    editor.set_group_scroll(1, 200.);
+    frame(&mut e);
+    checks.eq("scrolled first", editor.group_scroll(1), 200.);
+    editor.value().set(start.replacen(&"x".repeat(110), "", 1));
+    frame(&mut e);
+    same_blocks(&mut checks, "cut", &mut e, &editor, last);
+    checks.done();
+}
