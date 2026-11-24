@@ -916,6 +916,9 @@ struct GroupState {
     last: Option<u32>,
     /// Told of each group's new offset (`EditorHandle::on_group_scroll`).
     listener: Option<GroupListener>,
+    /// Groups brought back to their lines as they were drawn, told once the
+    /// draw is done (`LineCache::tell_settled`).
+    settled: Vec<(u32, f32)>,
 }
 /// Told of a scroll group's id and new offset (`EditorHandle::on_group_scroll`).
 pub(crate) type GroupListener = Rc<dyn Fn(u32, f32)>;
@@ -1218,6 +1221,63 @@ impl LineCache {
             listener(group, x);
         }
         true
+    }
+    /// Bring each group scrolled past its lines in `layout` (an edit cut them
+    /// short) back to as far as they reach; whether any was. Its lines are
+    /// shaped first, so one not shaped since the edit counts whole. The
+    /// listener hears of it once the draw is done (`tell_settled`).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn settle_groups(&self, layout: &LinesLayout) -> bool {
+        let scrolled: Vec<(u32, f32)> = (self.rare.borrow().as_ref())
+            .and_then(|rare| rare.groups.as_ref())
+            .map(|groups| {
+                (groups.offsets.iter())
+                    .filter(|(_, x)| **x > 0.)
+                    .map(|(id, x)| (*id, *x))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut settled = false;
+        for (id, x) in scrolled {
+            let past = |group: &Group| x > group.limit();
+            let Some(group) = layout.group(id).filter(past) else {
+                continue;
+            };
+            for i in group.first..=group.last {
+                if layout.line_group(i) == Some(id) {
+                    layout.line(i);
+                }
+            }
+            let Some(group) = layout.group(id).filter(past) else {
+                continue;
+            };
+            let to = group.limit();
+            self.groups_mut(|groups| {
+                groups.offsets.insert(id, to);
+                groups.settled.push((id, to));
+            });
+            settled = true;
+        }
+        settled
+    }
+    /// Tell the listener of the groups `settle_groups` moved, the draw done.
+    pub(crate) fn tell_settled(&self) {
+        let (settled, listener) = {
+            let mut rare = self.rare.borrow_mut();
+            let Some(groups) = rare.as_mut().and_then(|rare| rare.groups.as_mut()) else {
+                return;
+            };
+            if groups.settled.is_empty() {
+                return;
+            }
+            (std::mem::take(&mut groups.settled), groups.listener.clone())
+        };
+        if let Some(listener) = listener {
+            for (id, x) in settled {
+                listener(id, x);
+            }
+        }
     }
     /// The scroll group that moved last, if one has.
     pub(crate) fn last_scrolled_group(&self) -> Option<u32> {
@@ -2241,6 +2301,14 @@ impl LinesLayout {
     /// The scroll group that moved last, if one has.
     pub(crate) fn last_scrolled_group(&self) -> Option<u32> {
         self.cache.last_scrolled_group()
+    }
+    /// Line `i`'s scroll group, as it was measured.
+    fn line_group(&self, i: usize) -> Option<u32> {
+        (self.groups.borrow().as_ref()).and_then(|groups| groups.each.get(i)?.group)
+    }
+    /// Bring groups scrolled past their lines back (`LineCache::settle_groups`).
+    pub(crate) fn settle_groups(&self) -> bool {
+        self.cache.settle_groups(self)
     }
     /// Move scroll group `id` to `x` (`LineCache::set_group_scroll`).
     pub(crate) fn set_group_scroll(&self, id: u32, x: f32) -> bool {
@@ -3370,6 +3438,59 @@ mod tests {
         let layout = laid(&cache, text);
         assert!(layout.grouped());
         assert_eq!(layout.group_of(2).map(|(id, _)| id), Some(3));
+    }
+
+    /// A group an edit cut short is brought back to its lines, the listener
+    /// told after; one whose widest line, wider than estimated, isn't shaped
+    /// yet in the new layout is shaped first, and left as scrolled.
+    #[test]
+    fn a_group_past_its_lines_is_settled_and_one_not_shaped_is_not() {
+        let wide: LineShaper = Rc::new(|text: &str, width| {
+            // `W` lines are three times as wide as estimated.
+            let size = if text.starts_with('W') { 42. } else { 14. };
+            Box::new(FallbackTextLayout::new(text, size, width))
+        });
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i, _: &str, _| {
+            if i > 0 {
+                LineInset::new(0., 0., 0.).in_group(3).unwrapped()
+            } else {
+                LineInset::default()
+            }
+        })));
+        let lay = |text: &str| {
+            let wide = wide.clone();
+            cache.layout(
+                || Text::new(text),
+                None,
+                14.,
+                Some(200.),
+                &FontStyle::default(),
+                0,
+                move || (wide, rich()),
+            )
+        };
+        let told = Rc::new(RefCell::new(Vec::new()));
+        let heard = told.clone();
+        cache.on_group_scroll(Some(Rc::new(move |id, x| heard.borrow_mut().push((id, x)))));
+        let long = format!("a\nW{}\nb", "w".repeat(29));
+        let layout = lay(&long);
+        layout.lines_between(0., 1_000.);
+        let limit = layout.group(3).unwrap().limit();
+        assert!(limit > 500., "{limit}");
+        cache.set_group_scroll(3, limit);
+        // An edit elsewhere: the wide line is estimated again, narrower.
+        let edited = lay(&format!("ax\nW{}\nb", "w".repeat(29)));
+        assert!(edited.group(3).unwrap().limit() < limit);
+        assert!(!edited.settle_groups(), "shaped, it reaches as far");
+        assert_eq!(edited.group_scroll(3), limit);
+        let cut = lay("ax\nW\nb");
+        assert!(cut.settle_groups());
+        assert_eq!(cut.group_scroll(3), 0.);
+        assert_eq!(*told.borrow(), [(3, limit)], "not while it is drawn");
+        cache.tell_settled();
+        cache.tell_settled();
+        assert_eq!(*told.borrow(), [(3, limit), (3, 0.)], "once after");
     }
 
     /// New colours (a theme's) ask for the lines shown alone, and for no

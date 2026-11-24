@@ -822,6 +822,10 @@ impl EditorHint {
     #[cold]
     #[inline(never)]
     fn publish_group_bar(&self, code: &CodeHint) {
+        let lines = code.lines.borrow().clone();
+        if let Some(lines) = lines {
+            lines.tell_settled();
+        }
         let (offset, size, extent, shown) = {
             let drawn = code.groups_drawn.borrow();
             let Some(bar) = drawn.as_ref().and_then(|drawn| drawn.bar.as_ref()) else {
@@ -10788,8 +10792,8 @@ thread_local! {
 pub fn debug_editor_draws() -> u64 {
     EDITOR_DRAWS.get()
 }
-/// The caret at `rect` (`position`) in a text area with scroll groups: its
-/// line's group moved to show it if `reveal` and its frame cuts it (and the
+/// The caret at `rect` (`position`) in a text area with scroll groups: those
+/// scrolled past their lines brought back, then its line's group moved to show it if `reveal` and its frame cuts it (and the
 /// caret placed again), and whether it is scrolled out of the frame.
 #[cold]
 #[inline(never)]
@@ -10799,11 +10803,15 @@ fn caret_in_group(
     rect: Rect,
     reveal: bool,
 ) -> (Rect, bool) {
+    let mut rect = rect;
+    // An edit may have cut a group's lines shorter than it is scrolled.
+    if lines.settle_groups() {
+        rect = lines.caret_position(position);
+    }
     let i = lines.line_of(position.byte_offset);
     let Some((group, frame)) = lines.group_of(i) else {
         return (rect, false);
     };
-    let mut rect = rect;
     if reveal
         && let Some((_, x)) = lines.reveal_in_group(i, rect)
         && lines.set_group_scroll(group, x)

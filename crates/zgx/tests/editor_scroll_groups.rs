@@ -403,6 +403,45 @@ fn a_fence_typed_above_lines_groups_them() {
     assert_eq!(editor.group_extent(GROUP), None, "the fence gone");
 }
 
+/// A group an edit cut short is brought back, and its listener, told once
+/// the draw is done, may set the area's marks and draw it.
+#[test]
+fn a_group_cut_short_tells_its_listener_after_the_draw() {
+    let mut ui = Ui::new(600., 400.);
+    let value = ui.signal(format!("a\nc{}\nd", "x".repeat(110)));
+    let view = ui.mount(
+        text_area("Note", value.clone())
+            .w(400.)
+            .h(300.)
+            .p(0.)
+            .text_size(10.)
+            .line_height(20.)
+            .text_wrap(true)
+            .line_insets(|_, line: &str, _| {
+                if line.starts_with('c') {
+                    LineInset::new(30., 0., 0.).in_group(GROUP).unwrapped()
+                } else {
+                    LineInset::default()
+                }
+            }),
+    );
+    ui.prepare_frame();
+    let editor = ui.editor(view.node()).unwrap();
+    editor.set_group_scroll(GROUP, 200.);
+    ui.prepare_frame();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let (log, handle) = (heard.clone(), editor.clone());
+    editor.on_group_scroll(move |group, x| {
+        log.borrow_mut().push((group, x));
+        handle.set_line_marks(Some(Rc::new(|_, _, _| vec![mark(0., 2.)])));
+    });
+    value.set("a\nc\nd".to_string());
+    ui.prepare_frame();
+    assert_eq!(*heard.borrow(), [(GROUP, 0.)]);
+    assert_eq!(editor.group_scroll(GROUP), 0.);
+    assert_eq!(marks(&ui, &editor, 2.).len(), 3);
+}
+
 /// A theme change asks the highlighter for the lines shown, not the note:
 /// its lines' room, and their group, hold. A new highlighter is asked for
 /// them all, and groups what its states say.
