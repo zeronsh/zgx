@@ -98,6 +98,8 @@ pub mod actions;
 
 mod action_context;
 
+#[doc(hidden)]
+pub mod callback_site;
 pub mod canvas;
 
 pub mod animation;

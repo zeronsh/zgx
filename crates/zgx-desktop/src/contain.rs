@@ -276,6 +276,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_contained_panic_names_the_host_callback_it_was_in_and_where_it_was_registered() {
+        // A host action panicking in a library it calls: the report names
+        // the action and the host's line that registered it.
+        crate::application::note_panic_sites();
+        let mut fault = None;
+        let reported = std::cell::RefCell::new(String::new());
+        let registered = std::panic::Location::caller();
+        let _: Option<()> = run(
+            &mut fault,
+            0,
+            Instant::now(),
+            "a popup's frame",
+            |message| *reported.borrow_mut() = message.to_string(),
+            || zgx::callback_site::run("a host action", registered, || panic!("deep")),
+        );
+        let reported = reported.into_inner();
+        assert!(
+            reported.contains(&format!(
+                "deep (in a host action registered at {}:{})",
+                registered.file(),
+                registered.line()
+            )),
+            "{reported}"
+        );
+        // Taken: a later panic outside any callback says nothing of it.
+        let reported = std::cell::RefCell::new(String::new());
+        let _: Option<()> = run(
+            &mut None,
+            0,
+            Instant::now(),
+            "a popup's frame",
+            |message| *reported.borrow_mut() = message.to_string(),
+            || panic!("plain"),
+        );
+        assert!(!reported.into_inner().contains("registered at"));
+    }
+
     /// Unchanged, a faulted piece isn't tried again, however long; changed,
     /// it is, and one that works again runs every frame from then on.
     #[test]
