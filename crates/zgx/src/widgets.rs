@@ -544,7 +544,8 @@ fn underline_canvas(
 }
 /// An editor's decorations (`shaped`, each shape's marks ending at one of
 /// `ends`) as marks on a node of their own, last in their layer, over the
-/// current line; made when the first shows.
+/// current line; made when the first shows. Each shape rounded by its own
+/// of `radii` (a text area's atoms and chips), else all by `radius`.
 #[cold]
 #[inline(never)]
 fn show_decorations(
@@ -552,7 +553,7 @@ fn show_decorations(
     code: &CodeHint,
     (width, height): (f32, f32),
     (shaped, ends): (Vec<crate::scene::TextMark>, Vec<usize>),
-    radius: f32,
+    (radius, radii): (f32, Vec<f32>),
 ) {
     let Some(layer) = code.decoration_layer.get() else {
         return;
@@ -580,7 +581,11 @@ fn show_decorations(
     let mut style = fixed(width, height);
     style.padding = 1.;
     s.set_style(id, style);
-    s.set_text_mark_shapes(id, shaped, ends, radius);
+    if radii.is_empty() {
+        s.set_text_mark_shapes(id, shaped, ends, radius);
+    } else {
+        s.set_text_mark_shapes_rounded(id, shaped, ends, radii);
+    }
 }
 #[doc(hidden)]
 pub use crate::editor_atom_clipboard::{
@@ -931,9 +936,14 @@ fn pointer_focus(anchor: usize, raw: TextPosition, hit: TextPosition) -> usize {
         raw.byte_offset
     }
 }
-/// `plain` decorations with `e`'s atoms' washes among them, by start (the
-/// text area's `wash` for those with none of their own), plus each atom's
-/// vertical chip padding (`padding[2]`) if set.
+/// A mark behind a text area's text: its range, colour, padding down (a
+/// chip's: its height hugs the text) and corners (none: the theme's).
+type Washed = (std::ops::Range<usize>, Color, Option<f32>, Option<f32>);
+/// `plain` decorations (a search's matches) with `e`'s atoms' washes and
+/// its chip spans (`chips`, as `LineCache::chips_between` gives them) among
+/// them, by start: an atom's wash its own or the text area's `wash`, each
+/// with its own padding down (an atom's `padding[2]`, a chip's) and corners
+/// (an atom's own, else the text area's atom style's; a chip's).
 #[cold]
 #[inline(never)]
 fn washed_atoms(
@@ -941,26 +951,37 @@ fn washed_atoms(
     wash: Option<Color>,
     base_style: Option<&crate::editor_atom_style::AtomStyle>,
     plain: &[(std::ops::Range<usize>, Color)],
-) -> Vec<(std::ops::Range<usize>, Color, Option<f32>)> {
-    let mut marked: Vec<(std::ops::Range<usize>, Color, Option<f32>)> = e
+    chips: Vec<(std::ops::Range<usize>, Color, f32, f32)>,
+) -> Vec<Washed> {
+    let mut marked: Vec<Washed> = e
         .atoms()
         .iter()
         .filter_map(|atom| {
             let color = atom.wash.or(wash)?;
-            let py = atom
-                .style
-                .as_deref()
+            let own = atom.style.as_deref();
+            let py = own
                 .and_then(|own| own.padding)
                 .or_else(|| base_style.and_then(|b| b.padding))
                 .map(|p| p[2].max(0.));
-            Some((atom.range.clone(), color, py))
+            let radius = own
+                .and_then(|own| own.radius)
+                .or_else(|| base_style.and_then(|b| b.radius));
+            Some((atom.range.clone(), color, py, radius))
         })
         .collect();
+    marked.extend(
+        chips
+            .into_iter()
+            .map(|(range, color, py, radius)| (range, color, Some(py), Some(radius))),
+    );
     if marked.is_empty() {
-        return plain.iter().map(|(r, c)| (r.clone(), *c, None)).collect();
+        return plain
+            .iter()
+            .map(|(r, c)| (r.clone(), *c, None, None))
+            .collect();
     }
-    marked.extend(plain.iter().map(|(r, c)| (r.clone(), *c, None)));
-    marked.sort_by_key(|(range, _, _)| range.start);
+    marked.extend(plain.iter().map(|(r, c)| (r.clone(), *c, None, None)));
+    marked.sort_by_key(|(range, ..)| range.start);
     marked
 }
 /// After a text area's draw: what happened to its atoms told to its
@@ -7799,13 +7820,27 @@ impl Ui {
                 // Each range one shape, as a selection is.
                 let mut shaped: Vec<crate::scene::TextMark> = Vec::new();
                 let mut ends = Vec::new();
+                // Each shape's corners (none: the theme's mark radius), for
+                // a text area with atoms or chips; empty for the rest.
+                let mut radii: Vec<Option<f32>> = Vec::new();
                 {
                     let plain = code.decorations.borrow();
                     let shown_from = match &long_lines {
                         Some(lines) => lines.line_range(lines.line_at(scroll.1)).start,
                         None => 0,
                     };
-                    if e.has_atoms() {
+                    // A highlighter's chip spans in view: marks, as atoms' washes.
+                    let chips = match &long_lines {
+                        Some(lines) if draw_hint.highlighted() => {
+                            draw_hint.line_cache().chips_between(
+                                lines,
+                                scroll.1 - line_height,
+                                scroll.1 + inner_height + line_height,
+                            )
+                        }
+                        _ => Vec::new(),
+                    };
+                    if e.has_atoms() || !chips.is_empty() {
                         let base_style = code
                             .atoms()
                             .and_then(|atoms| atoms.atom_style.borrow().clone());
@@ -7814,10 +7849,11 @@ impl Ui {
                             code.atoms().and_then(|atoms| atoms.atom_wash.get()),
                             base_style.as_deref(),
                             &plain,
+                            chips,
                         );
                         let first =
-                            decorations.partition_point(|(range, _, _)| range.end < shown_from);
-                        for (range, mark, py) in &decorations[first..] {
+                            decorations.partition_point(|(range, ..)| range.end < shown_from);
+                        for (range, mark, py, radius) in &decorations[first..] {
                             let rects = layout.selection_within(
                                 range.clone(),
                                 scroll.1,
@@ -7844,6 +7880,7 @@ impl Ui {
                                 }
                             }));
                             ends.push(shaped.len());
+                            radii.push(*radius);
                         }
                     } else {
                         let first = plain.partition_point(|(range, _)| range.end < shown_from);
@@ -8099,22 +8136,14 @@ impl Ui {
                 // The decorations, over the current line: a node of their own.
                 if !shaped.is_empty() || code.decoration_text.get().is_some() {
                     let size = (inner_width, inner_height);
-                    let atom_radius = if e.has_atoms() {
-                        code.atoms()
-                            .and_then(|atoms| {
-                                atoms.atom_style.borrow().as_deref().and_then(|s| s.radius)
-                            })
-                            .or_else(|| {
-                                e.atoms()
-                                    .iter()
-                                    .find_map(|a| a.style.as_deref().and_then(|s| s.radius))
-                            })
-                    } else {
-                        None
-                    };
-                    let radius = atom_radius
-                        .map_or_else(|| theme.number_untracked(tok::MARK_RADIUS), |r| r.max(0.));
-                    show_decorations(&mut s, code, size, (shaped, ends), radius);
+                    // Each shape its own corners: a chip's or an atom's, else
+                    // the theme's (a search's matches).
+                    let mark_radius = theme.number_untracked(tok::MARK_RADIUS);
+                    let radii = radii
+                        .iter()
+                        .map(|radius| radius.map_or(mark_radius, |r| r.max(0.)))
+                        .collect();
+                    show_decorations(&mut s, code, size, (shaped, ends), (mark_radius, radii));
                 }
                 // Under the text in view, each row of a range a node.
                 let underlines = code.underlines.borrow();

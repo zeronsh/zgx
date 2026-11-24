@@ -32,6 +32,8 @@ mod editor_blur_selection;
 mod editor_caret_blink;
 #[path = "../editor_caret_width.rs"]
 mod editor_caret_width;
+#[path = "../editor_chip_marks.rs"]
+mod editor_chip_marks;
 #[path = "../editor_code.rs"]
 mod editor_code;
 #[path = "../editor_context_menu.rs"]
