@@ -18,6 +18,8 @@ struct Controls {
     rate: Arc<AtomicU32>,
     /// Stops pause, keeping the renderer, rather than close.
     pause: Arc<AtomicBool>,
+    /// Renders no block while set: what the mixer has is as it was.
+    hold: Arc<AtomicBool>,
     /// Whether the thread that last started it has ended.
     host_ended: Arc<AtomicBool>,
     /// Times its blocks as WASAPI does: after each start and resume, a
@@ -148,11 +150,16 @@ impl Fake {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let wasapi = self.controls.wasapi.load(Ordering::Relaxed);
+        let hold = self.controls.hold.clone();
         let thread = std::thread::spawn(move || {
             let mut out = vec![0f32; 256 * 2];
             let began = Instant::now();
             let mut block = 0;
             while !stopping.load(Ordering::Relaxed) {
+                if hold.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
                 // A second on, so no time is 0.
                 let at = 1_000_000_000 + began.elapsed().as_nanos() as u64;
                 let timing = if !wasapi {
@@ -488,14 +495,20 @@ fn a_gain_set_while_the_device_is_stopped_does_not_start_it() {
 
 #[test]
 fn the_app_is_told_when_voices_end() {
-    let (audio, _controls) = engine(Duration::from_millis(500));
+    let (audio, controls) = engine(Duration::from_millis(500));
     let told = Arc::new(AtomicU32::new(0));
     let count = told.clone();
     audio.on_voices_ended(move || {
         count.fetch_add(1, Ordering::Relaxed);
     });
+    // Held, the device plays nothing until it's let go: the voice is
+    // playing, however long this thread waits before it asks. Unheld, the
+    // blip ended in the device's first block, and a runner that paused this
+    // thread a few milliseconds after `play` found none playing.
+    controls.hold.store(true, Ordering::Relaxed);
     let voice = audio.play(&blip(), Play::new()).unwrap();
     assert_eq!(audio.voices_playing(), 1);
+    controls.hold.store(false, Ordering::Relaxed);
     until("a notice", || told.load(Ordering::Relaxed) >= 1);
     assert_eq!(audio.take_ended(), [voice.id()]);
     assert_eq!(audio.voices_playing(), 0);
