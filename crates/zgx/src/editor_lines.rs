@@ -1539,8 +1539,15 @@ impl LineCache {
         (colors, leaves)
     }
     /// Line `i` shaped with the runs its spans give it, if they shape it
-    /// (a weight, italics): `None` for a line shaped as its plain text.
-    fn styled(&self, layout: &LinesLayout, i: usize, text: &str) -> Option<Rc<dyn TextLayout>> {
+    /// (a weight, italics): `None` for a line shaped as its plain text. A
+    /// line with room of its own comes back in its room whether or not, with
+    /// whether its spans shaped it (`true` for every other line here).
+    fn styled(
+        &self,
+        layout: &LinesLayout,
+        i: usize,
+        text: &str,
+    ) -> Option<(Rc<dyn TextLayout>, bool)> {
         if !self.shapes.get() {
             return None;
         }
@@ -1549,7 +1556,7 @@ impl LineCache {
         if layout.room {
             return self.styled_in_room(layout, i, text);
         }
-        self.styled_at(layout, i, text, (layout.wrap, text))
+        Some((self.styled_at(layout, i, text, (layout.wrap, text))?, true))
     }
     /// `styled` for an editor whose lines have room of their own: line `i`
     /// shaped in what its indent leaves (kept apart from the same text
@@ -1561,10 +1568,10 @@ impl LineCache {
         layout: &LinesLayout,
         i: usize,
         text: &str,
-    ) -> Option<Rc<dyn TextLayout>> {
+    ) -> Option<(Rc<dyn TextLayout>, bool)> {
         let inset = layout.inset(i);
         if inset == LineInset::default() {
-            return self.styled_at(layout, i, text, (layout.wrap, text));
+            return Some((self.styled_at(layout, i, text, (layout.wrap, text))?, true));
         }
         let indented;
         let (wrap, key) = match layout.wrap {
@@ -1580,9 +1587,9 @@ impl LineCache {
             }
             wrap => (wrap, text),
         };
-        let inner = match self.styled_at(layout, i, text, (wrap, key)) {
-            Some(inner) => inner,
-            None => self.line_at(text, &layout.shape, (wrap, key)),
+        let (inner, styled) = match self.styled_at(layout, i, text, (wrap, key)) {
+            Some(inner) => (inner, true),
+            None => (self.line_at(text, &layout.shape, (wrap, key)), false),
         };
         // In a scroll group: moved by its offset after its own layout, and
         // cut to its frame.
@@ -1599,11 +1606,14 @@ impl LineCache {
             }
             None => None,
         };
-        Some(Rc::new(InsetLayout {
-            inner,
-            inset,
-            group,
-        }))
+        Some((
+            Rc::new(InsetLayout {
+                inner,
+                inset,
+                group,
+            }),
+            styled,
+        ))
     }
     /// `styled`, shaped at `wrap` and kept by `key` (its text, or its text
     /// and indent: `LinesLayout::line_in_room`).
@@ -2240,9 +2250,12 @@ impl LinesLayout {
     /// its carets, hits and size carry it, so nothing here asks for it.
     pub(crate) fn line(&self, i: usize) -> Rc<dyn TextLayout> {
         let text = self.line_text(i);
-        let layout = match self.cache.styled(self, i, &text) {
-            Some(layout) => layout,
-            None => self.cache.line(&text, &self.shape, self.wrap),
+        // Whether its spans shape it (`LineCache::styled`): then its runs'
+        // sizes and pitches are its height, shorter than the editor's row
+        // or taller (a table cell, a small heading), as a web page's.
+        let (layout, styled) = match self.cache.styled(self, i, &text) {
+            Some(styled) => styled,
+            None => (self.cache.line(&text, &self.shape, self.wrap), false),
         };
         let (width, height) = layout.size();
         if width > self.widest.get() {
@@ -2250,7 +2263,9 @@ impl LinesLayout {
         }
         if let Some(heights) = &self.heights {
             let height = if self.room {
-                self.height_in_room(i, height)
+                self.height_in_room(i, height, styled)
+            } else if styled && height > 0. {
+                height
             } else {
                 height.max(self.row)
             };
@@ -2268,12 +2283,15 @@ impl LinesLayout {
         layout
     }
     /// Line `i`'s height from its layout's (its room in it): none hidden.
+    /// Shaped by its spans (`styled`), its own; else a row at least.
     #[cold]
     #[inline(never)]
-    fn height_in_room(&self, i: usize, height: f32) -> f32 {
+    fn height_in_room(&self, i: usize, height: f32, styled: bool) -> f32 {
         let inset = self.inset(i);
         if inset.hidden {
             0.
+        } else if styled && height > 0. {
+            height
         } else {
             height.max(self.row + inset.above + inset.below)
         }
@@ -2628,6 +2646,84 @@ mod tests {
             plain.heights.is_none(),
             "plain unwrapped lines keep no heights"
         );
+    }
+
+    /// In a 16/24 editor, a line its spans set at 14/20 (a table cell, a
+    /// small heading) is 20 high, as a web page draws it, and in room of its
+    /// own (a cell's, 2 above and below) its room more: 24. A plain line
+    /// keeps the editor's row, 24.
+    #[test]
+    fn a_line_styled_shorter_than_its_editor_is_its_own_height() {
+        styled_shorter(false);
+    }
+
+    /// The same in room of its own: a table cell's.
+    #[test]
+    fn an_inset_line_styled_shorter_than_its_editor_is_its_own_height() {
+        styled_shorter(true);
+    }
+
+    fn styled_shorter(room: bool) {
+        use crate::text_layout::LineHeight;
+        let cache = Rc::new(LineCache::default());
+        cache.set_highlighter(Some(Rc::new(|line: &str, state: u32| {
+            let spans: LineSpans = if state == 0 {
+                vec![(
+                    0..line.len(),
+                    SpanStyle::default().size(14.).line_height(20.),
+                )]
+            } else {
+                Vec::new()
+            };
+            (spans, state + 1)
+        })));
+        if room {
+            cache.set_insets(Some(Rc::new(|i, _: &str, _| match i {
+                0 => LineInset::new(8., 2., 2.),
+                _ => LineInset::default(),
+            })));
+        }
+        let font = FontStyle {
+            line_height: LineHeight::px(24.),
+            ..FontStyle::default()
+        };
+        let lay = || {
+            cache.layout(
+                || Text::new("a cell\nbody text"),
+                None,
+                16.,
+                None,
+                &font,
+                0,
+                || -> (LineShaper, RichLineShaper) {
+                    (
+                        Rc::new(|text: &str, width| {
+                            Box::new(FallbackTextLayout::with_line_height(
+                                text,
+                                16.,
+                                width,
+                                LineHeight::px(24.),
+                            ))
+                        }),
+                        rich(),
+                    )
+                },
+            )
+        };
+        // As the editor does: painting asks for the spans, and a span
+        // that shapes lays the text out again.
+        let first = lay();
+        for i in 0..2 {
+            cache.spans(&first, i);
+        }
+        assert!(cache.take_restyled());
+        cache.forget_last();
+        let layout = lay();
+        layout.lines_between(0., 1000.);
+        let cell = if room { 20. + 2. + 2. } else { 20. };
+        assert_eq!(layout.height(0), cell, "room {room}: the styled line");
+        assert_eq!(layout.height(1), 24., "room {room}: the plain line");
+        assert_eq!(layout.top(1), cell, "room {room}: below the styled line");
     }
 
     /// A note's heading, then a paragraph and a list item: each line starts
