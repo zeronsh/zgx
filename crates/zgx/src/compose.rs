@@ -7815,7 +7815,7 @@ fn open_element(
                     theme.color(crate::theme::tok::TEXT_PRIMARY);
                     theme.color(crate::theme::tok::ACCENT);
                     if !first.replace(false) {
-                        editor.rehighlight();
+                        editor.recolor();
                     }
                 });
             }

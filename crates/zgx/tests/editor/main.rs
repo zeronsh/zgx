@@ -46,6 +46,8 @@ mod editor_drag_source;
 mod editor_edge_caret;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
+#[path = "../editor_fence_above.rs"]
+mod editor_fence_above;
 #[path = "../editor_focus_snapshot.rs"]
 mod editor_focus_snapshot;
 #[path = "../editor_gap_cursor.rs"]
