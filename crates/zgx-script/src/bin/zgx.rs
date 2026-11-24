@@ -39,7 +39,7 @@ use zgx_script::check::{CheckError, Options, Report, check};
 
 const USAGE: &str = "usage: zgx new <name> [--template basic|router|list|form|plugins] [--i18n]
        zgx run [--inspect] [--release] [--window <name>] <app.luau-or-dir> [args...]
-       zgx build [--out <dir>] [--target <triple>]... [--version <v>] <app-dir>
+       zgx build [--out <dir>] [--target <triple>]... [--version <v>] [--ui <bytecode|source>] [--allow <file>]... <app-dir>
        zgx check [--nonstrict] <file-or-dir>...
        zgx lint [--format text|json] <file-or-dir>...
        zgx lint --rules
@@ -64,7 +64,10 @@ build: the app as a bundle (dist/<app_id>, or --out): its scripts compiled
 to bytecode, its other files as they are, each native module's library for
 each --target (the host's by default; built for release if its sources
 changed, else from the cache) and a manifest of hashes. `zgx-run <bundle>`
-runs it.
+runs it. --ui source keeps its scripts as source, unchecked, for an app whose
+files are laid over or edited where it is installed: every file of the folder
+ships, so one that looks like a secret (.env, *.pem, *.key, id_rsa and such)
+fails the build unless --allow names it.
 --inspect serves devtools (`zgx inspect help`).
 --window <name> opens the window of that name among zgx.json's
 named_windows first.
@@ -494,7 +497,8 @@ fn supervise(
     }
 }
 
-/// `zgx build [--out <dir>] [--target <triple>]… [--version <v>] <app-dir>`.
+/// `zgx build [--out <dir>] [--target <triple>]… [--version <v>]
+/// [--ui <bytecode|source>] [--allow <file>]… <app-dir>`.
 fn build(args: Vec<String>) -> ExitCode {
     let mut options = zgx_script::app_bundle::Options::default();
     let mut app = None;
@@ -504,6 +508,30 @@ fn build(args: Vec<String>) -> ExitCode {
             "--out" => options.out = args.next().map(PathBuf::from),
             "--target" => options.targets.extend(args.next()),
             "--version" => options.version = args.next(),
+            "--allow" => match args.next() {
+                Some(file) => {
+                    let file = file.replace('\\', "/");
+                    let file = file.strip_prefix("./").unwrap_or(&file);
+                    options.allow.push(file.to_owned());
+                }
+                None => {
+                    eprintln!("zgx build: --allow names a file");
+                    return ExitCode::from(2);
+                }
+            },
+            "--ui" => {
+                options.ui = match args.next().as_deref() {
+                    Some("bytecode") => zgx_script::app_bundle::Ui::Bytecode,
+                    Some("source") => zgx_script::app_bundle::Ui::Source,
+                    other => {
+                        eprintln!(
+                            "zgx build: --ui is `bytecode` or `source`, not {}",
+                            other.map_or("nothing".into(), |other| format!("`{other}`"))
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             _ if app.is_none() && !arg.starts_with("--") => app = Some(PathBuf::from(arg)),
             _ => {
                 eprintln!("{USAGE}");
@@ -516,6 +544,7 @@ fn build(args: Vec<String>) -> ExitCode {
         return ExitCode::from(2);
     };
     let started = std::time::Instant::now();
+    let ui = options.ui;
     match zgx_script::app_bundle::write(&app, &options) {
         Ok(written) => {
             for module in &written.modules {
@@ -531,11 +560,15 @@ fn build(args: Vec<String>) -> ExitCode {
                 );
             }
             println!(
-                "wrote {} in {:.2} s: {} files, {} scripts compiled in {:.2} s",
+                "wrote {} in {:.2} s: {} files, {} scripts {} in {:.2} s",
                 written.dir.display(),
                 started.elapsed().as_secs_f64(),
                 written.files,
                 written.scripts,
+                match ui {
+                    zgx_script::app_bundle::Ui::Bytecode => "compiled",
+                    zgx_script::app_bundle::Ui::Source => "as source",
+                },
                 written.ui_in.as_secs_f64()
             );
             ExitCode::SUCCESS

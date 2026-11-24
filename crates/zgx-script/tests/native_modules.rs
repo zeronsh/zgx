@@ -1320,7 +1320,7 @@ fn a_bundle_runs_its_bytecode_and_checks_each_file_as_it_is_read() {
     assert_eq!(opened.app_id, "bundled");
     // It runs from its folder, as bytecode.
     let run_it = |opened: &zgx_script::app_bundle::Opened| {
-        let files = opened.files();
+        let files = opened.files().unwrap();
         TestApp::try_new(move |runtime| {
             ScriptHost::from_files(
                 runtime,
@@ -1428,7 +1428,7 @@ fn a_bundles_scripts_read_ahead_are_the_bytes_checked() {
         }
     };
     let run_it = |opened: &Opened| {
-        let files = opened.files();
+        let files = opened.files().unwrap();
         TestApp::try_new(move |runtime| {
             ScriptHost::from_files(
                 runtime,
@@ -1467,6 +1467,294 @@ fn a_bundles_scripts_read_ahead_are_the_bytes_checked() {
     let refused = run_it(&opened).err().expect("refused");
     assert!(
         refused.contains("isn't the file its bundle's manifest names"),
+        "{refused}"
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+/// `zgx build --ui source`'s bundle: its files are the app's, run from its
+/// folder as any folder is (an edit runs, bytecode doesn't), with its
+/// packages in it and its modules checked as any bundle's are.
+#[test]
+fn a_bundle_of_source_runs_as_its_folder_and_checks_its_modules() {
+    use zgx_script::app_bundle::{FORMAT, Options, SOURCE_FORMAT, Ui, open, write};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-source-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let write_file = |path: &std::path::Path, text: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let app = base.join("app");
+    let script = "local part = require(\"./parts/part\")\nlocal kit = require(\"@kit/say\")\nreturn ui.text { id = \"out\", part.say() .. kit }\n";
+    write_file(&app.join("app.luau"), script);
+    write_file(
+        &app.join("parts/part.luau"),
+        "return { say = function() return \"from source\" end }\n",
+    );
+    write_file(&base.join("shared/kit/say.luau"), "return \" and kit\"\n");
+    write_file(&app.join("words.so"), "a module's library");
+    write_file(
+        &app.join("zgx.json"),
+        r#"{ "app_id": "sourced", "version": "1.2.3", "title": "Sourced",
+             "packages": { "kit": "../shared/kit" }, "modules": { "words": "words.so" } }"#,
+    );
+    let made = |ui: Ui| {
+        let out = base.join("dist");
+        let options = Options {
+            out: Some(out.clone()),
+            ui,
+            ..Default::default()
+        };
+        let written = write(&app, &options).unwrap();
+        let every = if ui == Ui::Source { 2 } else { 0 };
+        assert_eq!((written.files, written.scripts), (4 + every, 3));
+        out
+    };
+    // Files no host reads, which source keeps, and what isn't the app's,
+    // which neither does.
+    write_file(&app.join("assets/LICENSE.symbols"), "a licence");
+    write_file(&app.join("templates/.base.json"), "{}");
+    write_file(&app.join(".zgx/types.d.luau"), "");
+    write_file(&app.join(".DS_Store"), "");
+    // A key or a password left in the folder fails the build, by its name,
+    // unless it is allowed: every file there ships.
+    let built = |allow: &[&str]| {
+        write(
+            &app,
+            &Options {
+                out: Some(base.join("secrets")),
+                ui: Ui::Source,
+                allow: allow.iter().map(|&a| a.to_owned()).collect(),
+                ..Default::default()
+            },
+        )
+    };
+    for name in [
+        ".env",
+        ".env.local",
+        ".npmrc",
+        ".netrc",
+        "certs/Server.PEM",
+        "site.key",
+        "app.min.p12",
+        "cert.pfx",
+        "id_ed25519",
+        "id_rsa.bak",
+    ] {
+        write_file(&app.join(name), "secret");
+        let refused = built(&[]).unwrap_err();
+        assert!(
+            refused.contains("looks like a secret") && refused.contains(name),
+            "{refused}"
+        );
+        assert!(
+            built(&["other.key"]).is_err(),
+            "another allowed, not {name}"
+        );
+        built(&[name]).unwrap();
+        assert!(base.join("secrets/ui").join(name).is_file(), "{name}");
+        std::fs::remove_file(app.join(name)).unwrap();
+    }
+    // So does a folder of such a name, whose files are each looked at too.
+    for name in [".env", "id_rsa"] {
+        write_file(&app.join(name).join("deep/value.txt"), "secret");
+        let refused = built(&[]).unwrap_err();
+        assert!(refused.contains(&format!("--allow {name}`")), "{refused}");
+        built(&[name]).unwrap();
+        write_file(&app.join(name).join("deep/a.pem"), "secret");
+        let refused = built(&[name]).unwrap_err();
+        assert!(
+            refused.contains(&format!("--allow {name}/deep/a.pem`")),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(app.join(name)).unwrap();
+    }
+    // A package's is allowed as the error says it.
+    let in_package = base.join("shared/kit/certs/kit.pem");
+    write_file(&in_package, "secret");
+    let refused = built(&[]).unwrap_err();
+    let said = refused.split("--allow ").nth(1).unwrap();
+    let said = said.split('`').next().unwrap();
+    assert_eq!(said, ".packages/kit/certs/kit.pem", "{refused}");
+    built(&[said]).unwrap();
+    assert!(base.join("secrets/ui").join(said).is_file());
+    assert!(
+        built(&["certs/kit.pem"]).is_err(),
+        "not as the package has it"
+    );
+    std::fs::remove_file(&in_package).unwrap();
+    // A name for nothing that ships fails, as does one in a bytecode build.
+    for nothing in ["site.kye", "certs", ".zgx/types.d.luau", said] {
+        let refused = built(&[nothing]).unwrap_err();
+        assert!(
+            refused.contains(&format!("--allow {nothing}: no such file")),
+            "{refused}"
+        );
+    }
+    let bytecode = Options {
+        out: Some(base.join("secrets")),
+        allow: vec!["app.luau".into()],
+        ..Default::default()
+    };
+    assert!(write(&app, &bytecode).unwrap_err().contains("--ui source"));
+    let fine = [
+        "id_card.svg",
+        "id_rsa_guide.json",
+        "keys.json",
+        "key",
+        ".env.example",
+    ];
+    for name in fine {
+        write_file(&app.join(name), "{}");
+    }
+    built(&[]).unwrap();
+    for name in fine {
+        assert!(base.join("secrets/ui").join(name).is_file(), "{name}");
+        std::fs::remove_file(app.join(name)).unwrap();
+    }
+    // A link out of the app's folder isn't followed into the bundle.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(base.join("shared"), app.join("linked")).unwrap();
+        let refused = write(
+            &app,
+            &Options {
+                out: Some(base.join("linked")),
+                ui: Ui::Source,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(refused.contains("out of the app's"), "{refused}");
+        std::fs::remove_file(app.join("linked")).unwrap();
+    }
+    // Bytecode is the default, and its format is as it was.
+    assert_eq!(Options::default().ui, Ui::Bytecode);
+    let manifest = |out: &std::path::Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap()
+    };
+    let dist = made(Ui::Bytecode);
+    let checked = manifest(&dist);
+    // (And is still opened, by the runtime that opens both.)
+    let bytecode = open(&dist).unwrap();
+    assert_eq!(bytecode.kind(), Ui::Bytecode);
+    assert!(bytecode.files().is_some());
+    drop(bytecode);
+    assert_eq!((checked["zgx_bundle"].as_u64(), FORMAT), (Some(2), 2));
+
+    let out = made(Ui::Source);
+    let source = manifest(&out);
+    assert_eq!(
+        (source["zgx_bundle"].as_u64(), SOURCE_FORMAT),
+        (Some(3), 3),
+        "a format of its own: a runtime that reads only 2 refuses it"
+    );
+    assert_eq!(source["ui"], serde_json::json!({ "source": true }));
+    assert_eq!(source["modules"], checked["modules"]);
+    let opened = open(&out).unwrap();
+    assert_eq!(opened.kind(), Ui::Source);
+    assert!(opened.files().is_none());
+    assert_eq!(
+        (opened.app_id.as_str(), opened.version.as_str()),
+        ("sourced", "1.2.3")
+    );
+    assert_eq!(opened.modules[0].0, "words");
+    assert_eq!(
+        std::fs::read_to_string(out.join("ui/app.luau")).unwrap(),
+        script
+    );
+    assert_eq!(opened.file("app.luau").unwrap().unwrap(), script.as_bytes());
+    for kept in ["assets/LICENSE.symbols", "templates/.base.json"] {
+        assert!(out.join("ui").join(kept).is_file(), "{kept}");
+    }
+    // (A module's library is the manifest's, in modules/.)
+    for left in [".zgx", ".DS_Store", "words.so"] {
+        assert!(!out.join("ui").join(left).exists(), "{left}");
+    }
+    assert_eq!(opened.file("none.luau").unwrap(), None);
+
+    // It runs from its folder alone (the app's own, and its package, gone),
+    // and an edit there runs.
+    std::fs::rename(&app, base.join("app-away")).unwrap();
+    std::fs::rename(base.join("shared"), base.join("shared-away")).unwrap();
+    let entry = opened.ui.join(&opened.entry);
+    let run_it = || {
+        let entry = entry.clone();
+        TestApp::try_new(move |runtime| {
+            let dir = entry.parent().unwrap();
+            let config = zgx_script::app_config::read(dir).unwrap();
+            config.apply(ScriptHost::new(runtime, entry.clone()))
+        })
+    };
+    assert_eq!(run_it().unwrap().text("out"), "from source and kit");
+    let part = out.join("ui/parts/part.luau");
+    std::fs::write(&part, "return { say = function() return \"edited\" end }\n").unwrap();
+    assert_eq!(run_it().unwrap().text("out"), "edited and kit");
+    // Bytecode there is no source, and doesn't run.
+    let bytecode = zgx_script::build::compile(b"return { say = function() return 'x' end }");
+    std::fs::write(&part, bytecode.unwrap()).unwrap();
+    assert!(run_it().is_err(), "bytecode run from a folder");
+    // Nothing out of its `ui/` is read as its scripts: not by `..`, nor by a
+    // link in it.
+    std::fs::write(
+        base.join("out.luau"),
+        "return { say = function() return \"out\" end }\n",
+    )
+    .unwrap();
+    assert!(opened.file("../manifest.json").is_err());
+    let escape = |how: &str| {
+        std::fs::write(&part, format!("return require(\"{how}\")\n")).unwrap();
+        let refused = run_it().err().expect("refused");
+        assert!(
+            refused.contains("modules come from the script's directory"),
+            "{refused}"
+        );
+    };
+    escape("../../../out");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(base.join("out.luau"), out.join("ui/link.luau")).unwrap();
+        escape("../link");
+        let refused = opened.file("link.luau").unwrap_err();
+        assert!(refused.contains("outside its bundle's ui/"), "{refused}");
+    }
+    // A manifest whose first script is out of it, or that says both kinds, or
+    // neither, or another format's, is refused.
+    let path = out.join("manifest.json");
+    for (format, ui) in [
+        (3, serde_json::json!({ "source": true, "sha256": {} })),
+        (3, serde_json::json!({})),
+        (3, serde_json::json!({ "source": false })),
+        (3, checked["ui"].clone()),
+        (2, serde_json::json!({ "source": true, "sha256": {} })),
+        (2, serde_json::json!({})),
+        (2, source["ui"].clone()),
+    ] {
+        let mut wrong = source.clone();
+        (wrong["zgx_bundle"], wrong["ui"]) = (format.into(), ui);
+        std::fs::write(&path, wrong.to_string()).unwrap();
+        let refused = open(&out).unwrap_err();
+        assert!(
+            refused.contains("its `ui` isn't what a bundle of its format has"),
+            "{refused}"
+        );
+    }
+    let mut entries = vec!["../../out.luau"];
+    entries.extend(cfg!(unix).then_some("link.luau"));
+    for entry in entries {
+        let mut wrong = source.clone();
+        wrong["entry"] = entry.into();
+        std::fs::write(&path, wrong.to_string()).unwrap();
+        let refused = open(&out).unwrap_err();
+        assert!(refused.contains("outside its bundle's ui/"), "{refused}");
+    }
+    std::fs::write(&path, source.to_string()).unwrap();
+    // A module's library changed since the build is refused, as any bundle's.
+    let library = opened.modules[0].1.clone();
+    std::fs::write(&library, "another library").unwrap();
+    let refused = open(&out).unwrap_err();
+    assert!(
+        refused.contains("isn't the library its manifest names"),
         "{refused}"
     );
     std::fs::remove_dir_all(base).unwrap();
@@ -1514,7 +1802,7 @@ fn a_bundles_lent_package_is_its_bytecode_for_plugins_too() {
         &plugins.join("p.luau"),
         "local badge = require(\"@ds/badge\")\nui.contribute { target = \"#mine\", after = ui.text { id = \"theirs\", badge(\"plugin\") } }\n",
     );
-    let (ui, files) = (opened.ui.clone(), opened.files());
+    let (ui, files) = (opened.ui.clone(), opened.files().unwrap());
     let mut run = TestApp::new(move |runtime| {
         let host = ScriptHost::from_files(
             runtime,
