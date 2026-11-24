@@ -379,8 +379,14 @@ impl UserData for WebUd {
                     return;
                 };
                 let outcome = match result {
-                    Ok(json) => vm.call::<()>(&reply, (json_value(&json), mlua::Value::Nil)),
-                    Err(error) => vm.call::<()>(&reply, (Value::Nil, error)),
+                    Ok(json) => vm.call_as::<()>(
+                        "the reply function",
+                        &reply,
+                        (json_value(&json), mlua::Value::Nil),
+                    ),
+                    Err(error) => {
+                        vm.call_as::<()>("the reply function", &reply, (Value::Nil, error))
+                    }
                 };
                 if let Err(e) = outcome {
                     vm.report(e);
@@ -1238,6 +1244,30 @@ pub(crate) struct InputRare {
     pub(crate) no_drop_caret: bool,
 }
 
+/// What a component node's function builds (`Kind::Component`): a
+/// component's root, or a branch of `ui.show` or `ui.switch` given as a
+/// function. Named in an error about the function.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BuildOf {
+    Component,
+    ShowContent,
+    ShowAlternative,
+    SwitchCase,
+    SwitchDefault,
+}
+impl BuildOf {
+    /// The function's role, as an error names it.
+    pub(crate) fn role(self) -> &'static str {
+        match self {
+            BuildOf::Component => "the component's function",
+            BuildOf::ShowContent => "the content function of ui.show",
+            BuildOf::ShowAlternative => "the alternative function of ui.show",
+            BuildOf::SwitchCase => "a case function of ui.switch",
+            BuildOf::SwitchDefault => "the default function of ui.switch",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum Kind {
     Column,
@@ -1448,6 +1478,8 @@ pub(crate) enum Kind {
     Component {
         build: Function,
         props: Table,
+        /// What its function is, named in an error about it.
+        of: BuildOf,
     },
     /// `ui.presence(value, build, { enter, exit, mode })`: content for the
     /// current value, entering and exiting with animations as it changes.
@@ -2370,6 +2402,9 @@ pub(crate) struct HookContribution {
     /// Its target's ancestors (`a >> b`) as the `Hooks` they were added to
     /// number them (`Hooks::marks`), outermost first: empty for one part.
     pub chain: Vec<usize>,
+    /// The script line that added it (`app.luau:12`), which an error about
+    /// it, found as the interface builds, names.
+    pub site: Option<String>,
 }
 /// A contribution's live state: the elements it applies at, mounted now,
 /// and its latest error.
@@ -2735,7 +2770,7 @@ fn controlled(
                     *last.borrow_mut() = value.clone();
                     shown.set(value);
                 }
-                Err(error) => vm.report(error),
+                Err(error) => vm.report_as(error, "the control's value function", &show),
             }
         })
     };
@@ -2749,7 +2784,8 @@ fn controlled(
             }
             runtime2.untracked(|| {
                 if let (Some(vm), Some(on_change)) = (vm.upgrade(), &on_change)
-                    && let Err(error) = vm.call::<()>(on_change, now)
+                    && let Err(error) =
+                        vm.call_as::<()>("the control's on_change handler", on_change, now)
                 {
                     vm.report(error);
                 }
@@ -2972,6 +3008,7 @@ fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<H
         vm: env.vm.clone(),
         stats: Rc::default(),
         chain: Vec::new(),
+        site: None,
     })
 }
 /// The capability adding at `exposed` (a target as written, or `slot:name`)
@@ -3050,6 +3087,7 @@ fn hook_filter(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookCon
         vm: env.vm.clone(),
         stats: Rc::default(),
         chain: Vec::new(),
+        site: None,
     })
 }
 
@@ -3057,13 +3095,14 @@ fn hook_filter(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookCon
 /// called only when the branch shows (each time it does) and in a scope of
 /// its own, as a component's builder is: a row's branches that never show
 /// are never built.
-fn expect_branch(lua: &Lua, value: mlua::Value, what: &str) -> mlua::Result<Rc<Node>> {
+fn expect_branch(lua: &Lua, value: mlua::Value, what: &str, of: BuildOf) -> mlua::Result<Rc<Node>> {
     match value {
         mlua::Value::Function(build) => Ok(Rc::new(Node::new(
             owner(lua)?,
             Kind::Component {
                 build,
                 props: lua.create_table()?,
+                of,
             },
         ))),
         other => expect_node(other, what),
@@ -5712,11 +5751,16 @@ pub(crate) fn install_decisions(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 .ok_or_else(|| mlua::Error::runtime("ui.plugin_page needs a `plugin`"))?
                 .into();
             table.raw_set("plugin", mlua::Value::Nil)?;
-            let node = fill(
+            let mut node = fill(
                 lua,
                 Node::new(owner(lua)?, Kind::PluginPage(plugin)),
                 Some(&table),
             )?;
+            // Where it is, which its errors (found as it lowers) name: few
+            // nodes are one.
+            if node.source.is_none() {
+                node.source = crate::call_site(lua).map(Rc::from);
+            }
             node_ud(lua, node)
         })?,
     )
@@ -5752,7 +5796,8 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                     crate::reloads::per_load(lua, "ui.contribute");
                 }
                 (mlua::Value::Table(table), None) => {
-                    let hook = hook_contribution(&env, &table, owner)?;
+                    let mut hook = hook_contribution(&env, &table, owner)?;
+                    hook.site = crate::call_site(lua);
                     env.hooks.borrow_mut().push(hook);
                     drop(env);
                     crate::reloads::per_load(lua, "ui.contribute");
@@ -5771,7 +5816,8 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
         "filter",
         lua.create_function(|lua, table: Table| {
             let env = env(lua)?;
-            let hook = hook_filter(&env, &table, env.owner.clone())?;
+            let mut hook = hook_filter(&env, &table, env.owner.clone())?;
+            hook.site = crate::call_site(lua);
             env.hooks.borrow_mut().push(hook);
             drop(env);
             crate::reloads::per_load(lua, "ui.filter");
@@ -6363,9 +6409,16 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(
             |lua, (when, then, otherwise): (mlua::Value, mlua::Value, mlua::Value)| {
                 let when = source(lua, Ty::Bool, "show condition", when)?;
-                let then = expect_branch(lua, then, "ui.show's content")?;
+                let then = expect_branch(lua, then, "ui.show's content", BuildOf::ShowContent)?;
                 let otherwise = (!otherwise.is_nil())
-                    .then(|| expect_branch(lua, otherwise, "ui.show's alternative"))
+                    .then(|| {
+                        expect_branch(
+                            lua,
+                            otherwise,
+                            "ui.show's alternative",
+                            BuildOf::ShowAlternative,
+                        )
+                    })
                     .transpose()?;
                 node_ud(
                     lua,
@@ -6634,10 +6687,15 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut list = Vec::new();
                 for pair in cases.pairs::<Value, mlua::Value>() {
                     let (key, node) = pair?;
-                    list.push((key, expect_branch(lua, node, "a switch case")?));
+                    list.push((
+                        key,
+                        expect_branch(lua, node, "a switch case", BuildOf::SwitchCase)?,
+                    ));
                 }
                 let default = (!default.is_nil())
-                    .then(|| expect_branch(lua, default, "a switch default"))
+                    .then(|| {
+                        expect_branch(lua, default, "a switch default", BuildOf::SwitchDefault)
+                    })
                     .transpose()?;
                 node_ud(
                     lua,
@@ -6844,6 +6902,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     Kind::Component {
                         build: build.clone(),
                         props: props.clone(),
+                        of: BuildOf::Component,
                     },
                 );
                 if let Some(id) = props.get::<Option<String>>("id")? {
@@ -6887,7 +6946,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 if let Some(vm) = vm.upgrade()
                     && let Err(e) = vm.call::<()>(&f, ())
                 {
-                    vm.report(e);
+                    vm.report_as(e, "the body of ui.effect", &f);
                 }
             });
             // Named for devtools' traces by where the script made it.
@@ -6985,7 +7044,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             // The writes inside count; the updates after them do not.
             match vm {
-                Some(vm) => vm.off_clock(|| runtime.batch(|| vm.call::<mlua::MultiValue>(&f, ()))),
+                Some(vm) => vm.off_clock(|| {
+                    runtime.batch(|| {
+                        vm.call_as::<mlua::MultiValue>("the function given to ui.batch", &f, ())
+                    })
+                }),
                 None => runtime.batch(|| f.call::<mlua::MultiValue>(())),
             }
         })?,
@@ -7563,7 +7626,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     if settled {
                         running.set(0.);
                         if let (Some(done), Some(vm)) = (done.borrow_mut().take(), vm.upgrade())
-                            && let Err(error) = vm.call::<()>(&done, ())
+                            && let Err(error) = vm.call_as::<()>("the on_done function", &done, ())
                         {
                             vm.report(error);
                         }
@@ -7663,7 +7726,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             impl Drop for Cleanup {
                 fn drop(&mut self) {
                     if let (Some(vm), Some(f)) = (self.0.upgrade(), self.1.take())
-                        && let Err(error) = vm.call::<()>(&f, ())
+                        && let Err(error) =
+                            vm.call_as::<()>("the function given to ui.on_cleanup", &f, ())
                     {
                         vm.report(error);
                     }
@@ -7761,7 +7825,9 @@ pub(crate) fn computed_state(lua: &Lua, env: &Env, f: Function) -> crate::value:
                 Ok(v) => {
                     out.set(v);
                 }
-                Err(e) => vm.report(e),
+                // The call's error or its value's (no traceback is left
+                // for that): named as the function is, in this arm alone.
+                Err(e) => vm.report_as(e, "the function of ui.computed", &f),
             }
         }
     });
@@ -8108,7 +8174,9 @@ impl ScrollbarSpec {
         let mut style = self.style.clone();
         fn now(vm: &crate::Vm, source: &mlua::Value) -> mlua::Result<mlua::Value> {
             match source {
-                mlua::Value::Function(f) => vm.call::<mlua::Value>(f, ()),
+                mlua::Value::Function(f) => {
+                    vm.call_as::<mlua::Value>("the scrollbar's style function", f, ())
+                }
                 other => match state_of(other) {
                     Some(state) => mlua::IntoLua::into_lua(state.get(), &vm.lua),
                     None => Ok(other.clone()),
@@ -8157,7 +8225,9 @@ pub(crate) fn scroll_padding_now(
     source: &mlua::Value,
 ) -> mlua::Result<zgx::scene::Insets> {
     let value = match source {
-        mlua::Value::Function(f) => vm.call::<mlua::Value>(f, ())?,
+        mlua::Value::Function(f) => {
+            vm.call_as::<mlua::Value>("the scroll_padding function", f, ())?
+        }
         other => match state_of(other) {
             Some(state) => mlua::IntoLua::into_lua(state.get(), &vm.lua)?,
             None => other.clone(),

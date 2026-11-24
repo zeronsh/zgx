@@ -30,7 +30,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, actions: Actions, app: bool) -> mlu
                 let vm = vm.clone();
                 let action = move |arg: Value| {
                     if let Some(vm) = vm.upgrade()
-                        && let Err(error) = vm.call::<()>(&function, arg)
+                        && let Err(error) = vm.call_as::<()>("an action's function", &function, arg)
                     {
                         vm.report(error);
                     }

@@ -47,7 +47,8 @@ impl Opens {
         }
         let event = event(&files, &urls);
         for (vm, handler) in handlers {
-            if let Err(error) = vm.call::<()>(&handler, event.clone()) {
+            if let Err(error) = vm.call_as::<()>("the ui.on_open handler", &handler, event.clone())
+            {
                 vm.report(error);
             }
         }

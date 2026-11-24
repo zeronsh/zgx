@@ -560,8 +560,9 @@ fn removes_decision(hook: &crate::node::HookContribution, node: &Node) -> bool {
     }
     if hook.stats.error.borrow().is_none() {
         let message = format!(
-            "ui.contribute {{ target = \"{}\" }}: refused, it holds a decision control \
+            "{}ui.contribute {{ target = \"{}\" }}: refused, it holds a decision control \
              (ui.decision), which no plugin removes",
+            site_of(hook),
             hook.target_text()
         );
         *hook.stats.error.borrow_mut() = Some(message.clone());
@@ -905,9 +906,14 @@ fn decision(node: &Node, held: &crate::node::Decision, low: &Rc<Lowering>) -> Vi
 fn plugin_page(plugin: &Rc<str>, node: &Node, low: &Rc<Lowering>) -> View {
     let Some(pages) = low.slots.get(PAGES) else {
         if let Some(vm) = node.owner.upgrade() {
-            vm.report(mlua::Error::runtime(
-                "ui.plugin_page: it shows in a ui.sealed region alone",
-            ));
+            let at = node
+                .source
+                .as_deref()
+                .map(|at| format!("{at}: "))
+                .unwrap_or_default();
+            vm.report(mlua::Error::runtime(format!(
+                "{at}ui.plugin_page: it shows in a ui.sealed region alone"
+            )));
         }
         return div();
     };
@@ -1125,7 +1131,7 @@ fn passed(plugin: &std::rc::Weak<Vm>, f: &mlua::Function, value: Value) -> Value
     match vm.call::<Value>(f, value.clone()) {
         Ok(returned) => returned,
         Err(error) => {
-            vm.report(error);
+            vm.report_as(error, "a plugin's filter function", f);
             value
         }
     }
@@ -1557,7 +1563,7 @@ fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
             zgx::compose::theme_scope_with(
                 move || {
                     let value = vm.call::<Value>(&f, ()).unwrap_or_else(|e| {
-                        vm.report(e);
+                        vm.report_as(e, "the theme function", &f);
                         Value::Nil
                     });
                     compute(value, &vm)
@@ -2030,7 +2036,7 @@ impl ItemKeys {
                         k
                     }
                     Err(e) => {
-                        vm.report(e);
+                        vm.report_as(e, EACH_KEY, key);
                         i.to_string()
                     }
                 }
@@ -2437,10 +2443,11 @@ pub(crate) fn build_scoped(
     vm: &Rc<Vm>,
     cx: &mut Context,
     low: &Rc<Lowering>,
+    role: &'static str,
     f: &mlua::Function,
     args: impl mlua::IntoLuaMulti,
 ) -> View {
-    build_scoped_seeing(vm, cx, low, f, args, |_| {})
+    build_scoped_seeing(vm, cx, low, role, f, args, |_| {})
 }
 
 /// A component given an `id` lays out as its root under that id: one set on
@@ -2514,6 +2521,16 @@ fn wrapped_builder(
     vm.lua
         .create_function(move |lua, args: mlua::MultiValue| {
             let root: mlua::Value = inner.call(args)?;
+            // What isn't a node is the builder's to answer for, named as
+            // it is defined (this wrapper is defined nowhere a script has).
+            if !matches!(&root, mlua::Value::UserData(ud) if ud.is::<NodeUd>()) {
+                let role = match built {
+                    Built::Row => "the row function",
+                    Built::Component => "the component's function",
+                    Built::Presence => "the content function of ui.presence",
+                };
+                return Err(crate::returned(role, &inner, &root, "a ui node"));
+            }
             match low.upgrade() {
                 Some(low) => hooked_root(lua, root, &low, built),
                 None => Ok(root),
@@ -2574,8 +2591,9 @@ pub(crate) fn no_siblings(hooks: &Hooks, node: &Node, low: &Lowering, what: &str
             continue;
         }
         let message = format!(
-            "ui.contribute {{ target = \"{}\", {place} = … }}: its target is {what}, which \
+            "{}ui.contribute {{ target = \"{}\", {place} = … }}: its target is {what}, which \
              can't have siblings. Target an element inside it",
+            site_of(hook),
             hook.target_text()
         );
         *hook.stats.error.borrow_mut() = Some(message.clone());
@@ -2710,6 +2728,7 @@ fn build_scoped_seeing(
     vm: &Rc<Vm>,
     cx: &mut Context,
     low: &Rc<Lowering>,
+    role: &'static str,
     f: &mlua::Function,
     args: impl mlua::IntoLuaMulti,
     see: impl FnOnce(&mlua::Value),
@@ -2726,6 +2745,7 @@ fn build_scoped_seeing(
         .lua
         .app_data_ref::<crate::node::Env>()
         .map(|env| env.scope.replace(Some(scope.clone())));
+    // As before: the role is added only once there is an error to name.
     let result = vm.call::<mlua::Value>(f, args);
     if let Ok(root) = &result {
         see(root);
@@ -2737,14 +2757,14 @@ fn build_scoped_seeing(
         cx.retain(resource);
     }
     let mounted: Vec<mlua::Function> = scope.mounted.borrow_mut().drain(..).collect();
-    let view = built(vm, result, low);
+    let view = built(vm, result, low, role, f);
     if mounted.is_empty() {
         return view;
     }
     let vm = vm.clone();
     view.on_mount(move |_| {
         for f in mounted {
-            if let Err(e) = vm.call::<()>(&f, ()) {
+            if let Err(e) = vm.call_as::<()>("an on_mount function", &f, ()) {
                 vm.report(e);
             }
         }
@@ -2815,9 +2835,11 @@ fn drive_of(
     let mut last = literal.unwrap_or_default();
     let make: Box<dyn FnMut() -> zgx::shader_drive::ShaderDrive> = Box::new(move || {
         if let Some(f) = &params_of {
-            let read = vm.call::<mlua::Value>(f, ()).and_then(|value| {
-                crate::node::shader_params(&vm.lua, &value, "layer_params", None)
-            });
+            let read = vm
+                .call_as::<mlua::Value>("the shader drive's function", f, ())
+                .and_then(|value| {
+                    crate::node::shader_params(&vm.lua, &value, "layer_params", None)
+                });
             match read {
                 Ok(params) => last = params,
                 Err(e) => vm.report(e),
@@ -2884,10 +2906,9 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
                     let Some(vm) = vm.upgrade() else { return };
                     let download = crate::io::DownloadUd::new(request, responder);
                     vm.runtime.clone().batch(|| {
-                        let called = vm
-                            .lua
-                            .create_userdata(download)
-                            .and_then(|d| vm.call::<()>(&on_download, d));
+                        let called = vm.lua.create_userdata(download).and_then(|d| {
+                            vm.call_as::<()>("the web view's on_download handler", &on_download, d)
+                        });
                         if let Err(e) = called {
                             vm.report(e);
                         }
@@ -2916,7 +2937,7 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
             let Some(vm) = vm.upgrade() else { return };
             let call = |f: &Option<mlua::Function>, args: mlua::MultiValue| {
                 if let Some(f) = f
-                    && let Err(e) = vm.call::<()>(f, args)
+                    && let Err(e) = vm.call_as::<()>("a web view handler", f, args)
                 {
                     vm.report(e);
                 }
@@ -2963,7 +2984,11 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
                     if let Some(f) = &message {
                         let value = crate::node::json_value(body);
                         // Who sent it: check before acting on it.
-                        if let Err(e) = vm.call::<()>(f, (value, origin.as_str(), *main_frame)) {
+                        if let Err(e) = vm.call_as::<()>(
+                            "the web view's on_message handler",
+                            f,
+                            (value, origin.as_str(), *main_frame),
+                        ) {
                             vm.report(e);
                         }
                     }
@@ -2975,24 +3000,52 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
     })
 }
 
-/// Builds a node a script function returned.
-fn built(vm: &Rc<Vm>, result: mlua::Result<mlua::Value>, low: &Rc<Lowering>) -> View {
-    match result.and_then(|v| match v {
-        mlua::Value::UserData(ud) => ud.borrow::<NodeUd>().map(|n| n.0.clone()),
-        mlua::Value::Nil => Err(mlua::Error::runtime(
-            "the function returned nothing; return a ui node",
-        )),
-        other => Err(mlua::Error::runtime(format!(
-            "expected a ui node, got {}",
-            other.type_name()
-        ))),
-    }) {
-        Ok(node) => lower(&node, low),
+/// Where `hook` was added, as an error leads with it (`app.luau:12: `):
+/// nothing if the line wasn't known.
+fn site_of(hook: &crate::node::HookContribution) -> String {
+    hook.site
+        .as_deref()
+        .map(|site| format!("{site}: "))
+        .unwrap_or_default()
+}
+
+/// What a script function is to zgx, as an error about it names it.
+/// A computed style's function (`resolve`).
+const PROPERTY: &str = "a property's function";
+pub(crate) const EACH_ROW: &str = "the row function of ui.each";
+pub(crate) const LIST_ROW: &str = "the row function of ui.list";
+pub(crate) const EACH_KEY: &str = "the key function of ui.each";
+pub(crate) const LIST_KEY: &str = "the key function of ui.list";
+
+/// Builds a node script function `f` returned, called as `role`: what
+/// else it returned is an error naming it and where it is defined.
+fn built(
+    vm: &Rc<Vm>,
+    result: mlua::Result<mlua::Value>,
+    low: &Rc<Lowering>,
+    role: &'static str,
+    f: &mlua::Function,
+) -> View {
+    match result {
+        // One type check, as before: what isn't a node fails to borrow.
+        Ok(mlua::Value::UserData(ud)) => match ud.borrow::<NodeUd>() {
+            Ok(node) => lower(&node.0.clone(), low),
+            Err(_) => not_a_node(vm, role, f, mlua::Value::UserData(ud.clone())),
+        },
+        Ok(other) => not_a_node(vm, role, f, other),
         Err(error) => {
-            vm.report(error);
+            vm.report_as(error, role, f);
             div()
         }
     }
+}
+
+/// What a build function returned in place of a node, reported.
+#[cold]
+#[inline(never)]
+fn not_a_node(vm: &Vm, role: &str, f: &mlua::Function, got: mlua::Value) -> View {
+    vm.report(crate::returned(role, f, &got, "a ui node"));
+    div()
 }
 
 /// The view a node's kind makes, before its styles, handlers and
@@ -3132,8 +3185,16 @@ fn kind_view(
                     let recorder = crate::canvas::Recorder(Default::default());
                     let result = vm.lua.create_userdata(recorder).and_then(|ud| {
                         crate::canvas::draw_in(drawn_theme.clone(), || match args {
-                            None => vm.call::<()>(draw, (ud.clone(), w, h)),
-                            Some(item) => vm.call::<()>(draw, (ud.clone(), item.clone(), w, h)),
+                            None => vm.call_as::<()>(
+                                "the canvas's draw function",
+                                draw,
+                                (ud.clone(), w, h),
+                            ),
+                            Some(item) => vm.call_as::<()>(
+                                "the canvas's draw function",
+                                draw,
+                                (ud.clone(), item.clone(), w, h),
+                            ),
                         })?;
                         ud.take::<crate::canvas::Recorder>()
                     });
@@ -3644,7 +3705,7 @@ fn kind_view(
                     let item =
                         items.with_untracked(|list| list.item(index).cloned().unwrap_or_default());
                     if !live {
-                        return build_scoped(&vm, cx, &low, &builder, (item, index + 1));
+                        return build_scoped(&vm, cx, &low, EACH_ROW, &builder, (item, index + 1));
                     }
                     let signal = vm.runtime.signal(item.clone());
                     if let Some(state) = rows.borrow_mut().get_mut(&row) {
@@ -3654,6 +3715,7 @@ fn kind_view(
                         &vm,
                         cx,
                         &low,
+                        EACH_ROW,
                         &builder,
                         (item, index + 1, crate::value::State::new(signal)),
                     )
@@ -3762,7 +3824,7 @@ fn kind_view(
             if let Some(over) = over.clone() {
                 let vm = vm.clone();
                 view = view.open_over(move || {
-                    vm.call::<Option<String>>(&over, ())
+                    vm.call_as::<Option<String>>("the open_over function", &over, ())
                         .ok()
                         .flatten()
                         .unwrap_or_default()
@@ -3822,9 +3884,10 @@ fn kind_view(
         Kind::Component {
             build: builder,
             props,
+            of,
         } => {
-            let (builder, props, vm, low) =
-                (builder.clone(), props.clone(), vm.clone(), low.clone());
+            let (builder, props, vm, low, of) =
+                (builder.clone(), props.clone(), vm.clone(), low.clone(), *of);
             let (given, site) = (node.id.clone(), node.source.clone());
             component(move |cx| {
                 // Contributed to a slot with a context: its own props, with
@@ -3839,7 +3902,7 @@ fn kind_view(
                     },
                     None => props.clone(),
                 };
-                build_scoped_seeing(&vm, cx, &low, &builder, props, |root| {
+                build_scoped_seeing(&vm, cx, &low, of.role(), &builder, props, |root| {
                     if let Some(given) = &given {
                         warn_replaced_id(&vm, given, site.as_deref(), root);
                     }
@@ -4348,7 +4411,7 @@ fn styled(
                     Owned::Computed(f, _) => match vm.call::<Value>(f, ()) {
                         Ok(value) => value,
                         Err(error) => {
-                            vm.report(error);
+                            vm.report_as(error, "the pointer_events function", f);
                             return true;
                         }
                     },
@@ -4477,7 +4540,9 @@ fn styled(
             }
             if let Some(f) = mount {
                 let arg = vm.lua.create_userdata(ElementUd(element.clone()));
-                if let Err(e) = arg.and_then(|arg| vm.call::<()>(&f, arg)) {
+                if let Err(e) =
+                    arg.and_then(|arg| vm.call_as::<()>("the on_mount handler", &f, arg))
+                {
                     vm.report(e);
                 }
             }
@@ -4503,7 +4568,7 @@ fn styled(
                         size.set("w", w)?;
                         size.set("h", h)?;
                         let el = vm.lua.create_userdata(ElementUd(element.clone()))?;
-                        vm.call::<()>(&f, (size, el))
+                        vm.call_as::<()>("the on_resize handler", &f, (size, el))
                     };
                     if let Err(e) = vm.runtime.untracked(call) {
                         vm.report(e);
@@ -4537,7 +4602,7 @@ fn styled(
                         }
                         let call = || -> mlua::Result<()> {
                             let el = vm.lua.create_userdata(ElementUd(element.clone()))?;
-                            vm.call::<()>(&f, (on, el))
+                            vm.call_as::<()>("the on_visible handler", &f, (on, el))
                         };
                         if let Err(e) = vm.runtime.untracked(call) {
                             vm.report(e);
@@ -6255,15 +6320,15 @@ fn with_drag(
     use zgx::input::DragPhase;
     let events = node.events();
     fn call(vm: &Rc<Vm>, f: &mlua::Function, args: impl mlua::IntoLuaMulti) -> Option<mlua::Value> {
-        vm.runtime
-            .clone()
-            .batch(|| match vm.call::<mlua::Value>(f, args) {
+        vm.runtime.clone().batch(
+            || match vm.call_as::<mlua::Value>("a drag handler", f, args) {
                 Ok(value) => Some(value),
                 Err(error) => {
                     vm.report(error);
                     None
                 }
-            })
+            },
+        )
     }
     if let Some(drag) = events.drags().drag.clone() {
         let vm = vm.clone();
@@ -6278,8 +6343,9 @@ fn with_drag(
     if let Some(preview) = events.drags().drag_preview.clone() {
         let (vm, low) = (vm.clone(), low.clone());
         let build = move |payload: &Value| {
-            let result = vm.call::<mlua::Value>(&preview, payload.clone());
-            built(&vm, result, &low)
+            const ROLE: &str = "the drag_preview function";
+            let result = vm.call_as::<mlua::Value>(ROLE, &preview, payload.clone());
+            built(&vm, result, &low, ROLE, &preview)
         };
         view = match (
             events.drags().drag_preview_anchor,
@@ -6433,7 +6499,7 @@ fn run(
         Handler::Lua(f) => match vm.call::<mlua::Value>(f, args) {
             Ok(v) => Some(v),
             Err(error) => {
-                vm.report(error);
+                vm.report_as(error, "an event handler", f);
                 None
             }
         },
@@ -6504,7 +6570,7 @@ fn resolve_style(source: &Owned, prop: Prop, scalar: Option<&Signal<f32>>, vm: &
     {
         let value = vm
             .call::<mlua::Value>(f, ())
-            .map_err(|e| vm.report(e))
+            .map_err(|e| vm.report_as(e, "a style's function", f))
             .ok()?;
         let raw = crate::design::is_raw(&value);
         let value = vm.lua.unpack::<Value>(value).ok()?;
@@ -6953,10 +7019,18 @@ fn code_editor(
             // A whole number is passed as itself (most highlighters' states,
             // no table touched); anything else from the side table.
             let called = if state & KEPT == 0 {
-                vm.call::<(Option<mlua::Table>, Next)>(&highlight, (line, state))
+                vm.call_as::<(Option<mlua::Table>, Next)>(
+                    "the code editor's highlight function",
+                    &highlight,
+                    (line, state),
+                )
             } else {
                 let before = states.borrow().value(state);
-                vm.call::<(Option<mlua::Table>, Next)>(&highlight, (line, before))
+                vm.call_as::<(Option<mlua::Table>, Next)>(
+                    "the code editor's highlight function",
+                    &highlight,
+                    (line, before),
+                )
             };
             match called {
                 Ok((list, next)) => (
@@ -6985,7 +7059,9 @@ fn code_editor(
                 crate::node::Readable::State(state) => {
                     state.with(|value| crate::value::to_lua(value, &vm.lua, false).ok())
                 }
-                crate::node::Readable::Function(f) => vm.call::<mlua::Value>(f, ()).ok(),
+                crate::node::Readable::Function(f) => vm
+                    .call_as::<mlua::Value>("a code editor's function", f, ())
+                    .ok(),
             };
             match list {
                 Some(mlua::Value::Table(list)) => ranges(&list, 0, fallback),
@@ -7065,7 +7141,9 @@ fn code_editor(
                 crate::node::Readable::State(state) => {
                     state.with(|value| crate::value::to_lua(value, &vm.lua, false).ok())
                 }
-                crate::node::Readable::Function(f) => vm.call::<mlua::Value>(f, ()).ok(),
+                crate::node::Readable::Function(f) => vm
+                    .call_as::<mlua::Value>("a code editor's function", f, ())
+                    .ok(),
             };
             let Some(mlua::Value::Table(list)) = list else {
                 return Vec::new();
@@ -7200,7 +7278,7 @@ fn code_editor(
                     }
                     change.set("added", list(&vm.lua, added)?)?;
                     change.set("removed", list(&vm.lua, removed)?)?;
-                    vm.call::<()>(told, change)
+                    vm.call_as::<()>("the on_atoms handler", told, change)
                 })();
                 if let Err(error) = result {
                     vm.report(error);
@@ -7216,7 +7294,7 @@ fn code_editor(
                 let at = vm.lua.create_table()?;
                 at.set("x", press.x)?;
                 at.set("y", press.y)?;
-                vm.call(&told, (atom, at))
+                vm.call_as("the on_atom_press handler", &told, (atom, at))
             })();
             match result {
                 Ok(taken) => taken == Some(true),
@@ -7246,7 +7324,7 @@ fn code_editor(
                     }
                     None => mlua::Value::Nil,
                 };
-                vm.call(&told, (atom, area))
+                vm.call_as("the on_atom_hover handler", &told, (atom, area))
             })();
             if let Err(error) = result {
                 vm.report(error);
@@ -7257,7 +7335,7 @@ fn code_editor(
         let (told, vm) = (told.clone(), vm.clone());
         view = view.on_caret(move |caret| {
             let args = (caret.line, caret.column, caret.anchor, caret.focus);
-            if let Err(error) = vm.call::<()>(&told, args) {
+            if let Err(error) = vm.call_as::<()>("the on_caret handler", &told, args) {
                 vm.report(error);
             }
         });
@@ -7265,7 +7343,7 @@ fn code_editor(
     if let Some(told) = &code.on_top_line {
         let (told, vm) = (told.clone(), vm.clone());
         view = view.on_top_line(move |line| {
-            if let Err(error) = vm.call::<()>(&told, line) {
+            if let Err(error) = vm.call_as::<()>("the on_top_line handler", &told, line) {
                 vm.report(error);
             }
         });
@@ -7438,12 +7516,25 @@ impl mlua::FromLua for ComputedColor {
 /// where a literal one would have stopped the script (`node::source`).
 #[cold]
 #[inline(never)]
-fn refused(value: &Value, ty: Ty, vm: &Vm) -> Option<Lit> {
+fn refused(value: &Value, ty: Ty, vm: &Vm, from: Option<&mlua::Function>) -> Option<Lit> {
+    // A function's: named where it is defined, what it returned.
+    let by = || match from {
+        Some(f) => format!(
+            "{}a property's function returned \"{value}\": ",
+            crate::defined_at(f)
+                .map(|at| format!("{at}: "))
+                .unwrap_or_default()
+        ),
+        None => String::new(),
+    };
     if ty == Ty::Tracks
         && let Value::Str(text) = value
         && let Err(why) = text.parse::<zgx::grid_tracks::GridTracks>()
     {
-        vm.report(mlua::Error::runtime(format!("a grid's tracks: {why}")));
+        vm.report(mlua::Error::runtime(format!(
+            "{}a grid's tracks: {why}",
+            by()
+        )));
     }
     if ty == Ty::Len
         && let Value::Str(text) = value
@@ -7451,7 +7542,7 @@ fn refused(value: &Value, ty: Ty, vm: &Vm) -> Option<Lit> {
         return match text.parse::<zgx::size_calc::SizeCalc>() {
             Ok(_) => crate::node::size_math(value),
             Err(why) => {
-                vm.report(mlua::Error::runtime(format!("a length: {why}")));
+                vm.report(mlua::Error::runtime(format!("{}a length: {why}", by())));
                 None
             }
         };
@@ -7496,7 +7587,7 @@ fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Opt
             .props
             .iter()
             .find_map(|(p, l)| (p == prop).then(|| l.clone())),
-        Owned::State(s) => s.with(|v| lit(v, ty).or_else(|| refused(v, ty, vm))),
+        Owned::State(s) => s.with(|v| lit(v, ty).or_else(|| refused(v, ty, vm, None))),
         // Mapped in Rust from the states it reads: no script runs.
         Owned::Map(spec) => mapped(spec, ty),
         // A colour or a number (most computed styles): read from what the
@@ -7519,20 +7610,22 @@ fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Opt
                 Ok(ComputedColor::Other(mlua::Value::Number(n))) => lit(&Value::Num(n), ty),
                 Ok(ComputedColor::Other(mlua::Value::Integer(n))) => lit(&Value::Num(n as f64), ty),
                 Ok(ComputedColor::Other(other)) => crate::value::convert(other, None)
-                    .map_err(|e| vm.report(e))
+                    .map_err(|e| vm.report_as(e, PROPERTY, f))
                     .ok()
                     .and_then(|v| lit(&v, ty)),
+                // Named in the error arm alone: the call that succeeds is
+                // as it was (a style function runs each time it reads).
                 Err(e) => {
-                    vm.report(e);
+                    vm.report_as(e, PROPERTY, f);
                     None
                 }
             }
         }
         Owned::Computed(f, _) => vm
             .call::<Value>(f, ())
-            .map_err(|e| vm.report(e))
+            .map_err(|e| vm.report_as(e, PROPERTY, f))
             .ok()
-            .and_then(|v| lit(&v, ty).or_else(|| refused(&v, ty, vm))),
+            .and_then(|v| lit(&v, ty).or_else(|| refused(&v, ty, vm, None))),
         Owned::Anim(from, to) => {
             let t = scalar?.get();
             match (from, to) {
@@ -7554,6 +7647,8 @@ fn resolve_value(source: &Owned, vm: &Vm) -> Value {
         Owned::Lit(Lit::Num(n)) => Value::Num(*n as f64),
         Owned::Lit(Lit::Bool(b)) => Value::Bool(*b),
         Owned::State(s) => s.get(),
+        // As it was: an error a value's function raises names its line in
+        // its traceback (this runs as often as what it reads changes).
         Owned::Computed(f, _) => vm.call::<Value>(f, ()).unwrap_or_else(|e| {
             vm.report(e);
             Value::Nil
@@ -7661,7 +7756,7 @@ fn render_text(text: &Text, vm: &Vm) -> String {
         Text::Computed(Computed::Script(f)) => match vm.call::<ComputedText>(f, ()) {
             Ok(v) => v.into_string(),
             Err(error) => {
-                vm.report(error);
+                vm.report_as(error, "the text function of ui.text", f);
                 "⚠".into()
             }
         },
@@ -7726,7 +7821,7 @@ fn picture_of(src: &Owned, vm: &Vm) -> Option<Picture> {
     };
     match src {
         Owned::State(state) => state.with(of),
-        Owned::Computed(f, _) => match vm.call::<mlua::Value>(f, ()) {
+        Owned::Computed(f, _) => match vm.call_as::<mlua::Value>("the image's function", f, ()) {
             Ok(returned) => crate::value::convert(returned, None)
                 .map_err(|e| vm.report(e))
                 .ok()
@@ -8034,7 +8129,7 @@ impl Told {
             let size = vm.lua.create_table()?;
             size.raw_set("w", w)?;
             size.raw_set("h", h)?;
-            vm.call::<()>(&on_load, size)
+            vm.call_as::<()>("the on_load handler", &on_load, size)
         });
     }
     #[cold]
@@ -8043,7 +8138,9 @@ impl Told {
             return;
         }
         match self.0.events.as_ref().and_then(|e| e.on_error.clone()) {
-            Some(on_error) => self.later(vm, move |vm| vm.call::<()>(&on_error, why)),
+            Some(on_error) => self.later(vm, move |vm| {
+                vm.call_as::<()>("the on_error handler", &on_error, why)
+            }),
             // (A remote one's failure was logged as it failed.)
             None if !is_remote(&src) => unshown(vm, why),
             None => {}
@@ -8133,7 +8230,7 @@ fn list_keys(vm: &Vm, key: &mlua::Function, count: usize, last: &mut Vec<ListKey
             lua.set_named_registry_value(LOOP, &all)?;
             Ok::<_, mlua::Error>(all)
         });
-    let keys = all.and_then(|all| vm.call::<mlua::Table>(&all, (key, count)));
+    let keys = all.and_then(|all| vm.call_as::<mlua::Table>(LIST_KEY, &all, (key, count)));
     let keys = match keys {
         Ok(keys) => keys,
         Err(e) => {
@@ -8166,6 +8263,7 @@ fn list_keys(vm: &Vm, key: &mlua::Function, count: usize, last: &mut Vec<ListKey
 /// has not mounted.
 fn described(
     vm: &Rc<Vm>,
+    role: &'static str,
     builder: &mlua::Function,
     args: impl mlua::IntoLuaMulti,
 ) -> Option<Rc<Node>> {
@@ -8178,12 +8276,14 @@ fn described(
         .lua
         .app_data_ref::<crate::node::Env>()
         .map(|env| env.scope.replace(Some(scope.clone())));
-    let result = vm.call::<mlua::Value>(builder, args);
+    let result = vm.call_as::<mlua::Value>(role, builder, args);
     if let (Some(previous), Some(env)) = (previous, vm.lua.app_data_ref::<crate::node::Env>()) {
         *env.scope.borrow_mut() = previous;
     }
     match result {
         Ok(mlua::Value::UserData(ud)) => ud.borrow::<NodeUd>().ok().map(|n| n.0.clone()),
+        // A row's text, for a list not showing it: the row itself says
+        // what it returned when it shows.
         Ok(_) => None,
         Err(e) => {
             vm.report(e);
@@ -8253,7 +8353,7 @@ fn canvas_options(
                 Readable::State(s) => s.get(),
                 Readable::Function(f) => vm
                     .call::<Value>(f, ())
-                    .map_err(|e| vm.report(e))
+                    .map_err(|e| vm.report_as(e, "the canvas's view function", f))
                     .unwrap_or_default(),
             };
             let field = |name: &str| value.field(name).and_then(Value::as_f64).map(|n| n as f32);
@@ -8301,7 +8401,7 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     let call = |f: &mlua::Function| {
         let (f, vm) = (f.clone(), vm.clone());
         move || {
-            if let Err(e) = vm.call::<()>(&f, ()) {
+            if let Err(e) = vm.call_as::<()>("the list's on_end or on_start handler", &f, ()) {
                 vm.report(e);
             }
         }
@@ -8356,7 +8456,7 @@ fn list_heights(
             crate::node::Heights::State(s) => s.get(),
             crate::node::Heights::Computed(f) => heights_vm
                 .call::<Value>(f, ())
-                .map_err(|e| heights_vm.report(e))
+                .map_err(|e| heights_vm.report_as(e, "the heights function of ui.list", f))
                 .unwrap_or_default(),
         };
         let values = value.list().iter().map(|v| match v {
@@ -8450,7 +8550,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
             Some((key, vm)) => match vm.call::<Value>(key, index + 1) {
                 Ok(value) => ListKey::of(&value).unwrap_or(ListKey::Index(index)),
                 Err(e) => {
-                    vm.report(e);
+                    vm.report_as(e, LIST_KEY, key);
                     ListKey::Index(index)
                 }
             },
@@ -8464,14 +8564,28 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
     let plain_row = {
         let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
         move |index: Signal<usize>, _: usize, cx: &mut Context| -> View {
-            build_scoped(&vm, cx, &low, &builder, index.with_untracked(|i| *i) + 1)
+            build_scoped(
+                &vm,
+                cx,
+                &low,
+                LIST_ROW,
+                &builder,
+                index.with_untracked(|i| *i) + 1,
+            )
         }
     };
     let row = {
         let (builder, vm, low, keyed) = (builder.clone(), vm.clone(), low.clone(), key.is_some());
         move |index: Signal<usize>, key: ListKey, cx: &mut Context| -> View {
             if !keyed {
-                return build_scoped(&vm, cx, &low, &builder, index.with_untracked(|i| *i) + 1);
+                return build_scoped(
+                    &vm,
+                    cx,
+                    &low,
+                    LIST_ROW,
+                    &builder,
+                    index.with_untracked(|i| *i) + 1,
+                );
             }
             // The row's index, from 1, following its row.
             let shown = cx
@@ -8482,7 +8596,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
                 follow.set(Value::Num((index.get() + 1) as f64));
             }));
             let state = crate::value::State(shown, None);
-            build_scoped(&vm, cx, &low, &builder, (key.value(), state))
+            build_scoped(&vm, cx, &low, LIST_ROW, &builder, (key.value(), state))
         }
     };
     let keyboard = *keyboard;
@@ -8517,7 +8631,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
                     Ok(Value::Nil) => String::new(),
                     Ok(value) => value.to_string(),
                     Err(e) => {
-                        vm.report(e);
+                        vm.report_as(e, "the row text function of ui.list", text);
                         String::new()
                     }
                 });
@@ -8525,9 +8639,9 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
             let node = if keyed {
                 let shown = runtime.signal(Value::Num((index + 1) as f64));
                 let args = (list_key(index).value(), crate::value::State(shown, None));
-                described(&vm, &builder, args)
+                described(&vm, LIST_ROW, &builder, args)
             } else {
-                described(&vm, &builder, index + 1)
+                described(&vm, LIST_ROW, &builder, index + 1)
             };
             Some(node.map_or_else(String::new, |node| node_text(&node, &vm)))
         }
@@ -8677,7 +8791,7 @@ fn item_key(
     match asked.unwrap_or_else(|| vm.call::<Value>(key, item.clone())) {
         Ok(value) => ListKey::of(&value).unwrap_or(ListKey::Index(index)),
         Err(e) => {
-            vm.report(e);
+            vm.report_as(e, LIST_KEY, key);
             ListKey::Index(index)
         }
     }
@@ -8709,7 +8823,7 @@ fn asked_keys(
             };
             items.raw_set(n + 1, view)?;
         }
-        let keys = vm.call::<mlua::Table>(all, (key, items));
+        let keys = vm.call_as::<mlua::Table>(LIST_KEY, all, (key, items));
         if !views.read_past() {
             return keys;
         }
@@ -8719,7 +8833,7 @@ fn asked_keys(
     // Made into a table before the call: the host's work, which the script's
     // budget isn't for, and a long list's is most of it.
     let items = mlua::IntoLua::into_lua(Value::List(items.into()), &vm.lua)?;
-    vm.call::<mlua::Table>(all, (key, items))
+    vm.call_as::<mlua::Table>(LIST_KEY, all, (key, items))
 }
 
 /// The keys of `items`, `key(item)` asked only of the items not kept from
@@ -8855,14 +8969,14 @@ fn lower_item_list(
             if live {
                 let value = item.with_untracked(Clone::clone);
                 let row = crate::value::State(item, None);
-                return build_scoped(&vm, cx, &low, &builder, (value, index, row));
+                return build_scoped(&vm, cx, &low, LIST_ROW, &builder, (value, index, row));
             }
             let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
             switch(
                 move || changes.get(),
                 move |_, cx| {
                     let value = item.with_untracked(Clone::clone);
-                    build_scoped(&vm, cx, &low, &builder, (value, index.clone()))
+                    build_scoped(&vm, cx, &low, LIST_ROW, &builder, (value, index.clone()))
                 },
             )
             .contents()
@@ -8931,7 +9045,7 @@ fn lower_item_list(
                     Ok(Value::Nil) => String::new(),
                     Ok(value) => value.to_string(),
                     Err(e) => {
-                        vm.report(e);
+                        vm.report_as(e, "the row text function of ui.list", text);
                         String::new()
                     }
                 });
@@ -8939,9 +9053,9 @@ fn lower_item_list(
             let shown = crate::value::State(runtime.signal(Value::Num((index + 1) as f64)), None);
             let node = if live {
                 let row = crate::value::State(runtime.signal(item.clone()), None);
-                described(&vm, &builder, (item, shown, row))
+                described(&vm, LIST_ROW, &builder, (item, shown, row))
             } else {
-                described(&vm, &builder, (item, shown))
+                described(&vm, LIST_ROW, &builder, (item, shown))
             };
             Some(node.map_or_else(String::new, |node| node_text(&node, &vm)))
         }
@@ -9073,7 +9187,7 @@ fn sticky_list<K: PartialEq + Clone + 'static>(
                 crate::node::Heights::State(s) => s.get(),
                 crate::node::Heights::Computed(f) => vm
                     .call::<Value>(f, ())
-                    .map_err(|e| vm.report(e))
+                    .map_err(|e| vm.report_as(e, "the heights function of ui.list", f))
                     .unwrap_or_default(),
             };
             let mut list: Vec<usize> = value
@@ -9165,7 +9279,7 @@ fn context_menu_items(
     let items = point.and_then(|p| {
         vm.runtime
             .clone()
-            .batch(|| vm.call::<Option<mlua::Table>>(build, p))
+            .batch(|| vm.call_as::<Option<mlua::Table>>("the context_menu function", build, p))
     });
     match items {
         Ok(Some(items)) => items
@@ -10419,7 +10533,14 @@ fn presence(
             let content = if value == Value::Nil {
                 div()
             } else {
-                build_scoped(&vm, cx, &low, &builder, value)
+                build_scoped(
+                    &vm,
+                    cx,
+                    &low,
+                    "the content function of ui.presence",
+                    &builder,
+                    value,
+                )
             };
             let element = Element::new(&low.runtime, None, Rc::new([]), "presence");
             let (state, enter, play, vm) = (state.clone(), enter.clone(), play.clone(), vm.clone());
@@ -10531,7 +10652,9 @@ fn on_paste(view: View, hook: mlua::Function, vm: &Rc<Vm>) -> View {
             event.set("files", crate::io::pasted_files(&vm.lua)?)?;
             Ok(event)
         });
-        match event.and_then(|event| vm.call::<mlua::Value>(&hook, event)) {
+        match event
+            .and_then(|event| vm.call_as::<mlua::Value>("the on_paste handler", &hook, event))
+        {
             Ok(mlua::Value::Nil | mlua::Value::Boolean(false)) => false,
             Ok(_) => true,
             Err(error) => {
@@ -10603,7 +10726,9 @@ fn on_selection_copy(
             event.set("rows", rows)?;
             Ok(event)
         })();
-        match event.and_then(|event| vm.call::<mlua::Value>(&hook, event)) {
+        match event.and_then(|event| {
+            vm.call_as::<mlua::Value>("the on_selection_copy handler", &hook, event)
+        }) {
             Ok(mlua::Value::Table(content)) => {
                 let text: Option<String> = content.get("text").unwrap_or(None);
                 let html: Option<String> = content.get("html").unwrap_or(None);

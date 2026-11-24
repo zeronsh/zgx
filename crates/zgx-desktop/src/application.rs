@@ -1123,6 +1123,8 @@ impl Application {
         if zgx::env::var_os("ZGX_FREEZE_TIME").is_some_and(|v| !v.is_empty() && v != "0") {
             zgx::clock::freeze();
         }
+        // A contained panic's banner names where it was.
+        note_panic_sites();
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),
@@ -9115,6 +9117,45 @@ impl ApplicationHandler<Event> for WindowManager {
         });
     }
 }
+thread_local! {
+    /// Where the last panic on this thread was (`file:line`), noted by the
+    /// hook `note_panic_sites` installs: a contained panic's banner names it.
+    static PANIC_SITE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A caught panic's `message`, led by where it was (`src/app.rs:42: …`), as
+/// a script's error says where it failed: the site `note_panic_sites`
+/// noted, taken.
+pub(crate) fn with_panic_site(message: String) -> String {
+    match PANIC_SITE.with(|site| site.take()) {
+        Some(site) => format!("{site}: {message}"),
+        None => message,
+    }
+}
+
+/// Note where each panic is (`PANIC_SITE`), then report it as before: the
+/// hook in place stays the one that reports (stderr, an app's own), called
+/// after. Once for the process.
+pub(crate) fn note_panic_sites() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(at) = info.location() {
+                let site = format!("{}:{}", at.file(), at.line());
+                // A panic while the slot is borrowed (none is held across
+                // code that panics) leaves it: never a second panic.
+                let _ = PANIC_SITE.try_with(|slot| {
+                    if let Ok(mut slot) = slot.try_borrow_mut() {
+                        *slot = Some(site);
+                    }
+                });
+            }
+            previous(info);
+        }));
+    });
+}
+
 impl WindowManager {
     /// Run one turn of the event loop. A panic in it (an app's handler or
     /// effect) is contained: the panic hook has logged it, its window (or
@@ -9137,6 +9178,7 @@ impl WindowManager {
             .map(|s| s.to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "a panic".into());
+        let message = with_panic_site(message);
         let now = std::time::Instant::now();
         self.panics
             .retain(|at| now.duration_since(*at) < std::time::Duration::from_secs(1));

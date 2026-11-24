@@ -420,8 +420,15 @@ impl Kept {
             }
             Some(Filter::Function(filter)) => {
                 let item = crate::value::shared_lua(item, &vm.lua)?;
+                // `call` out of line, as for every item: the role only once
+                // it fails (`in_role`, cold).
                 !matches!(
-                    vm.call::<mlua::Value>(filter, item)?,
+                    vm.call::<mlua::Value>(filter, item)
+                        .map_err(|e| crate::in_role(
+                            e,
+                            "the filter function of ui.sorted",
+                            filter
+                        ))?,
                     mlua::Value::Nil | mlua::Value::Boolean(false)
                 )
             }
@@ -435,7 +442,10 @@ impl Kept {
             By::Field(name) => item.field(name).map_or(Key::Nil, Key::of_value),
             By::Function(f) => {
                 let item = crate::value::shared_lua(item, &vm.lua)?;
-                Key::of_lua(&vm.call::<mlua::Value>(f, item)?)
+                Key::of_lua(
+                    &vm.call::<mlua::Value>(f, item)
+                        .map_err(|e| crate::in_role(e, "the sort function of ui.sorted", f))?,
+                )
             }
         };
         Ok((key, kept))
@@ -717,8 +727,11 @@ impl Kept {
             Some(Filter::Function(f)) => Some(f.clone()),
             _ => None,
         };
-        let (keep, keys): (mlua::Value, mlua::Value) =
-            vm.call(&judge, (list, filter, by.clone()))?;
+        let (keep, keys): (mlua::Value, mlua::Value) = vm.call_as(
+            "the filter or sort function of ui.sorted",
+            &judge,
+            (list, filter, by.clone()),
+        )?;
         let n = items.len();
         let mut kept = vec![true; n];
         let mut script_keys: Vec<Key> = Vec::new();
@@ -1105,7 +1118,7 @@ pub(crate) fn sorted(lua: &Lua, (list, spec): (mlua::Value, mlua::Value)) -> mlu
                     return;
                 };
                 match vm
-                    .call::<Table>(&f, ())
+                    .call_as::<Table>("the function of ui.sorted", &f, ())
                     .and_then(|t| Spec::from_table(&vm.lua, &t))
                 {
                     Ok(spec) => {
