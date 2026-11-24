@@ -457,6 +457,40 @@ fn tone_mapping_and_exposure_are_checked() {
     assert!(frame_id(&mut h, "scene").is_some());
 }
 
+/// A flick is timed on the interface's clock: on a test's own, a release a
+/// frame after the last move coasts, however long the wall clock took
+/// before it (a loaded machine read it as held still).
+#[test]
+fn a_flick_is_timed_on_the_interfaces_clock() {
+    use zgx::input::{InputEvent, PointerButton};
+    let clock = zgx::clock::VirtualClock::new();
+    let mut h = Harness::inline(PICKED);
+    h.frames(3);
+    let b = h.bounds("scene");
+    let (x, y) = (b.x + 100., b.y + 100.);
+    let button = PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    clock.advance(std::time::Duration::from_millis(16), || {});
+    h.ui.dispatch(InputEvent::PointerMove { x: x + 40., y });
+    // Over the 50 ms a release held still waits, on the wall clock alone.
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    clock.advance(std::time::Duration::from_millis(32), || {});
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: x + 40.,
+        y,
+        button,
+    });
+    h.settle();
+    // The frames after it, the clock stepped with them.
+    let mut frames = std::collections::HashSet::new();
+    for step in 1..=10_u64 {
+        clock.advance(std::time::Duration::from_millis(32 + 17 * step), || {});
+        h.frame();
+        frames.insert(frame_id(&mut h, "scene"));
+    }
+    assert!(frames.len() > 5, "it coasts: {} frames", frames.len());
+}
+
 #[test]
 fn an_orbit_turns_by_keyboard_focused_and_a_flick_coasts_to_a_stop() {
     use zgx::input::{InputEvent, Key, Modifiers};

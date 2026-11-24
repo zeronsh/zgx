@@ -749,6 +749,50 @@ fn a_drag_may_move_its_window() {
     up(&ui, 30., 10.);
     assert!(!ui.input.is_dragging());
 }
+/// The spring-loading delay is counted on the interface's clock: on a
+/// test's own, wall time passing before the drag (a loaded machine) moves
+/// neither when it is due nor when it springs.
+#[test]
+fn a_drag_springs_open_on_the_interfaces_clock() {
+    use std::time::Duration;
+    let clock = zgx::clock::VirtualClock::new();
+    let mut ui = Ui::new(400., 200.);
+    let sprang = Rc::new(RefCell::new(0));
+    let count = sprang.clone();
+    let _view = ui.mount(
+        row()
+            .gap(20.)
+            .child(div().size(80., 80.).on_drag(|| Card(1)))
+            .child(
+                div()
+                    .size(100., 80.)
+                    .on_drop(|_: &Card, _| {})
+                    .on_drag_spring(move |_: &Card| {
+                        *count.borrow_mut() += 1;
+                        true
+                    }),
+            ),
+    );
+    ui.prepare_frame();
+    // The wall clock runs on; the interface's stands where it started.
+    std::thread::sleep(Duration::from_millis(300));
+    down(&ui, 20., 20.);
+    moved(&ui, 110., 20.);
+    let due = ui.input.next_spring_deadline().expect("waiting to spring");
+    assert_eq!(
+        due,
+        clock.now() + zgx::input::SPRING_DELAY,
+        "due its delay after the drag rested, on the interface's clock"
+    );
+    clock.advance(zgx::input::SPRING_DELAY - Duration::from_millis(10), || {});
+    ui.advance_interactions(clock.now()).unwrap();
+    assert_eq!(*sprang.borrow(), 0, "not before");
+    clock.advance(zgx::input::SPRING_DELAY + Duration::from_millis(10), || {});
+    ui.advance_interactions(clock.now()).unwrap();
+    assert_eq!(*sprang.borrow(), 1, "once it has passed");
+    up(&ui, 110., 20.);
+}
+
 #[test]
 fn a_drag_resting_on_a_destination_springs_it_open_once() {
     use std::time::{Duration, Instant};
