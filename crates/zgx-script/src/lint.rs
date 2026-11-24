@@ -99,18 +99,6 @@
 use crate::check::{CheckError, Diagnostic, Report, Severity, scripts};
 use std::path::{Path, PathBuf};
 
-/// What `ui.window { … }` reads (`WindowOptions`).
-const WINDOW_OPTIONS: &[&str] = &[
-    "id",
-    "title",
-    "width",
-    "height",
-    "open",
-    "frame_autosave",
-    "under_pointer",
-    "tabbing",
-];
-
 /// Every rule's name and a one-line summary.
 pub const RULES: &[(&str, &str)] = &[
     (
@@ -1794,9 +1782,9 @@ impl Linter<'_> {
             && frame.callee.as_deref() == Some("ui.window")
             && self.is(at + 1, "=")
             && let Some(key) = self.name(at)
-            && !WINDOW_OPTIONS.contains(&key)
+            && !crate::windows::window_options().contains(&key)
         {
-            let known = WINDOW_OPTIONS.join("`, `");
+            let known = crate::windows::window_options().join("`, `");
             self.report(
                 at,
                 "window-option",
@@ -2604,6 +2592,8 @@ mod tests {
         let source = r##"
 ui.window { id = "a", titel = "A", open = open, ui.text { "x", color = "#fff" } }
 ui.window { id = "b", title = "B", width = 300, height = 200, open = open, tabbing = "preferred" }
+ui.window { id = "c", open = open, visible = false, min_width = 300, min_height = 200, glass = true,
+    decorations = false, level = "always_on_top", macos = { decorations = true }, ui.text { "c" } }
 "##;
         assert_eq!(rules(source), one(2, "window-option"));
     }

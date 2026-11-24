@@ -372,6 +372,93 @@ fn a_window_says_its_smallest_and_largest_size() {
     assert!(error.contains("`max_height` go together"), "{error}");
 }
 
+/// A declared window's glass, frame and level reach its host, this
+/// platform's block replacing its own keys per key (`glass` whole); what a
+/// block may not hold, or says wrong, is an error on every platform.
+#[test]
+fn a_window_says_how_it_looks_by_platform() {
+    use zgx_script::window_look::{Glass, Level, Material, this_platform};
+    let here = this_platform();
+    let other = if here == "linux" { "macos" } else { "linux" };
+    let h = Harness::inline(&format!(
+        r##"ui.window {{ id = "intro", open = ui.state("intro", true), transparent = true, decorations = false,
+            level = "always_on_top", glass = {{ material = "sidebar", plain = true }},
+            {here} = {{ decorations = true, glass = {{ material = "hud" }}, title = "Here" }},
+            {other} = {{ shadow = false }}, ui.text("Intro") }}
+        ui.window {{ id = "plain", open = ui.state("plain", true), ui.text("Plain") }}
+        return ui.text("main")"##
+    ));
+    let look = |id: &str| h.host.window_extras(id).look;
+    let intro = look("intro");
+    assert_eq!(intro.decorations, Some(true), "this platform's");
+    assert_eq!(
+        intro.glass,
+        Some(Glass {
+            material: Material::Hud,
+            plain: false
+        }),
+        "the block's glass whole"
+    );
+    assert_eq!(
+        (intro.transparent, intro.level, intro.shadow),
+        (Some(true), Some(Level::AlwaysOnTop), None)
+    );
+    let title = h
+        .host
+        .windows()
+        .get()
+        .iter()
+        .find(|w| w.id == "intro")
+        .unwrap()
+        .title
+        .clone();
+    assert_eq!(title, "Here");
+    assert_eq!(look("plain"), Default::default());
+    let refused = |options: &str| {
+        zgx_script::testing::TestApp::try_new(|runtime| {
+            zgx_script::ScriptHost::inline(
+                runtime,
+                "app",
+                format!(
+                    r##"ui.window {{ id = "w", open = ui.state("w", true), {options}, ui.text("w") }}
+                    return ui.text("main")"##
+                ),
+            )
+        })
+        .err()
+        .expect("it doesn't load")
+    };
+    for (options, said) in [
+        (
+            format!("{other} = {{ open = true }}"),
+            format!("`{other}` has `open`, which isn't a window key"),
+        ),
+        (
+            format!("{other} = {{ {here} = {{}} }}"),
+            format!("`{other}` holds `{here}`"),
+        ),
+        (
+            format!("{other} = {{ level = \"top\" }}"),
+            "`level` is `top`: one of normal, always_on_top".into(),
+        ),
+        (
+            format!("{other} = 3"),
+            format!("`{other}` is not a table of window keys"),
+        ),
+        (
+            "ios = { shadow = false }".into(),
+            "unknown option `ios`".into(),
+        ),
+        (
+            "glass = { material = \"frost\" }".into(),
+            "`glass.material` is `frost`".into(),
+        ),
+    ] {
+        let error = refused(&options);
+        assert!(error.contains(&said), "{options}: {error}");
+    }
+}
+
 /// `ui.window.size`: the window's size in points, followed, for decisions
 /// layout can't make (a sidebar collapsing to icons below a width).
 #[test]

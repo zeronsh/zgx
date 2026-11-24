@@ -55,6 +55,9 @@ pub struct WindowExtras {
     /// content reads (`win.active`, `win.shown`, `win.size`); none for a
     /// window whose content never asked.
     pub state: Option<WindowState>,
+    /// Its glass, frame and level (`ui.window { glass, decorations, … }`,
+    /// this platform's block's over its own).
+    pub look: crate::window_look::WindowLook,
 }
 /// A window's own `active`, `shown` and `size`, as its host keeps them.
 #[derive(Clone)]
@@ -373,6 +376,43 @@ fn key_of(vm: &crate::Vm, group: &Group, n: usize, item: &Value) -> Option<Strin
     Some(format!("windows{n}:{key}"))
 }
 
+/// `ui.window`'s keys a platform's block may hold, besides the look's
+/// (`window_look::LOOK_KEYS`).
+const WINDOW_KEYS: [&str; 11] = [
+    "title",
+    "width",
+    "height",
+    "frame_autosave",
+    "tabbing",
+    "under_pointer",
+    "visible",
+    "min_width",
+    "min_height",
+    "max_width",
+    "max_height",
+];
+
+/// Every key `ui.window { … }` takes (`WindowOptions`): its own, the look's,
+/// the platforms' blocks, `id` and `open`.
+pub(crate) fn window_options() -> Vec<&'static str> {
+    let mut keys = vec!["id", "open"];
+    keys.extend(WINDOW_KEYS);
+    keys.extend(crate::window_look::LOOK_KEYS.iter().map(|key| key.name));
+    keys.extend(crate::window_look::PLATFORMS);
+    keys
+}
+
+/// Window key `key`: the platform's block's (`block`), if it has it, else
+/// the window's own.
+fn field<T: mlua::FromLua>(table: &Table, block: Option<&Table>, key: &str) -> mlua::Result<T> {
+    if let Some(block) = block
+        && block.contains_key(key)?
+    {
+        return block.get(key);
+    }
+    table.get(key)
+}
+
 /// `build(item)`'s window, as `ui.window`'s options give one.
 fn build(
     vm: &crate::Vm,
@@ -424,14 +464,61 @@ fn window_of(
         (content, _) => content,
     };
     let node = expect_node(content, &what("content ([1])"))?;
-    let number = |key: &str, default: f64| -> mlua::Result<f64> {
-        Ok(table.get::<Option<f64>>(key)?.unwrap_or(default))
+    // Its keys may differ by platform: each block holds window keys, and
+    // this platform's replace the window's own, per key (a table whole).
+    let mut blocks = Vec::new();
+    for name in crate::window_look::PLATFORMS {
+        match table.get::<mlua::Value>(name)? {
+            mlua::Value::Nil => {}
+            mlua::Value::Table(block) => blocks.push((name, block)),
+            _ => {
+                return Err(mlua::Error::runtime(format!(
+                    "{} is not a table of window keys",
+                    what(name)
+                )));
+            }
+        }
+    }
+    let block = blocks
+        .iter()
+        .find(|(name, _)| *name == crate::window_look::this_platform())
+        .map(|(_, block)| block.clone());
+    let look_in = |block: Option<&Table>| -> mlua::Result<crate::window_look::WindowLook> {
+        crate::window_look::WindowLook::parse(|key| {
+            let value: mlua::Value = field(table, block, key).ok()?;
+            (!value.is_nil()).then(|| crate::window_look::Given::from(&value))
+        })
+        .map_err(|e| mlua::Error::runtime(format!("ui.window `{id}`: {e}")))
     };
-    let under_pointer = match table.get::<Option<Table>>("under_pointer")? {
+    let look = look_in(block.as_ref())?;
+    let window_keys: Vec<&str> = WINDOW_KEYS
+        .iter()
+        .copied()
+        .chain(crate::window_look::LOOK_KEYS.iter().map(|key| key.name))
+        .collect();
+    for (name, other) in &blocks {
+        let keys: Vec<String> = other
+            .pairs::<mlua::Value, mlua::Value>()
+            .filter_map(Result::ok)
+            .map(|(key, _)| match key {
+                mlua::Value::String(key) => key.to_string_lossy(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        crate::window_look::check_block(name, keys.iter().map(String::as_str), &window_keys)
+            .map_err(|e| mlua::Error::runtime(format!("ui.window `{id}`: {e}")))?;
+        // (What it says wrong, told on every platform.)
+        look_in(Some(other))?;
+    }
+    let block = block.as_ref();
+    let number = |key: &str, default: f64| -> mlua::Result<f64> {
+        Ok(field::<Option<f64>>(table, block, key)?.unwrap_or(default))
+    };
+    let under_pointer = match field::<Option<Table>>(table, block, "under_pointer")? {
         Some(at) => Some((at.get::<f64>(1)?, at.get::<f64>(2)?)),
         None => None,
     };
-    let visible = match table.get::<mlua::Value>("visible")? {
+    let visible = match field::<mlua::Value>(table, block, "visible")? {
         mlua::Value::Nil => None,
         mlua::Value::Boolean(visible) => Some(signals.signal(Value::Bool(visible))),
         state => Some(crate::node::state_of(&state).ok_or_else(|| {
@@ -443,7 +530,10 @@ fn window_of(
     };
     // Each a width and a height, given together.
     let size = |w: &str, h: &str| -> mlua::Result<Option<(f64, f64)>> {
-        match (table.get::<Option<f64>>(w)?, table.get::<Option<f64>>(h)?) {
+        match (
+            field::<Option<f64>>(table, block, w)?,
+            field::<Option<f64>>(table, block, h)?,
+        ) {
             (Some(w), Some(h)) if w.is_finite() && h.is_finite() && w > 0. && h > 0. => {
                 Ok(Some((w, h)))
             }
@@ -459,14 +549,12 @@ fn window_of(
         size("max_width", "max_height")?,
     );
     let window = Window {
-        title: table
-            .get::<Option<String>>("title")?
-            .unwrap_or_else(|| id.clone()),
+        title: field::<Option<String>>(table, block, "title")?.unwrap_or_else(|| id.clone()),
         width: number("width", 480.)?,
         height: number("height", 360.)?,
         open,
-        frame_autosave: table.get::<Option<String>>("frame_autosave")?,
-        tabbing: match table.get::<Option<String>>("tabbing")? {
+        frame_autosave: field::<Option<String>>(table, block, "frame_autosave")?,
+        tabbing: match field::<Option<String>>(table, block, "tabbing")? {
             Some(tabbing) if !["automatic", "preferred", "disallowed"].contains(&&*tabbing) => {
                 return Err(mlua::Error::runtime(format!(
                     "{}: \"automatic\", \"preferred\" or \"disallowed\", not \"{tabbing}\"",
@@ -481,38 +569,15 @@ fn window_of(
         under_pointer,
         visible,
         state,
+        look,
     };
-    let known: &[&str] = if declared {
-        &[
-            "id",
-            "title",
-            "width",
-            "height",
-            "open",
-            "frame_autosave",
-            "tabbing",
-            "under_pointer",
-            "visible",
-            "min_width",
-            "min_height",
-            "max_width",
-            "max_height",
-        ]
-    } else {
-        &[
-            "title",
-            "width",
-            "height",
-            "frame_autosave",
-            "tabbing",
-            "under_pointer",
-            "visible",
-            "min_width",
-            "min_height",
-            "max_width",
-            "max_height",
-        ]
-    };
+    // Its keys: the window's (a platform's block may hold them), the
+    // blocks, and `ui.window`'s own `id` and `open`.
+    let mut known = window_keys;
+    known.extend(crate::window_look::PLATFORMS);
+    if declared {
+        known.extend(["id", "open"]);
+    }
     for key in table.pairs::<mlua::Value, mlua::Value>() {
         let (key, _) = key?;
         if let mlua::Value::String(key) = key {
