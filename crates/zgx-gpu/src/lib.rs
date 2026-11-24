@@ -17574,6 +17574,12 @@ impl GpuRenderer {
         frame: &wgpu::SurfaceTexture,
     ) -> Option<Option<wgpu::CommandBuffer>> {
         use ash::vk::{self, Handle as _};
+        // The image keeps what it held only with zgx's wgpu-hal patch
+        // (`Texture::presented`): wgpu's own takes it from undefined, which
+        // lets its pixels go.
+        if !cfg!(zgx_wgpu_hal_patched) {
+            return None;
+        }
         let size = self.target.size();
         let image = swap_image(&frame.texture)?;
         let rects = self.swap.lacks(image, (size.width, size.height))?;
@@ -17701,9 +17707,13 @@ impl GpuRenderer {
         for buffer in &buffers {
             encoder.clear_buffer(buffer, 0, None);
         }
+        #[cfg(zgx_wgpu_hal_patched)]
         let raw = buffers.each_ref().map(|buffer| {
             unsafe { buffer.as_hal::<wgpu::hal::api::Vulkan>() }.map(|b| unsafe { b.raw_handle() })
         });
+        // (Not reached: `copy_lacking` copies nothing without the patch.)
+        #[cfg(not(zgx_wgpu_hal_patched))]
+        let raw: [Option<vk::Buffer>; 2] = [None, None];
         let [Some(read_image), Some(read_target)] = raw else {
             return;
         };
@@ -17860,6 +17870,7 @@ impl GpuRenderer {
             self.swap.changed.clear();
             return;
         };
+        #[cfg(zgx_wgpu_hal_patched)]
         if let Some(surface) = &self.surface
             && let Some(hal) = unsafe { surface.as_hal::<wgpu::hal::api::Vulkan>() }
         {
@@ -18132,13 +18143,14 @@ impl GpuRenderer {
     /// again as a new one, so the next frame pays nothing more for it. Nothing
     /// elsewhere.
     pub fn rest_queue(&mut self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", zgx_wgpu_hal_patched))]
         self.renew_queue();
     }
     /// Metal's queue let go of, the driver's memory for it given back
     /// (`Queue::renew`), with all this renderer gave it finished and let go of
-    /// (a command buffer holds its queue).
-    #[cfg(target_os = "macos")]
+    /// (a command buffer holds its queue). Without zgx's wgpu-hal patch the
+    /// queue stays.
+    #[cfg(all(target_os = "macos", zgx_wgpu_hal_patched))]
     fn renew_queue(&mut self) {
         self.finish_direct();
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
@@ -19394,14 +19406,14 @@ pub(crate) fn single_use_module(
     label: &str,
     source: &str,
 ) -> wgpu::ShaderModule {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", zgx_wgpu_hal_patched))]
     wgpu::hal::metal::zgx_single_use_next_module(Some(source.to_owned()));
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     // (Taken back if wgpu made no module of it.)
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", zgx_wgpu_hal_patched))]
     wgpu::hal::metal::zgx_single_use_next_module(None);
     module
 }

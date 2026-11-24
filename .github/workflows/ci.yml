@@ -287,6 +287,9 @@ jobs:
       - name: Use the private Vulkan loader
         if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
         run: printf 'LD_LIBRARY_PATH=%s/zgx-vulkan-loader/build/loader\n' "$HOME" >> "$GITHUB_ENV"
+      # As an app from crates.io builds them: without the workspace's patched
+      # winit, wgpu-hal and AccessKit (docs/releasing.md).
+      - run: scripts/unpatched_check.sh
       # With 3D scenes (zgx-script's `scene3d`, off by default; the Windows
       # and macOS jobs test without it).
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked
@@ -755,6 +758,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Also here: a change to macOS-only code runs this job without the Linux one.
       - run: cargo fmt --all -- --check
+      # As an app from crates.io builds them: without the workspace's patched
+      # winit, wgpu-hal and AccessKit (docs/releasing.md).
+      - run: scripts/unpatched_check.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
