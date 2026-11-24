@@ -320,7 +320,21 @@ pub mod build {
     /// came from: `dir`'s own, and each package its `zgx.json` lists, under
     /// [`PACKAGES`]; the `.luaurc` aliases into a package name its copy.
     pub(crate) fn sources(dir: &Path) -> io::Result<Vec<(String, PathBuf, Vec<u8>)>> {
-        sources_skipping(dir, &[], true)
+        sources_skipping(dir, &[], true, Keep::Known)
+    }
+
+    /// Which of a folder's files are taken.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Keep<'a> {
+        /// Those of the kinds a host reads, hidden ones but `.luaurc` out.
+        Known,
+        /// Every one, hidden or not, but what isn't the app's: `.git`,
+        /// zgx's generated `.zgx` and macOS's `.DS_Store`. One that looks
+        /// like a secret, a folder too, is an error unless `allow` names it
+        /// (its path in the bundle, with `/`); so is a name there for
+        /// nothing in it.
+        #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+        Every { allow: &'a [String] },
     }
 
     /// As `sources`, leaving out the folders in `skip` (an app's native
@@ -330,10 +344,11 @@ pub mod build {
         dir: &Path,
         skip: &[PathBuf],
         cargo: bool,
+        keep: Keep<'_>,
     ) -> io::Result<Vec<(String, PathBuf, Vec<u8>)>> {
         let read = |rel: String, path: PathBuf| Ok((rel, std::fs::read(&path)?, path));
         let mut rels = Vec::new();
-        collect(dir, dir, skip, &mut rels)?;
+        collect(dir, "", dir, skip, keep, &mut rels)?;
         let mut files = rels
             .into_iter()
             .map(|rel| {
@@ -347,11 +362,24 @@ pub mod build {
                 println!("cargo:rerun-if-changed={}", folder.display());
             }
             let mut rels = Vec::new();
-            collect(folder, folder, skip, &mut rels)?;
+            let at = format!("{PACKAGES}/{name}/");
+            collect(folder, &at, folder, skip, keep, &mut rels)?;
             for rel in rels {
                 let path = folder.join(&rel);
                 files.push(read(format!("{PACKAGES}/{name}/{rel}"), path)?);
             }
+        }
+        if let Keep::Every { allow } = keep
+            && let Some(nothing) = allow.iter().find(|allowed| {
+                let inside = format!("{allowed}/");
+                !files
+                    .iter()
+                    .any(|(rel, ..)| rel == *allowed || rel.starts_with(&inside))
+            })
+        {
+            return Err(io::Error::other(format!(
+                "--allow {nothing}: no such file among those that ship"
+            )));
         }
         if let Some(luaurc) = files.iter_mut().find(|(rel, ..)| rel == ".luaurc") {
             luaurc.1 = repoint(dir, &luaurc.1, &packages)?;
@@ -427,36 +455,89 @@ pub mod build {
         serde_json::to_vec_pretty(&config).map_err(io::Error::other)
     }
 
-    fn collect(root: &Path, dir: &Path, skip: &[PathBuf], out: &mut Vec<String>) -> io::Result<()> {
+    /// Whether a file called `name` looks like a key or a password, by its
+    /// name in any case: `.env*` (but `.env.example`), `.npmrc`, `.netrc`,
+    /// `*.pem`, `*.key`, `*.p12`, `*.pfx`, and SSH's own names for a key,
+    /// with an extension or without (`id_card.svg` isn't one).
+    fn secret(name: &str) -> bool {
+        let name = name.to_lowercase();
+        let (stem, extension) = name.split_once('.').unwrap_or((&name, ""));
+        let last = extension.rsplit('.').next().unwrap_or_default();
+        (name.starts_with(".env") && name != ".env.example")
+            || matches!(&*name, ".npmrc" | ".netrc")
+            || (!stem.is_empty() && matches!(last, "pem" | "key" | "p12" | "pfx"))
+            || matches!(stem, "id_rsa" | "id_ed25519" | "id_ecdsa" | "id_dsa")
+    }
+
+    /// The files of `root` in `dir`, by their paths in `root`, which is at
+    /// `at` in the bundle.
+    fn collect(
+        root: &Path,
+        at: &str,
+        dir: &Path,
+        skip: &[PathBuf],
+        keep: Keep<'_>,
+        out: &mut Vec<String>,
+    ) -> io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             if skip.contains(&path) {
                 continue;
             }
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name.starts_with('.') && name != ".luaurc" {
+            let out_of_it = match keep {
+                Keep::Known => name.starts_with('.') && name != ".luaurc",
+                Keep::Every { .. } => matches!(&*name, ".git" | ".zgx" | ".DS_Store"),
+            };
+            if out_of_it {
                 continue;
+            }
+            // A key or a password left in the folder would go to everyone
+            // the app does.
+            if let Keep::Every { allow } = keep
+                && secret(&name)
+            {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                let shipped = format!("{at}{}", rel.to_string_lossy().replace('\\', "/"));
+                if !allow.contains(&shipped) {
+                    return Err(io::Error::other(format!(
+                        "{}: looks like a secret, and every file of the folder ships: move it \
+                         out, or `--allow {shipped}` if it is meant to",
+                        path.display()
+                    )));
+                }
+            }
+            // Taken as it is, a link would be another folder's file, or a
+            // folder without end.
+            let every = matches!(keep, Keep::Every { .. });
+            if every && path.is_symlink() && !(path.is_file() && crate::within(root, &path)) {
+                return Err(io::Error::other(format!(
+                    "{}: a link to a folder, or out of the app's (copy what it names)",
+                    path.display()
+                )));
             }
             if path.is_dir() {
-                collect(root, &path, skip, out)?;
+                collect(root, at, &path, skip, keep, out)?;
                 continue;
             }
-            let wanted = matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some(
-                    "luau"
-                        | "json"
-                        | "png"
-                        | "jpg"
-                        | "jpeg"
-                        | "svg"
-                        | "gif"
-                        | "webp"
-                        | "glb"
-                        | "gltf"
-                        | "bin"
+            let wanted = every
+                || matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some(
+                        "luau"
+                            | "json"
+                            | "png"
+                            | "jpg"
+                            | "jpeg"
+                            | "svg"
+                            | "gif"
+                            | "webp"
+                            | "glb"
+                            | "gltf"
+                            | "bin"
+                    )
                 )
-            ) || name == ".luaurc";
+                || name == ".luaurc";
             if wanted && let Ok(rel) = path.strip_prefix(root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }

@@ -352,7 +352,19 @@ impl AppConfig {
             }
         };
         let platform = zgx_script::window_look::this_platform();
-        Self::read_text(&bundle.ui, &path, text, platform, window)
+        let read = Self::read_text(&bundle.ui, &path, text, platform, window)?;
+        // A bundle of source's scripts are its own files: none by a link or
+        // a path out of its `ui/`. (Checked files are refused as they are
+        // read.)
+        if bundle.kind() == zgx_script::app_bundle::Ui::Source {
+            let (_, host, window) = &read;
+            let scripts = window.script.iter().map(|own| bundle.ui.join(own));
+            let packages = host.packages.iter().map(|(_, folder)| folder.clone());
+            if let Some(out) = scripts.chain(packages).find(|path| !bundle.holds(path)) {
+                return Err(format!("{}: outside its bundle's ui/", out.display()));
+            }
+        }
+        Ok(read)
     }
     /// The window `window` names of the `zgx.json` `text` (none: there is
     /// none), read from `path` in `dir`, on `platform`.
@@ -793,7 +805,8 @@ pub fn run_hosting(
     use std::{cell::RefCell, rc::Rc};
     let configure = host;
     // A bundle (`zgx build`'s), checked against its manifest: its scripts
-    // as the build compiled them, its modules' libraries for this platform.
+    // as the build compiled them (or, as source, its folder run as any is),
+    // its modules' libraries for this platform.
     let bundle = if zgx_script::app_bundle::is_bundle(path) {
         let opened = zgx_script::app_bundle::open(path)?;
         // Its scripts read and checked while the window is made.
@@ -838,8 +851,9 @@ pub fn run_hosting(
     }
     // Its modules compile on a worker while AppKit, the GPU and the window
     // are set up, not one by one on the main thread at each `require` (a
-    // bundle's are compiled already).
-    if bundle.is_none() {
+    // bundle's are compiled already, unless they are source).
+    let checked = bundle.as_ref().and_then(|bundle| bundle.files());
+    if checked.is_none() {
         zgx_script::compile_ahead(&script, &[]);
     }
     // The app's native modules, found before its window opens: one it names
@@ -849,7 +863,7 @@ pub fn run_hosting(
         Some(bundle) => bundle.modules.clone(),
         None => modules_of(script.parent().unwrap_or(Path::new(".")))?,
     };
-    let bundle = bundle.map(|bundle| (bundle.files(), entry.unwrap_or(bundle.entry)));
+    let checked = checked.zip(entry);
     let notice = LAUNCH.lock().unwrap().notice.take();
     let options = options_of(&config, window_config);
     let visible = options.visible;
@@ -888,7 +902,7 @@ pub fn run_hosting(
     }
     app.run(move |cx| {
         // Its packages, what it exposes to plugins, and its plugins.
-        let host = match &bundle {
+        let host = match &checked {
             Some((files, entry)) => ScriptHost::from_files(
                 &cx.ui.runtime,
                 files.clone(),
@@ -1676,6 +1690,48 @@ mod tests {
         assert_eq!(window_options_in(&bare, None).unwrap().0.title, "ui");
         let error = window_options_in(&bare, Some("intro")).unwrap_err();
         assert!(error.contains("names a window `intro`"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A bundle of source's windows are its folder's zgx.json as it is, as
+    /// an app's run from its folder are.
+    #[test]
+    fn a_source_bundles_windows_are_its_folders() {
+        let dir =
+            std::env::temp_dir().join(format!("zgx-run-source-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("app.luau"), "return ui.text 'x'").unwrap();
+        std::fs::write(app.join("zgx.json"), r#"{ "title": "Built" }"#).unwrap();
+        let out = dir.join("out");
+        let options = zgx_script::app_bundle::Options {
+            out: Some(out.clone()),
+            ui: zgx_script::app_bundle::Ui::Source,
+            ..Default::default()
+        };
+        zgx_script::app_bundle::write(&app, &options).unwrap();
+        let bundle = zgx_script::app_bundle::open(&out).unwrap();
+        let title = || window_options_in(&bundle, None).map(|(options, _)| options.title);
+        assert_eq!(title().unwrap(), "Built");
+        let on_disk = bundle.ui.join("zgx.json");
+        std::fs::write(&on_disk, r#"{ "title": "Edited" }"#).unwrap();
+        assert_eq!(title().unwrap(), "Edited");
+        // Broken is said, and gone is none, as in any folder.
+        std::fs::write(&on_disk, "{").unwrap();
+        assert!(title().is_err());
+        std::fs::remove_file(&on_disk).unwrap();
+        assert_eq!(title().unwrap(), "ui");
+        // A window's script, or a package, out of its folder is refused.
+        std::fs::write(dir.join("out.luau"), "return ui.text 'out'").unwrap();
+        for outside in [
+            r#"{ "first": "w", "named_windows": { "w": { "script": "../../out.luau" } } }"#,
+            r#"{ "packages": { "kit": "../../app" } }"#,
+        ] {
+            std::fs::write(&on_disk, outside).unwrap();
+            let error = title().unwrap_err();
+            assert!(error.contains("ui/"), "{outside}: {error}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
