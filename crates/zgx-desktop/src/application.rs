@@ -6881,6 +6881,9 @@ impl Host {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.trim();
                 }
+                if let Some(raster) = &mut self.raster {
+                    raster.trim();
+                }
                 // What goes later, each at its own delay past this trim: the
                 // glyph atlas (a window that grew one), and Metal's queue once
                 // a frame would find it cold anyway.

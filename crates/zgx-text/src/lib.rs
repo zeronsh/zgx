@@ -21,6 +21,13 @@ pub mod text;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use core_text_glyphs::core_text_glyph;
+/// The fonts Core Text drew glyphs with, let go for an app at rest: Core
+/// Text keeps their glyphs while they live. Drawn again, they are made again.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn rest_core_text_glyphs() {
+    core_text_glyphs::rest();
+}
 pub use font_cache::set_desktop_sans_serif;
 
 /// Shapes using exactly the same font selection and line metrics as the renderer.
