@@ -1,6 +1,6 @@
 # zgx-audio
 
-Sound for [zgx](../zgx) apps, in a crate of its own: an app that doesn't depend on it pays nothing.
+Sound for [zgx](../zgx) apps, in a crate of its own: an app that doesn't depend on it links none of it.
 
 ```rust
 use zgx_audio::{Audio, Config, Curve, Play, Ramp, Source};
