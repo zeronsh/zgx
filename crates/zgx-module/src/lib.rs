@@ -48,11 +48,12 @@ pub use typed::{FromValue, IntoValue, List, Map};
 pub use zgx_module_macros::{Record, export, module};
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::c_void,
     marker::PhantomData,
     mem::MaybeUninit,
     sync::atomic::{AtomicPtr, Ordering},
+    time::Duration,
 };
 
 use abi::{Api, Bytes, Raw};
@@ -640,12 +641,117 @@ impl<T> State<T> {
 }
 
 /// The host a module is loading into: where it registers what scripts
-/// call. Lent to the module's setup, not kept.
+/// call. Lent to the module's setup, and to each job posted to the host
+/// ([`Ui::post`]) and each timer's call ([`Host::after`]): a `&Host` is
+/// how a module knows it runs on the interface's thread, where values are
+/// made and read (it is not `Send`). Not kept.
 pub struct Host<'a> {
-    registrar: &'a abi::Registrar,
+    /// The registrar, while the module loads: what scripts call is
+    /// registered then, never later.
+    registrar: Option<&'a abi::Registrar>,
+    /// A handle to the host, asked for the first time a module needs one
+    /// ([`Host::ui`], [`Host::after`]): owned by a loading host, lent to a
+    /// job's or a timer's.
+    handle: Cell<*mut c_void>,
+    owned: bool,
+}
+
+impl Drop for Host<'_> {
+    fn drop(&mut self) {
+        let handle = self.handle.get();
+        if self.owned && !handle.is_null() {
+            // SAFETY: The handle this host asked for, let go of once.
+            unsafe { (api().host_release)(handle) }
+        }
+    }
+}
+
+impl<'a> Host<'a> {
+    /// The host of a module loading.
+    fn loading(registrar: &'a abi::Registrar) -> Self {
+        Self {
+            registrar: Some(registrar),
+            handle: Cell::new(std::ptr::null_mut()),
+            owned: true,
+        }
+    }
+}
+
+impl Host<'static> {
+    /// The host of a job or a timer's call, by the handle it is lent.
+    fn lent(handle: *mut c_void) -> Self {
+        Self {
+            registrar: None,
+            handle: Cell::new(handle),
+            owned: false,
+        }
+    }
 }
 
 impl Host<'_> {
+    /// The registrar: what scripts call is registered as the module loads.
+    fn registrar(&self) -> &abi::Registrar {
+        self.registrar
+            .expect("zgx-module: what scripts call is registered as the module loads, not in a job or a timer")
+    }
+    /// The host's handle, asked for once.
+    fn handle(&self) -> *mut c_void {
+        if self.handle.get().is_null() {
+            let r = self.registrar();
+            // SAFETY: The registrar's own host, inside the entry call.
+            self.handle.set(unsafe { (r.host_ref)(r.host) });
+        }
+        self.handle.get()
+    }
+    /// A handle to this host for the module's own threads: what they post
+    /// work to the interface's thread by ([`Ui::post`]).
+    pub fn ui(&self) -> Ui {
+        // SAFETY: A host handle, held; the copy the `Ui` owns.
+        Ui(unsafe { (api().host_retain)(self.handle()) })
+    }
+    /// Calls `fire` once, `delay` from now on zgx's clock (a test's,
+    /// devtools' frozen one, video's virtual one, else the wall's), on the
+    /// interface's thread, unless the [`Timer`] is dropped first.
+    pub fn after<F: FnOnce(&Host) + 'static>(&self, delay: Duration, fire: F) -> Timer {
+        unsafe extern "C" fn call<F: FnOnce(&Host)>(user: *mut c_void, host: *mut c_void) -> u32 {
+            // SAFETY: `user` is the `Option<F>` boxed below, alive until
+            // its timer ends; `host` lent for the call.
+            if let Some(fire) = unsafe { &mut *(user as *mut Option<F>) }.take() {
+                fire(&Host::lent(host));
+            }
+            0
+        }
+        let user = Box::into_raw(Box::new(Some(fire)));
+        // SAFETY: A host handle, held; `user` and its `free` the box's.
+        Timer(unsafe { self.timer(delay, false, call::<F>, user.cast(), free_box_of(user)) })
+    }
+    /// Calls `fire` every `period` on zgx's clock, on the interface's
+    /// thread, until the [`Timer`] is dropped.
+    pub fn every<F: FnMut(&Host) + 'static>(&self, period: Duration, fire: F) -> Timer {
+        unsafe extern "C" fn call<F: FnMut(&Host)>(user: *mut c_void, host: *mut c_void) -> u32 {
+            // SAFETY: `user` is the `F` boxed below, alive until its timer
+            // ends; `host` lent for the call.
+            (unsafe { &mut *(user as *mut F) })(&Host::lent(host));
+            1
+        }
+        let user = Box::into_raw(Box::new(fire));
+        // SAFETY: As `after`'s.
+        Timer(unsafe { self.timer(period, true, call::<F>, user.cast(), free_box_of(user)) })
+    }
+    /// # Safety
+    /// `fire`, `user` and `free` are a timer's, by [`abi::Fire`].
+    unsafe fn timer(
+        &self,
+        period: Duration,
+        repeat: bool,
+        fire: abi::Fire,
+        user: *mut c_void,
+        free: abi::Free,
+    ) -> *mut c_void {
+        let ms = period.as_secs_f64() * 1e3;
+        // SAFETY: The caller's; a host handle, held.
+        unsafe { (api().after)(self.handle(), ms, u32::from(repeat), fire, user, free) }
+    }
     /// This module's state of type `T` for this thread: made (`T::default`)
     /// the first time a host on the thread asks, the same for each after,
     /// so every host a module loads into on a thread shares it, and another
@@ -662,18 +768,30 @@ impl Host<'_> {
         // (By this library's own address too: two modules may name a type
         // alike.)
         let name = format!("{:p} {}", &raw const API, std::any::type_name::<T>());
-        let r = self.registrar;
-        // SAFETY: The registrar's own host, inside the entry call.
+        let (size, align) = (size_of::<RefCell<T>>(), align_of::<RefCell<T>>());
+        // SAFETY: The registrar's own host, inside the entry call; else a
+        // host handle, lent to a job or a timer's call.
         let at = unsafe {
-            (r.state)(
-                r.host,
-                name.as_ptr(),
-                name.len(),
-                size_of::<RefCell<T>>(),
-                align_of::<RefCell<T>>(),
-                init::<T>,
-                free::<T>,
-            )
+            match self.registrar {
+                Some(r) => (r.state)(
+                    r.host,
+                    name.as_ptr(),
+                    name.len(),
+                    size,
+                    align,
+                    init::<T>,
+                    free::<T>,
+                ),
+                None => (api().state)(
+                    self.handle(),
+                    name.as_ptr(),
+                    name.len(),
+                    size,
+                    align,
+                    init::<T>,
+                    free::<T>,
+                ),
+            }
         };
         State { at: at.cast() }
     }
@@ -750,7 +868,7 @@ impl Host<'_> {
             }
         }
         let user = Box::into_raw(Box::new(function));
-        let r = self.registrar;
+        let r = self.registrar();
         // SAFETY: The registrar's own host, inside the entry call; `call`
         // reads `user` as the box it is, and `free` frees it.
         unsafe {
@@ -828,7 +946,7 @@ impl Host<'_> {
         user: *mut c_void,
         free: abi::Free,
     ) {
-        let r = self.registrar;
+        let r = self.registrar();
         // SAFETY: The registrar's own host, inside the entry call.
         unsafe { (r.function)(r.host, name.as_ptr(), name.len(), call, user, free) }
     }
@@ -844,9 +962,75 @@ impl Host<'_> {
         user: *mut c_void,
         free: abi::Free,
     ) {
-        let r = self.registrar;
+        let r = self.registrar();
         // SAFETY: The registrar's own host, inside the entry call.
         unsafe { (r.action)(r.host, name.as_ptr(), name.len(), call, user, free) }
+    }
+}
+
+/// A handle to a host for a module's own threads ([`Host::ui`]): `Send`,
+/// and cloned as often as threads need. Values aren't (their counts aren't
+/// atomic): a thread [`post`](Self::post)s a job, and the job makes and
+/// sets them on the interface's thread.
+pub struct Ui(*mut c_void);
+// SAFETY: A host handle may be held, cloned, posted to and let go of on any
+// thread (`Api::host_retain`, `post`, `host_release`).
+unsafe impl Send for Ui {}
+// SAFETY: As `Send`'s: nothing of it is read but through those.
+unsafe impl Sync for Ui {}
+impl Clone for Ui {
+    fn clone(&self) -> Self {
+        // SAFETY: A host handle, held.
+        Ui(unsafe { (api().host_retain)(self.0) })
+    }
+}
+impl Drop for Ui {
+    fn drop(&mut self) {
+        // SAFETY: The handle this one holds, let go of once.
+        unsafe { (api().host_release)(self.0) }
+    }
+}
+impl Ui {
+    /// Runs `job` on the host's thread, the interface's, at its next turn,
+    /// in one reactive batch (what it sets updates once): from any thread,
+    /// waking the host only as it posts. False once the host is gone (the
+    /// job is dropped, unrun, here).
+    pub fn post<J: FnOnce(&Host) + Send + 'static>(&self, job: J) -> bool {
+        unsafe extern "C" fn run<J: FnOnce(&Host)>(user: *mut c_void, host: *mut c_void) {
+            // SAFETY: `user` is the `Option<J>` boxed below, freed after
+            // this; `host` lent for the call.
+            if let Some(job) = unsafe { &mut *(user as *mut Option<J>) }.take() {
+                job(&Host::lent(host));
+            }
+        }
+        let user = Box::into_raw(Box::new(Some(job)));
+        // SAFETY: A host handle, held; `user` and its `free` the box's,
+        // which may be sent (`J: Send`).
+        unsafe { (api().post)(self.0, run::<J>, user.cast(), free_box_of(user)) == abi::POSTED }
+    }
+}
+
+/// A timer ([`Host::after`], [`Host::every`]): dropping it stops it.
+#[must_use = "a timer stops when dropped: keep it, or `forget` it to let it run"]
+pub struct Timer(*mut c_void);
+impl Timer {
+    /// Lets the timer run on without its handle, until it ends (`after`'s
+    /// once) or its host goes.
+    pub fn forget(self) {
+        let timer = std::mem::ManuallyDrop::new(self);
+        if !timer.0.is_null() {
+            // SAFETY: The timer's handle, let go of once, unstopped.
+            unsafe { (api().timer_release)(timer.0, 0) }
+        }
+    }
+}
+impl Drop for Timer {
+    fn drop(&mut self) {
+        // (Null: its host was gone as it was made.)
+        if !self.0.is_null() {
+            // SAFETY: The timer's handle, let go of once, stopping it.
+            unsafe { (api().timer_release)(self.0, 1) }
+        }
     }
 }
 
@@ -986,7 +1170,7 @@ pub unsafe fn enter(
         return abi::REFUSED_ABI;
     }
     API.store(api.cast_mut(), Ordering::Relaxed);
-    setup(&Host { registrar });
+    setup(&Host::loading(registrar));
     0
 }
 
