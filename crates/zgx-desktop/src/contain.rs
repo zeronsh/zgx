@@ -51,7 +51,7 @@ pub(crate) fn run<R>(
             Some(done)
         }
         Err(payload) => {
-            let message = message(payload.as_ref());
+            let message = crate::application::with_panic_site(message(payload.as_ref()));
             if fault.as_ref().is_none_or(|last| last.message != message) {
                 eprintln!(
                     "zgx: contained a panic in {what} ({message}); it is skipped until it \
@@ -253,6 +253,29 @@ mod tests {
         assert_eq!(reports.get(), 1, "the same panic is reported once");
     }
 
+    /// A contained panic's report says where it was (the site the panic
+    /// hook noted), as a script's error says where it failed.
+    #[test]
+    fn a_contained_panic_is_reported_where_it_was() {
+        crate::application::note_panic_sites();
+        let mut fault = None;
+        let reported = std::cell::RefCell::new(String::new());
+        let panics_at = line!() + 7;
+        let _: Option<()> = run(
+            &mut fault,
+            0,
+            Instant::now(),
+            "a popup's frame",
+            |message| *reported.borrow_mut() = message.to_string(),
+            || panic!("min > max"),
+        );
+        let reported = reported.into_inner();
+        assert!(
+            reported.contains(&format!("contain.rs:{panics_at}: min > max")),
+            "{reported}"
+        );
+    }
+
     /// Unchanged, a faulted piece isn't tried again, however long; changed,
     /// it is, and one that works again runs every frame from then on.
     #[test]
@@ -410,6 +433,13 @@ mod tests {
                 || panic!("{message}"),
             );
         }
-        assert_eq!(*reported.borrow(), ["first", "second"]);
+        // Each led by where it panicked when the panic hook notes it (another
+        // test installs it; the process has one).
+        let reported = reported.borrow();
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        assert!(
+            reported[0].ends_with("first") && reported[1].ends_with("second"),
+            "{reported:?}"
+        );
     }
 }

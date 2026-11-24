@@ -11,6 +11,8 @@ mod build_rev;
 mod check;
 #[path = "../diagnostics.rs"]
 mod diagnostics;
+#[path = "../errors_say_where.rs"]
+mod errors_say_where;
 #[path = "../hover_frames.rs"]
 mod hover_frames;
 #[path = "../input_hints.rs"]

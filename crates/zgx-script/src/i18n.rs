@@ -253,7 +253,7 @@ fn argument(lua: &Lua, message: Message, name: &str, value: mlua::Value) -> mlua
                 let Some(vm) = vm.upgrade() else {
                     return ArgValue::Text("".into());
                 };
-                match vm.call::<mlua::Value>(&f, ()) {
+                match vm.call_as::<mlua::Value>("a message argument's function", &f, ()) {
                     Ok(value) => crate::value::convert(value, None)
                         .map(|value| arg_value(&value))
                         .unwrap_or_else(|_| ArgValue::Text("".into())),

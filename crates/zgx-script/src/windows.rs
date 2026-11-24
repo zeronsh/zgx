@@ -301,7 +301,11 @@ impl Windows {
                         if let Some(on_close) = &group.on_close {
                             let item = b.item.clone();
                             runtime.untracked(|| {
-                                if let Err(error) = vm.call::<()>(on_close, item) {
+                                if let Err(error) = vm.call_as::<()>(
+                                    "the window's on_close handler",
+                                    on_close,
+                                    item,
+                                ) {
                                     vm.report(error);
                                 }
                             });
@@ -352,16 +356,18 @@ fn extras_moved(old: &HashMap<String, Content>, new: &HashMap<String, Content>) 
 /// An item's window id: `key(item)`, else its `id` field.
 fn key_of(vm: &crate::Vm, group: &Group, n: usize, item: &Value) -> Option<String> {
     let key = match &group.key {
-        Some(key) => match vm.call::<mlua::Value>(key, item.clone()) {
-            Ok(mlua::Value::String(s)) => s.to_string_lossy(),
-            Ok(mlua::Value::Integer(i)) => i.to_string(),
-            Ok(mlua::Value::Number(f)) => f.to_string(),
-            Ok(_) => return None,
-            Err(error) => {
-                vm.report(error);
-                return None;
+        Some(key) => {
+            match vm.call_as::<mlua::Value>("the key function of ui.windows", key, item.clone()) {
+                Ok(mlua::Value::String(s)) => s.to_string_lossy(),
+                Ok(mlua::Value::Integer(i)) => i.to_string(),
+                Ok(mlua::Value::Number(f)) => f.to_string(),
+                Ok(_) => return None,
+                Err(error) => {
+                    vm.report(error);
+                    return None;
+                }
             }
-        },
+        }
         None => item.field("id").map(Value::to_string)?,
     };
     Some(format!("windows{n}:{key}"))
@@ -378,8 +384,16 @@ fn build(
     // `win` only for a build that takes it: the window's own, across loads.
     let state = (group.build.info().num_params >= 2).then(|| windows.state(id));
     let table: Table = match &state {
-        Some(state) => vm.call(&group.build, (item.clone(), state.table(&vm.lua)?))?,
-        None => vm.call(&group.build, item.clone())?,
+        Some(state) => vm.call_as(
+            "the build function of ui.windows",
+            &group.build,
+            (item.clone(), state.table(&vm.lua)?),
+        )?,
+        None => vm.call_as(
+            "the build function of ui.windows",
+            &group.build,
+            item.clone(),
+        )?,
     };
     let open = vm.runtime.signal(Value::Bool(true));
     let (window, mut content) = window_of(&table, id.to_owned(), open, false, None, &vm.runtime)?;
