@@ -10,6 +10,7 @@ use objc2_app_kit::{
     NSApplication, NSCursor, NSEvent, NSEventGestureAxis, NSEventPhase, NSResponder,
     NSTextInputClient, NSTrackingRectTag, NSView, NSViewFrameDidChangeNotification,
 };
+use smol_str::SmolStr;
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
     NSMutableAttributedString, NSNotFound, NSNotificationCenter, NSObject, NSObjectProtocol,
@@ -132,6 +133,15 @@ pub struct ViewState {
     forward_key_to_app: Cell<bool>,
 
     marked_text: RefCell<Retained<NSMutableAttributedString>>,
+    /// zgx patch: true while `keyDown:` is running `interpretKeyEvents:`.
+    in_key_down: Cell<bool>,
+    /// zgx patch: text passed to `insertText:replacementRange:` during `keyDown:`
+    /// when there is no active marked text (e.g. macOS Pinyin smart punctuation).
+    inserted_text: RefCell<Option<String>>,
+    /// zgx patch: UTF-16 document offset where `marked_text` starts.
+    marked_range_start: Cell<Option<usize>>,
+    /// zgx patch: selection range within `marked_text` (relative UTF-16 offsets).
+    marked_selected_range: Cell<NSRange>,
     accepts_first_mouse: bool,
 
     // Weak reference because the window keeps a strong reference to the view
@@ -157,6 +167,21 @@ pub(crate) fn set_selection_services(
 }
 fn selection_services() -> Option<std::rc::Rc<dyn crate::platform::macos::SelectionServices>> {
     SELECTION_SERVICES.with(|cell| cell.borrow().clone())
+}
+
+// zgx patch: document context and range replacement for `NSTextInputClient`
+// (`platform::macos::set_text_input_services`).
+thread_local! {
+    static TEXT_INPUT_SERVICES: RefCell<Option<std::rc::Rc<dyn crate::platform::macos::TextInputServices>>> =
+        const { RefCell::new(None) };
+}
+pub(crate) fn set_text_input_services(
+    services: Option<std::rc::Rc<dyn crate::platform::macos::TextInputServices>>,
+) {
+    TEXT_INPUT_SERVICES.with(|cell| *cell.borrow_mut() = services);
+}
+fn text_input_services() -> Option<std::rc::Rc<dyn crate::platform::macos::TextInputServices>> {
+    TEXT_INPUT_SERVICES.try_with(|cell| cell.borrow().clone()).ok().flatten()
 }
 
 // zgx patch: the app's answer to swipes between pages
@@ -299,7 +324,13 @@ declare_class!(
             trace_scope!("markedRange");
             let length = self.ivars().marked_text.borrow().length();
             if length > 0 {
-                NSRange::new(0, length)
+                let start = self.ivars().marked_range_start.get().unwrap_or_else(|| {
+                    let window = crate::window::WindowId(self.window().id());
+                    text_input_services()
+                        .and_then(|s| s.marked_range(window))
+                        .map_or(0, |(loc, _)| loc)
+                });
+                NSRange::new(start, length)
             } else {
                 // Documented to return `{NSNotFound, 0}` if there is no marked range.
                 NSRange::new(NSNotFound as NSUInteger, 0)
@@ -309,8 +340,21 @@ declare_class!(
         #[method(selectedRange)]
         fn selected_range(&self) -> NSRange {
             trace_scope!("selectedRange");
-            // Documented to return `{NSNotFound, 0}` if there is no selection.
-            NSRange::new(NSNotFound as NSUInteger, 0)
+            let marked_len = self.ivars().marked_text.borrow().length();
+            if marked_len > 0 {
+                let start = self.ivars().marked_range_start.get().unwrap_or(0);
+                let sel = self.ivars().marked_selected_range.get();
+                let loc = sel.location.min(marked_len);
+                let len = sel.length.min(marked_len.saturating_sub(loc));
+                return NSRange::new(start + loc, len);
+            }
+            let window = crate::window::WindowId(self.window().id());
+            if let Some((loc, len)) = text_input_services().and_then(|s| s.selected_range(window)) {
+                NSRange::new(loc, len)
+            } else {
+                // Documented to return `{NSNotFound, 0}` if there is no selection.
+                NSRange::new(NSNotFound as NSUInteger, 0)
+            }
         }
 
         #[method(setMarkedText:selectedRange:replacementRange:)]
@@ -318,9 +362,8 @@ declare_class!(
             &self,
             string: &NSObject,
             selected_range: NSRange,
-            _replacement_range: NSRange,
+            replacement_range: NSRange,
         ) {
-            // TODO: Use _replacement_range, requires changing the event to report surrounding text.
             trace_scope!("setMarkedText:selectedRange:replacementRange:");
 
             // SAFETY: This method is guaranteed to get either a `NSString` or a `NSAttributedString`.
@@ -342,7 +385,26 @@ declare_class!(
                 )
             };
 
+            let had_marked = unsafe { self.hasMarkedText() };
+            let window = crate::window::WindowId(self.window().id());
+            if replacement_range.location != NSNotFound as NSUInteger {
+                if !had_marked {
+                    let _ = text_input_services().map(|s| {
+                        s.replace_range(
+                            window,
+                            replacement_range.location,
+                            replacement_range.length,
+                            "",
+                        )
+                    });
+                    self.ivars().marked_range_start.set(Some(replacement_range.location));
+                } else if self.ivars().marked_range_start.get().is_none() {
+                    self.ivars().marked_range_start.set(Some(replacement_range.location));
+                }
+            }
+
             // Update marked text.
+            let marked_len = marked_text.length();
             *self.ivars().marked_text.borrow_mut() = marked_text;
 
             // Notify IME is active if application still doesn't know it.
@@ -351,9 +413,20 @@ declare_class!(
                 self.queue_event(WindowEvent::Ime(Ime::Enabled));
             }
 
-            if unsafe { self.hasMarkedText() } {
+            if marked_len > 0 {
+                if self.ivars().marked_range_start.get().is_none() {
+                    let start = text_input_services()
+                        .and_then(|s| s.selected_range(window))
+                        .map_or(0, |(loc, _)| loc);
+                    self.ivars().marked_range_start.set(Some(start));
+                }
+                let loc = selected_range.location.min(marked_len);
+                let len = selected_range.length.min(marked_len.saturating_sub(loc));
+                self.ivars().marked_selected_range.set(NSRange::new(loc, len));
                 self.ivars().ime_state.set(ImeState::Preedit);
             } else {
+                self.ivars().marked_range_start.set(None);
+                self.ivars().marked_selected_range.set(NSRange::new(0, 0));
                 // In case the preedit was cleared, set IME into the Ground state.
                 self.ivars().ime_state.set(ImeState::Ground);
             }
@@ -385,6 +458,8 @@ declare_class!(
         fn unmark_text(&self) {
             trace_scope!("unmarkText");
             *self.ivars().marked_text.borrow_mut() = NSMutableAttributedString::new();
+            self.ivars().marked_range_start.set(None);
+            self.ivars().marked_selected_range.set(NSRange::new(0, 0));
 
             let input_context = self.inputContext().expect("input context");
             input_context.discardMarkedText();
@@ -407,11 +482,27 @@ declare_class!(
         #[method_id(attributedSubstringForProposedRange:actualRange:)]
         fn attributed_substring_for_proposed_range(
             &self,
-            _range: NSRange,
-            _actual_range: *mut NSRange,
+            range: NSRange,
+            actual_range: *mut NSRange,
         ) -> Option<Retained<NSAttributedString>> {
             trace_scope!("attributedSubstringForProposedRange:actualRange:");
-            None
+            if range.location == NSNotFound as NSUInteger {
+                None
+            } else {
+                let window = crate::window::WindowId(self.window().id());
+                text_input_services()
+                    .and_then(|s| s.substring(window, range.location, range.length))
+                    .map(|(actual_loc, text)| {
+                        let ns_str = NSString::from_str(&text);
+                        if !actual_range.is_null() {
+                            // SAFETY: `actual_range` is a non-null out pointer provided by AppKit.
+                            unsafe {
+                                *actual_range = NSRange::new(actual_loc, ns_str.length());
+                            }
+                        }
+                        NSAttributedString::from_nsstring(&ns_str)
+                    })
+            }
         }
 
         #[method(characterIndexForPoint:)]
@@ -423,10 +514,16 @@ declare_class!(
         #[method(firstRectForCharacterRange:actualRange:)]
         fn first_rect_for_character_range(
             &self,
-            _range: NSRange,
-            _actual_range: *mut NSRange,
+            range: NSRange,
+            actual_range: *mut NSRange,
         ) -> NSRect {
             trace_scope!("firstRectForCharacterRange:actualRange:");
+            if !actual_range.is_null() {
+                // SAFETY: `actual_range` is a non-null out pointer provided by AppKit.
+                unsafe {
+                    *actual_range = range;
+                }
+            }
             let rect = NSRect::new(
                 self.ivars().ime_position.get(),
                 self.ivars().ime_size.get()
@@ -437,8 +534,7 @@ declare_class!(
         }
 
         #[method(insertText:replacementRange:)]
-        fn insert_text(&self, string: &NSObject, _replacement_range: NSRange) {
-            // TODO: Use _replacement_range, requires changing the event to report surrounding text.
+        fn insert_text(&self, string: &NSObject, replacement_range: NSRange) {
             trace_scope!("insertText:replacementRange:");
 
             // SAFETY: This method is guaranteed to get either a `NSString` or a `NSAttributedString`.
@@ -453,12 +549,60 @@ declare_class!(
             };
 
             let is_control = string.chars().next().is_some_and(|c| c.is_control());
+            if is_control {
+                return;
+            }
 
-            // Commit only if we have marked text.
-            if unsafe { self.hasMarkedText() } && self.is_ime_enabled() && !is_control {
+            let marked_len = self.ivars().marked_text.borrow().length();
+            let has_marked = marked_len > 0;
+            let marked_start = self.ivars().marked_range_start.get().unwrap_or(0);
+            let replaces_marked_only = has_marked
+                && replacement_range.location == marked_start
+                && replacement_range.length == marked_len;
+            if replacement_range.location != NSNotFound as NSUInteger
+                && !replaces_marked_only
+                && self.ivars().ime_allowed.get()
+            {
+                let window = crate::window::WindowId(self.window().id());
+                if has_marked {
+                    *self.ivars().marked_text.borrow_mut() = NSMutableAttributedString::new();
+                    self.ivars().marked_range_start.set(None);
+                    self.ivars().marked_selected_range.set(NSRange::new(0, 0));
+                    self.queue_event(WindowEvent::Ime(Ime::Preedit(String::new(), None)));
+                }
+                if text_input_services().is_some_and(|s| {
+                    s.replace_range(
+                        window,
+                        replacement_range.location,
+                        replacement_range.length,
+                        &string,
+                    )
+                }) {
+                    if self.ivars().in_key_down.get() {
+                        self.ivars().ime_state.set(ImeState::Committed);
+                    }
+                    return;
+                }
+            }
+
+            // Commit if we have marked text.
+            if has_marked && self.is_ime_enabled() {
+                self.ivars().marked_range_start.set(None);
+                self.ivars().marked_selected_range.set(NSRange::new(0, 0));
                 self.queue_event(WindowEvent::Ime(Ime::Preedit(String::new(), None)));
                 self.queue_event(WindowEvent::Ime(Ime::Commit(string)));
                 self.ivars().ime_state.set(ImeState::Committed);
+            } else if !self.ivars().in_key_down.get() && self.ivars().ime_allowed.get() {
+                // Emoji picker, Dictation, Character Viewer, or deferred IME insertion.
+                self.queue_event(WindowEvent::Ime(Ime::Commit(string)));
+            } else if self.ivars().in_key_down.get() && self.ivars().ime_allowed.get() {
+                // Direct text from `interpretKeyEvents:` during `keyDown:` (e.g. macOS Pinyin
+                // emitting '.' after digits vs '。' after CJK text).
+                let mut slot = self.ivars().inserted_text.borrow_mut();
+                match &mut *slot {
+                    Some(existing) => existing.push_str(&string),
+                    None => *slot = Some(string),
+                }
             }
         }
 
@@ -594,7 +738,16 @@ declare_class!(
             // we must send the `KeyboardInput` event during IME if it triggered
             // `doCommandBySelector`. (doCommandBySelector means that the keyboard input
             // is not handled by IME and should be handled by the application)
+            *self.ivars().inserted_text.borrow_mut() = None;
             if self.ivars().ime_allowed.get() {
+                struct InKeyDownGuard<'a>(&'a Cell<bool>);
+                impl Drop for InKeyDownGuard<'_> {
+                    fn drop(&mut self) {
+                        self.0.set(false);
+                    }
+                }
+                self.ivars().in_key_down.set(true);
+                let _guard = InKeyDownGuard(&self.ivars().in_key_down);
                 let events_for_nsview = NSArray::from_slice(&[&*event]);
                 unsafe { self.interpretKeyEvents(&events_for_nsview) };
 
@@ -602,6 +755,8 @@ declare_class!(
                 if self.ivars().ime_state.get() == ImeState::Committed {
                     // Remove any marked text, so normal input can continue.
                     *self.ivars().marked_text.borrow_mut() = NSMutableAttributedString::new();
+                    self.ivars().marked_range_start.set(None);
+                    self.ivars().marked_selected_range.set(NSRange::new(0, 0));
                 }
             }
 
@@ -618,8 +773,16 @@ declare_class!(
                 _ => old_ime_state != self.ivars().ime_state.get(),
             };
 
+            let inserted = self.ivars().inserted_text.borrow_mut().take();
             if !had_ime_input || self.ivars().forward_key_to_app.get() {
-                let key_event = create_key_event(&event, true, unsafe { event.isARepeat() });
+                let mut key_event = create_key_event(&event, true, unsafe { event.isARepeat() });
+                if !had_ime_input && !self.ivars().forward_key_to_app.get() {
+                    if let Some(inserted) = inserted {
+                        let smol = SmolStr::new(&inserted);
+                        key_event.text = Some(smol.clone());
+                        key_event.platform_specific.text_with_all_modifiers = Some(smol);
+                    }
+                }
                 self.queue_event(WindowEvent::KeyboardInput {
                     device_id: DEVICE_ID,
                     event: key_event,
@@ -965,6 +1128,10 @@ impl WinitView {
             ime_allowed: Default::default(),
             forward_key_to_app: Default::default(),
             marked_text: Default::default(),
+            in_key_down: Cell::new(false),
+            inserted_text: RefCell::new(None),
+            marked_range_start: Cell::new(None),
+            marked_selected_range: Cell::new(NSRange::new(0, 0)),
             accepts_first_mouse,
             _ns_window: WeakId::new(&window.retain()),
             option_as_alt: Cell::new(option_as_alt),

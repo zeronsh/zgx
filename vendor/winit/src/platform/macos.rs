@@ -552,6 +552,42 @@ pub fn set_selection_services(services: Option<std::rc::Rc<dyn SelectionServices
     crate::platform_impl::set_selection_services(services);
 }
 
+/// zgx patch: document context and range replacement for macOS's
+/// `NSTextInputClient` (`selectedRange`, `markedRange`,
+/// `attributedSubstringForProposedRange:actualRange:`,
+/// `insertText:replacementRange:`, `setMarkedText:selectedRange:replacementRange:`).
+/// All offsets and lengths are UTF-16 code units, matching `NSRange`.
+pub trait TextInputServices {
+    /// Focused editable field's selection `(location, length)` in UTF-16 units,
+    /// or `None` if no non-secure editable field is focused.
+    fn selected_range(&self, window: crate::window::WindowId) -> Option<(usize, usize)>;
+    /// Active marked/preedit range `(location, length)` in UTF-16 units, if any.
+    fn marked_range(&self, window: crate::window::WindowId) -> Option<(usize, usize)>;
+    /// Substring covering the proposed UTF-16 range `(location, length)` clamped
+    /// to the document, returning `(actual_location, text)`.
+    fn substring(
+        &self,
+        window: crate::window::WindowId,
+        location: usize,
+        length: usize,
+    ) -> Option<(usize, String)>;
+    /// Replace the UTF-16 range `(location, length)` with `text` in the focused
+    /// editable field; returns whether the replacement was applied.
+    fn replace_range(
+        &self,
+        window: crate::window::WindowId,
+        location: usize,
+        length: usize,
+        text: &str,
+    ) -> bool;
+}
+
+/// zgx patch: give windows' views `services` so `NSTextInputClient` methods can
+/// report surrounding text and apply IME range replacements. Main thread only.
+pub fn set_text_input_services(services: Option<std::rc::Rc<dyn TextInputServices>>) {
+    crate::platform_impl::set_text_input_services(services);
+}
+
 /// zgx patch: the key a key-down `NSEvent` is, as a window's view reports it
 /// (`WindowEvent::KeyboardInput`): for an app asking whether a key a native
 /// view has (a terminal's) is one of its shortcuts. Main thread only.
