@@ -63,13 +63,13 @@ float firmness(
     float options_y,
     metal::float3 text
 ) {
-    bool local = {};
+    bool local_1 = {};
     if (!((options_y < 1.1))) {
-        local = options_y > 1.5;
+        local_1 = options_y > 1.5;
     } else {
-        local = true;
+        local_1 = true;
     }
-    bool _e10 = local;
+    bool _e10 = local_1;
     if (_e10) {
         return 0.0;
     }
@@ -116,17 +116,17 @@ metal::float4 tinted(
     device type_6 const& regions,
     constant _mslBufferSizes& _buffer_sizes
 ) {
-    bool local_1 = {};
+    bool local_2 = {};
     if (index < 0.5) {
         return premultiplied;
     }
     Region g = regions[naga_f2u32(index) - 1u];
     if (!((g.tint.x < 0.5))) {
-        local_1 = premultiplied.w <= 0.0;
+        local_2 = premultiplied.w <= 0.0;
     } else {
-        local_1 = true;
+        local_2 = true;
     }
-    bool _e21 = local_1;
+    bool _e21 = local_2;
     if (_e21) {
         return premultiplied;
     }
@@ -215,10 +215,10 @@ metal::float4 shade_texel(
 ) {
     Out v_5 = {};
     metal::float4 color_1 = {};
-    bool local_2 = {};
     bool local_3 = {};
-    float corner = {};
     bool local_4 = {};
+    float corner = {};
+    bool local_5 = {};
     bool premultiplied_1 = false;
     metal::float3 rgb = metal::float3(0.0);
     float scale = 1.0;
@@ -237,16 +237,16 @@ metal::float4 shade_texel(
         float _e30 = v_5.shape.w;
         if (!((_e30 > 0.5))) {
             float _e38 = v_5.shape.z;
-            local_3 = _e38 > 0.0;
+            local_4 = _e38 > 0.0;
         } else {
-            local_3 = true;
+            local_4 = true;
         }
-        bool _e42 = local_3;
-        local_2 = _e42;
+        bool _e42 = local_4;
+        local_3 = _e42;
     } else {
-        local_2 = false;
+        local_3 = false;
     }
-    bool _e44 = local_2;
+    bool _e44 = local_3;
     if (_e44) {
         float _e47 = v_5.shape.x;
         corner = _e47;
@@ -308,11 +308,11 @@ metal::float4 shade_texel(
             float inside = (metal::length(metal::max(iq, metal::float2(0.0))) + metal::min(metal::max(iq.x, iq.y), 0.0)) - inner_radius;
             float aa = metal::max(slope.x + slope.y, 0.5);
             if (box_1.z > 0.0) {
-                local_4 = box_1.w > 0.0;
+                local_5 = box_1.w > 0.0;
             } else {
-                local_4 = false;
+                local_5 = false;
             }
-            bool _e287 = local_4;
+            bool _e287 = local_5;
             float hollow = _e287 ? metal::clamp(0.5 - (inside / aa), 0.0, 1.0) : 0.0;
             float _e291 = color_1.w;
             color_1.w = _e291 * metal::max(metal::clamp(0.5 - (distance / aa), 0.0, 1.0) - hollow, 0.0);
@@ -462,11 +462,14 @@ vertex vsOutput vs(
   vsInput varyings [[stage_in]]
 , uint i [[vertex_id]]
 , constant metal::float4& viewport [[buffer(0)]]
+, device type_6 const& regions [[buffer(2)]]
+, constant _mslBufferSizes& _buffer_sizes [[buffer(3)]]
 ) {
     const Vertex v = { varyings.rect, varyings.uv, varyings.color, varyings.fade, varyings.options, varyings.shape, varyings.border, varyings.mask };
     metal::float2 position = {};
     float w = 1.0;
     Out o = {};
+    bool local = {};
     metal::float2 corner_1 = metal::float2(static_cast<float>(i & 1u), static_cast<float>(i >> 1u));
     metal::float2 p_3 = v.rect.xy + (corner_1 * v.rect.zw);
     position = p_3;
@@ -492,8 +495,19 @@ vertex vsOutput vs(
     o.shape = v.shape;
     o.border = v.border;
     o.mask = v.mask;
-    Out _e91 = o;
-    const auto _tmp = _e91;
+    if (v.border.w < -0.5) {
+        local = v.options.z < 0.5;
+    } else {
+        local = false;
+    }
+    bool _e102 = local;
+    if (_e102) {
+        float _e114 = regions[naga_f2u32(v.border.x) - 1u].round0_.x;
+        o.color.w = _e114 * v.border.y;
+        o.border = metal::float4(0.0);
+    }
+    Out _e121 = o;
+    const auto _tmp = _e121;
     return vsOutput { _tmp.position, _tmp.uv, _tmp.color, _tmp.point, _tmp.fade, _tmp.options, _tmp.shape, _tmp.border, _tmp.mask };
 }
 

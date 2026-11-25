@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A frame whose only change is text fading in draws its last frame again** (zgx, zgx-gpu): a paragraph's fading runs (`TextSpan::fade_in`) no longer rewrite its text each frame. Its frame loop tells the scene the time they show at (`Scene::show_fades`), and the renderer draws each run's alpha from a record per fade in the frame's region table, which the quad shader's vertex stage reads. A frame of fades alone then writes those records and submits the last frame's quads and draws again: no paint walk, no quads made, no text recoloured. The pixels are those of the run recoloured at that time, byte for byte. Anything else changing (new text, a scroll, another size, scale or background, damage elsewhere, a blur, a fade's bands, a layer) draws the frame as before. `Scene::shown_text` gives a paragraph's text with its fades' colours, as its kind held them before.

@@ -9,7 +9,8 @@ use std::time::Duration;
 use zgx::scene::{Color, NodeKind};
 use zgx_script::testing::TestApp;
 
-/// The alpha of each run of the paragraph holding `words`.
+/// The alpha each run of the paragraph holding `words` shows at
+/// (`Scene::shown_text`: its fading runs' at the time they show at).
 fn alphas(app: &mut TestApp, words: &str) -> Vec<(String, u8)> {
     let node = app
         .find(&format!("~\"{words}\""))
@@ -17,7 +18,8 @@ fn alphas(app: &mut TestApp, words: &str) -> Vec<(String, u8)> {
     let scene = app.ui.scene.borrow();
     let mut stack = vec![node];
     while let Some(id) = stack.pop() {
-        if let NodeKind::RichText { text } = scene.kind(id) {
+        if let NodeKind::RichText { .. } = scene.kind(id) {
+            let text = scene.shown_text(id).expect("a paragraph's text");
             return text
                 .runs()
                 .iter()

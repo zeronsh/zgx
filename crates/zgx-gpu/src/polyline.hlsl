@@ -139,14 +139,14 @@ struct FragmentInput_fs_polyline_both {
 
 float firmness(float options_y, float3 text)
 {
-    bool local = (bool)0;
+    bool local_1 = (bool)0;
 
     if (!((options_y < 1.1))) {
-        local = (options_y > 1.5);
+        local_1 = (options_y > 1.5);
     } else {
-        local = true;
+        local_1 = true;
     }
-    bool _e10 = local;
+    bool _e10 = local_1;
     if (_e10) {
         return 0.0;
     }
@@ -197,18 +197,18 @@ Region ConstructRegion(float4 arg0, float4 arg1, float4 arg2, float4 arg3, float
 
 float4 tinted(float index, float4 premultiplied)
 {
-    bool local_1 = (bool)0;
+    bool local_2 = (bool)0;
 
     if ((index < 0.5)) {
         return premultiplied;
     }
     Region g = ConstructRegion(asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+0)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+16)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+32)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+48)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+64)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+80)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+96)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+112)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+128)), asfloat(regions.Load4((naga_f2u32(index) - 1u)*160+144)));
     if (!((g.tint.x < 0.5))) {
-        local_1 = (premultiplied.w <= 0.0);
+        local_2 = (premultiplied.w <= 0.0);
     } else {
-        local_1 = true;
+        local_2 = true;
     }
-    bool _e21 = local_1;
+    bool _e21 = local_2;
     if (_e21) {
         return premultiplied;
     }
@@ -280,10 +280,10 @@ float4 shade_texel(Out input, float4 given, bool has_texel)
 {
     Out v_7 = (Out)0;
     float4 color_1 = (float4)0;
-    bool local_2 = (bool)0;
     bool local_3 = (bool)0;
-    float corner = (float)0;
     bool local_4 = (bool)0;
+    float corner = (float)0;
+    bool local_5 = (bool)0;
     bool premultiplied_1 = false;
     float3 rgb = (0.0).xxx;
     float scale = 1.0;
@@ -303,16 +303,16 @@ float4 shade_texel(Out input, float4 given, bool has_texel)
         float _e30 = v_7.shape.w;
         if (!((_e30 > 0.5))) {
             float _e38 = v_7.shape.z;
-            local_3 = (_e38 > 0.0);
+            local_4 = (_e38 > 0.0);
         } else {
-            local_3 = true;
+            local_4 = true;
         }
-        bool _e42 = local_3;
-        local_2 = _e42;
+        bool _e42 = local_4;
+        local_3 = _e42;
     } else {
-        local_2 = false;
+        local_3 = false;
     }
-    bool _e44 = local_2;
+    bool _e44 = local_3;
     if (_e44) {
         float _e47 = v_7.shape.x;
         corner = _e47;
@@ -374,11 +374,11 @@ float4 shade_texel(Out input, float4 given, bool has_texel)
             float inside = ((length(max(iq, (0.0).xx)) + min(max(iq.x, iq.y), 0.0)) - inner_radius);
             float aa = max((slope.x + slope.y), 0.5);
             if ((box_2.z > 0.0)) {
-                local_4 = (box_2.w > 0.0);
+                local_5 = (box_2.w > 0.0);
             } else {
-                local_4 = false;
+                local_5 = false;
             }
-            bool _e287 = local_4;
+            bool _e287 = local_5;
             float hollow = (_e287 ? clamp((0.5 - (inside / aa)), 0.0, 1.0) : 0.0);
             float _e291 = color_1.w;
             color_1.w = (_e291 * max((clamp((0.5 - (distance_ / aa)), 0.0, 1.0) - hollow), 0.0));
@@ -503,18 +503,18 @@ float zgx_distance(float2 p_2, float2 a_1, float2 b_2)
 
 float zgx_join(float d, float2 p_3, float2 v_9, float2 d0_, float2 d1_, float h, float join, float limit)
 {
-    bool local_5 = (bool)0;
     bool local_6 = (bool)0;
     bool local_7 = (bool)0;
     bool local_8 = (bool)0;
+    bool local_9 = (bool)0;
 
     float turn = ((d0_.x * d1_.y) - (d0_.y * d1_.x));
     if (!((join > 1.5))) {
-        local_5 = (abs(turn) < 1e-6);
+        local_6 = (abs(turn) < 1e-6);
     } else {
-        local_5 = true;
+        local_6 = true;
     }
-    bool _e24 = local_5;
+    bool _e24 = local_6;
     if (_e24) {
         return d;
     }
@@ -525,17 +525,17 @@ float zgx_join(float d, float2 p_3, float2 v_9, float2 d0_, float2 d1_, float h,
     float cos_half = sqrt(max(((1.0 + dot(n0_, n1_)) * 0.5), 0.0));
     float2 q_2 = (p_3 - v_9);
     if ((join < 0.5)) {
-        local_6 = (cos_half > 1e-6);
-    } else {
-        local_6 = false;
-    }
-    bool _e58 = local_6;
-    if (_e58) {
-        local_7 = ((1.0 / cos_half) <= limit);
+        local_7 = (cos_half > 1e-6);
     } else {
         local_7 = false;
     }
-    bool _e65 = local_7;
+    bool _e58 = local_7;
+    if (_e58) {
+        local_8 = ((1.0 / cos_half) <= limit);
+    } else {
+        local_8 = false;
+    }
+    bool _e65 = local_8;
     if (_e65) {
         float2 a_4 = (v_9 + (n0_ * h));
         float2 b_4 = (v_9 + (n1_ * h));
@@ -547,11 +547,11 @@ float zgx_join(float d, float2 p_3, float2 v_9, float2 d0_, float2 d1_, float h,
         return min(d, kite);
     }
     if (!((dot(q_2, d0_) < 0.0))) {
-        local_8 = (dot(q_2, d1_) > 0.0);
+        local_9 = (dot(q_2, d1_) > 0.0);
     } else {
-        local_8 = true;
+        local_9 = true;
     }
-    bool _e100 = local_8;
+    bool _e100 = local_9;
     if (_e100) {
         return d;
     }
@@ -765,6 +765,7 @@ VertexOutput_vs vs(Vertex v, uint i : SV_VertexID)
     float2 position = (float2)0;
     float w = 1.0;
     Out o = (Out)0;
+    bool local = (bool)0;
 
     float2 corner_1 = float2(float((i & 1u)), float((i >> 1u)));
     float2 p_9 = (v.rect.xy + (corner_1 * v.rect.zw));
@@ -791,8 +792,19 @@ VertexOutput_vs vs(Vertex v, uint i : SV_VertexID)
     o.shape = v.shape;
     o.border = v.border;
     o.mask = v.mask;
-    Out _e91 = o;
-    const Out out_1 = _e91;
+    if ((v.border.w < -0.5)) {
+        local = (v.options.z < 0.5);
+    } else {
+        local = false;
+    }
+    bool _e102 = local;
+    if (_e102) {
+        float _e114 = asfloat(regions.Load(0+0+(naga_f2u32(v.border.x) - 1u)*160));
+        o.color.w = (_e114 * v.border.y);
+        o.border = (0.0).xxxx;
+    }
+    Out _e121 = o;
+    const Out out_1 = _e121;
     const VertexOutput_vs out_1_ = { out_1.uv, out_1.color, out_1.point_, out_1.fade, out_1.options, out_1.shape, out_1.border, out_1.mask, out_1.position };
     return out_1_;
 }
