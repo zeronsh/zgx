@@ -12,6 +12,12 @@
 //! for the load alone, and for the app's VM alone: a plugin's requires are
 //! looked at each time, as are `@app/`'s, which `ui.override` changes, and
 //! those of a module a plugin replaced one with.
+//!
+//! Such a module runs in the app's VM under its own path, the plugin's, as a
+//! chunk's name is always the path of its file: what it asks is kept, or not,
+//! under the plugin's folder, which is no folder of the app's by another name.
+//! Where the two are one (a plugin inside the app's folder), a name asked from
+//! it leads to one path, whoever asks: only `@app/` is answered by who does.
 use rustc_hash::FxHashMap;
 use std::{
     cell::RefCell,

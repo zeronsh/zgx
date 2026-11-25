@@ -344,6 +344,65 @@ return ui.text { "shown", id = "shown" }
     assert_eq!(test.text("shown"), "shown");
 }
 
+/// A module a plugin replaced one with asks from the plugin's folder, by the
+/// same relative name as the app's files beside the one it replaced: each is
+/// answered its own, whichever asked first, and wherever the plugin is.
+#[test]
+fn a_replacement_asks_from_its_own_folder() {
+    for at in ["plugin", "app/plugins/p"] {
+        let dir = common::temp_dir("repeats-override");
+        let label = |of: &str| format!("return {{ of = \"{of}\" }}");
+        let beside =
+            "local a, b = require(\"./label\"), require(\"./label\")\nassert(rawequal(a, b))\n";
+        let asks = format!("{beside}return {{ label = a }}");
+        write(
+            &dir,
+            &[
+                ("app/parts/label.luau", &label("app")),
+                ("app/parts/card.luau", &asks),
+                ("app/parts/before.luau", &asks),
+                ("app/parts/after.luau", &asks),
+                (
+                    "app/app.luau",
+                    r#"
+local before = require("./parts/before")
+local card, again = require("@app/parts/card"), require("@app/parts/card")
+local after = require("./parts/after")
+assert(rawequal(card, again))
+assert(before.label.of == "app" and rawequal(before.label, after.label))
+assert(card.label.of == "plugin", card.label.of)
+assert(rawequal(card.original.label, before.label))
+return ui.text { "shown", id = "shown" }
+"#,
+                ),
+                (&format!("{at}/label.luau"), &label("plugin")),
+                (
+                    &format!("{at}/card.luau"),
+                    &format!(
+                        "{beside}return {{ label = a, original = require(\"@app-original/parts/card\") }}"
+                    ),
+                ),
+                (
+                    &format!("{at}/plugin.luau"),
+                    "ui.override { module = \"@app/parts/card\", with = \"./card\" }",
+                ),
+            ],
+        );
+        let app = dir.join("app/app.luau");
+        let mut test = TestApp::new(|runtime| {
+            let host = ScriptHost::new(runtime, &app);
+            host.set_plugins(vec![Plugin {
+                name: "p".into(),
+                entry: dir.join(at).join("plugin.luau"),
+                grants: vec![Capability::OverrideModule("*".into())],
+            }]);
+            host
+        });
+        assert_eq!(test.error(), None, "{at}");
+        assert_eq!(test.text("shown"), "shown", "{at}");
+    }
+}
+
 /// A plugin's requires are looked at each time, a lent package's among them.
 #[cfg(unix)]
 #[test]
