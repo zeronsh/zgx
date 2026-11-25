@@ -57,6 +57,10 @@ pub use layer_present::Caret;
 mod metal_frame;
 #[cfg(target_os = "macos")]
 mod native_surface;
+mod shader_check;
+pub use shader_check::{check_fill_shader, check_layer_shader};
+#[doc(hidden)]
+pub use shader_check::{check_fill_shader_whole, check_is_known, check_layer_shader_whole};
 #[cfg(target_os = "macos")]
 mod surfaces;
 #[cfg(target_os = "macos")]
@@ -19423,9 +19427,14 @@ pub(crate) fn single_use_module(
 /// shades a quad carrying uniforms (`mask.y`: their record in the region
 /// table, plus one) with `fill`'s colour and the rest as `shade` does.
 pub(crate) fn fill_source(user: &str) -> String {
+    fill_source_of(include_str!("draw.wgsl"), user)
+}
+/// [`fill_source`], `draw` the quad shader or what stands for it
+/// (`shader_check`).
+pub(crate) fn fill_source_of(draw: &str, user: &str) -> String {
     format!(
         "{}\nstruct FillInput {{ p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4> }}\n{user}\n{}",
-        include_str!("draw.wgsl"),
+        draw,
         "@fragment fn zgx_fill(input:Out)->@location(0) vec4<f32> {
  if input.mask.y<.5 {return shade(input);}
  let u=regions[u32(input.mask.y)-1u]; var v=input;
@@ -19459,10 +19468,15 @@ fn layer_frame((rect, uv): (Rect, [f32; 4]), node: Rect) -> [f32; 4] {
 /// `layer` and shades the result as `shade` does. The quad's `fade` is the
 /// node's box and `point` its untransformed position, so `p` is the node's.
 pub(crate) fn filter_source(user: &str) -> String {
+    filter_source_of(include_str!("draw.wgsl"), include_str!("blend.wgsl"), user)
+}
+/// [`filter_source`], `draw` and `blend` the quad shader and blend.wgsl or
+/// what stands for them (`shader_check`).
+pub(crate) fn filter_source_of(draw: &str, blend: &str, user: &str) -> String {
     format!(
         "{}\n{}\nstruct LayerInput {{ color:vec4<f32>, p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4>, radii:vec4<f32> }}\n{}\n{user}\n{}{}",
-        include_str!("draw.wgsl"),
-        include_str!("blend.wgsl"),
+        draw,
+        blend,
         "// The layer texture's coordinates at the node's top-left, and per point
 // (`layer_frame`).
 var<private> zgx_frame:vec4<f32>;
@@ -19654,42 +19668,6 @@ pub(crate) fn blend_source() -> String {
  return zgx_blend(shade(input),zgx_beneath(input.position),u32(input.mask.z));
 }"
     )
-}
-/// Checks a layer shader's source (the user's part) as the renderer will
-/// compile it, as `check_fill_shader` does a fill's.
-pub fn check_layer_shader(user: &str) -> Result<(), String> {
-    check_module(user, filter_source)
-}
-/// Checks a shader fill's source (the user's part, as `FillShader` holds
-/// it) as the renderer will compile it: `Err` reads like a compiler
-/// message, with lines counted in `user`, for an app or script to show.
-pub fn check_fill_shader(user: &str) -> Result<(), String> {
-    check_module(user, fill_source)
-}
-/// Checks `user` in the module `module` builds around it.
-fn check_module(user: &str, module: fn(&str) -> String) -> Result<(), String> {
-    let source = module(user);
-    // Lines before the user's code in the module `module` builds.
-    let template = module("\u{1}");
-    let before = template[..template.find('\u{1}').unwrap_or(0)]
-        .matches('\n')
-        .count();
-    let place = |location: Option<wgpu::naga::SourceLocation>| match location {
-        Some(at) if at.line_number as usize > before => {
-            format!("line {}: ", at.line_number as usize - before)
-        }
-        Some(_) => "in zgx's part of the module (a reserved name?): ".to_owned(),
-        None => String::new(),
-    };
-    let module = wgpu::naga::front::wgsl::parse_str(&source)
-        .map_err(|e| format!("{}{}", place(e.location(&source)), e.message()))?;
-    wgpu::naga::valid::Validator::new(
-        wgpu::naga::valid::ValidationFlags::all(),
-        wgpu::naga::valid::Capabilities::empty(),
-    )
-    .validate(&module)
-    .map(|_| ())
-    .map_err(|e| format!("{}{}", place(e.location(&source)), e.as_inner()))
 }
 /// Whether `source` (a shader fill's whole module) is valid WGSL.
 pub(crate) fn fill_validates(source: &str) -> bool {

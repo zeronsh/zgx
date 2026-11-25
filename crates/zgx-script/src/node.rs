@@ -7259,9 +7259,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             // A shader that does not compile is the script's error, shown
             // with its line, not a plain fill.
-            crate::gpu::check_fill_shader(&source)
-                .map_err(|e| mlua::Error::runtime(format!("ui.shader: {e}")))?;
             let key = (source, fps.map(f32::to_bits));
+            let made = SHADERS.with_borrow(|shaders| shaders.contains_key(&key));
+            if !made {
+                crate::gpu::check_fill_shader(&key.0)
+                    .map_err(|e| mlua::Error::runtime(format!("ui.shader: {e}")))?;
+            }
             let shader = SHADERS.with(|shaders| {
                 shaders
                     .borrow_mut()
@@ -7302,9 +7305,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             // A shader that does not compile is the script's error, shown
             // with its line, not a layer composited as painted.
-            crate::gpu::check_layer_shader(&source)
-                .map_err(|e| mlua::Error::runtime(format!("ui.layer_shader: {e}")))?;
             let key = (source, fps.map(f32::to_bits));
+            let made = LAYER_SHADERS.with_borrow(|shaders| shaders.contains_key(&key));
+            if !made {
+                crate::gpu::check_layer_shader(&key.0)
+                    .map_err(|e| mlua::Error::runtime(format!("ui.layer_shader: {e}")))?;
+            }
             let shader = LAYER_SHADERS.with(|shaders| {
                 shaders
                     .borrow_mut()
