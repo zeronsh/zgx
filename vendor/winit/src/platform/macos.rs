@@ -584,6 +584,27 @@ pub fn set_navigation_swipes(swipes: Option<std::rc::Rc<dyn NavigationSwipes>>) 
     crate::platform_impl::set_navigation_swipes(swipes);
 }
 
+/// zgx patch: what a terminate gate (`set_terminate_gate`) answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Terminate {
+    /// The app goes on: it finishes what it holds (a save) and exits itself.
+    Cancel,
+    /// It quits. Asked inside the event handler, the quit is cancelled and
+    /// sent again (`terminate:`) once the handler returns, as the events it
+    /// ends with can't be handled inside it.
+    Quit,
+    /// It quits at once, as the session ends (a logout), which a cancel would
+    /// hold for the whole system. Inside the event handler, the event loop's
+    /// last events are left out.
+    EndSession,
+}
+
+/// zgx patch: asked when the app is told to quit (⌘Q, the app menu's Quit,
+/// a logout). Main thread only; with none, a quit proceeds (`Terminate::Quit`).
+pub fn set_terminate_gate(gate: Option<std::rc::Rc<dyn Fn() -> Terminate>>) {
+    crate::platform_impl::set_terminate_gate(gate);
+}
+
 /// zgx patch: whether a trackpad's two-finger horizontal scroll can swipe
 /// between pages (`+[NSEvent isSwipeTrackingFromScrollEventsEnabled]`): the
 /// system's "Swipe between pages" set to scroll with two fingers. Main

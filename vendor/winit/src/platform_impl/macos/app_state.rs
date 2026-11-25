@@ -40,6 +40,8 @@ pub(super) struct AppState {
     start_time: Cell<Option<Instant>>,
     wait_timeout: Cell<Option<Instant>>,
     pending_redraw: RefCell<Vec<WindowId>>,
+    /// zgx patch: told to quit inside the event handler, to quit after it.
+    terminate_after: Cell<bool>,
     // NOTE: This is strongly referenced by our `NSWindowDelegate` and our `NSView` subclass, and
     // as such should be careful to not add fields that, in turn, strongly reference those.
 }
@@ -64,6 +66,22 @@ declare_class!(
         #[method(applicationDidFinishLaunching:)]
         fn app_did_finish_launching(&self, notification: &NSNotification) {
             self.did_finish_launching(notification)
+        }
+
+        #[method(applicationShouldTerminate:)]
+        fn app_should_terminate(&self, _sender: &NSObject) -> usize {
+            use crate::platform::macos::Terminate;
+            // NSTerminateNow is 1, NSTerminateCancel 0.
+            match super::terminate_answer() {
+                Terminate::Cancel => 0,
+                // zgx patch: the quit's events can't be handled inside the
+                // handler (a panic in AppKit's callback aborts): after it.
+                Terminate::Quit if self.ivars().event_handler.in_use() => {
+                    self.ivars().terminate_after.set(true);
+                    0
+                },
+                Terminate::Quit | Terminate::EndSession => 1,
+            }
         }
 
         #[method(applicationWillTerminate:)]
@@ -98,6 +116,7 @@ impl ApplicationDelegate {
             start_time: Cell::new(None),
             wait_timeout: Cell::new(None),
             pending_redraw: RefCell::new(vec![]),
+            terminate_after: Cell::new(false),
         });
         unsafe { msg_send_id![super(this), init] }
     }
@@ -221,7 +240,10 @@ impl ApplicationDelegate {
     /// NOTE: that if the `NSApplication` has been launched then that state is preserved,
     /// and we won't need to re-launch the app if subsequent EventLoops are run.
     pub fn internal_exit(&self) {
-        self.handle_event(Event::LoopExiting);
+        // zgx patch: a session ending inside the handler.
+        if !self.ivars().event_handler.in_use() {
+            self.handle_event(Event::LoopExiting);
+        }
 
         self.set_is_running(false);
         self.set_stop_on_redraw(false);
@@ -321,7 +343,15 @@ impl ApplicationDelegate {
 
     #[track_caller]
     fn handle_event(&self, event: Event<HandlePendingUserEvents>) {
-        self.ivars().event_handler.handle_event(event, &ActiveEventLoop::new_root(self.retain()))
+        self.ivars().event_handler.handle_event(event, &ActiveEventLoop::new_root(self.retain()));
+        // zgx patch: a quit asked inside the handler, now that it has returned
+        // (`app_should_terminate`), from the run loop, with nothing below it.
+        if self.ivars().terminate_after.take() {
+            let mtm = MainThreadMarker::from(self);
+            self.ivars()
+                .run_loop
+                .queue_closure(move || unsafe { NSApplication::sharedApplication(mtm).terminate(None) });
+        }
     }
 
     /// dispatch `NewEvents(Init)` + `Resumed`
