@@ -173,6 +173,102 @@ impl Default for WindowOptions {
 /// Some window has an `on_close_requested`: a quit waits for it.
 #[cfg(all(target_os = "macos", zgx_winit_patched))]
 static CLOSE_HANDLERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether AppKit may quit the app now. A session that ends (a logout, a
+/// restart, a shutdown) is never refused, which would cancel it for the
+/// whole system: nothing is asked, and each window's `on_closed` runs
+/// before the answer (`close_all`), as nothing of ours need run after it.
+/// Any other quit waits for the windows' `on_close_requested`, if one is set
+/// (`ask`).
+#[cfg(any(test, all(target_os = "macos", zgx_winit_patched)))]
+fn may_quit(
+    reason: Option<[u8; 4]>,
+    close_handlers: bool,
+    close_all: impl FnOnce(),
+    ask: impl FnOnce(),
+) -> bool {
+    if reason.is_some_and(ends_session) {
+        close_all();
+        return true;
+    }
+    if close_handlers {
+        ask();
+    }
+    !close_handlers
+}
+/// Whether a quit for `reason` (`kAEQuitReason`) ends the session. Apple's
+/// AERegistry.h documents four reasons: `rlgo` (kAEReallyLogOut), `rest`
+/// (kAERestart), `shut` (kAEShutDown), and `quia` (kAEQuitAll), which quits
+/// the apps and goes on. The others ask for the dialogs (kAELogOut,
+/// kAEShowRestartDialog, kAEShowShutdownDialog) and aren't documented as
+/// reasons; one given as a reason could only mean the same.
+#[cfg(any(test, all(target_os = "macos", zgx_winit_patched)))]
+fn ends_session(reason: [u8; 4]) -> bool {
+    matches!(
+        &reason,
+        b"rlgo" | b"rest" | b"shut" | b"logo" | b"rrst" | b"rsdn"
+    )
+}
+/// Why the quit `event` was sent (`kAEQuitReason`), if it says: a parameter
+/// by AERegistry.h, an attribute as AppKit's callers read it.
+#[cfg(target_os = "macos")]
+#[cfg_attr(not(zgx_winit_patched), allow(dead_code))]
+fn quit_reason(event: &objc2_foundation::NSAppleEventDescriptor) -> Option<[u8; 4]> {
+    let key = u32::from_be_bytes(*b"why?");
+    event
+        .attributeDescriptorForKeyword(key)
+        .or_else(|| event.paramDescriptorForKeyword(key))
+        .map(|reason| reason.typeCodeValue().to_be_bytes())
+}
+#[cfg(all(target_os = "macos", zgx_winit_patched))]
+fn current_quit_reason() -> Option<[u8; 4]> {
+    let event =
+        objc2_foundation::NSAppleEventManager::sharedAppleEventManager().currentAppleEvent()?;
+    quit_reason(&event)
+}
+/// A window's `on_closed` handlers, each run once, whichever comes first:
+/// the window's closing, the app's exit, or a session's end.
+#[derive(Default)]
+struct ClosedHandlers(RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>>);
+impl ClosedHandlers {
+    /// Run those not run yet, in the order given. One that panics stops
+    /// none after it; its panic goes on once they ran.
+    fn run(&self) {
+        let mut panic = None;
+        loop {
+            let Some(handler) = self.0.borrow_mut().pop_front() else {
+                break;
+            };
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler)) {
+                panic.get_or_insert(payload);
+            }
+        }
+        if let Some(payload) = panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+#[cfg(any(test, all(target_os = "macos", zgx_winit_patched)))]
+thread_local! {
+    /// Each window's `on_closed`, in the order they opened, for a session's
+    /// end: AppKit asks outside the event loop's turns, where the window
+    /// manager isn't at hand.
+    static CLOSED_HANDLERS: RefCell<Vec<std::rc::Weak<ClosedHandlers>>> =
+        const { RefCell::new(Vec::new()) };
+}
+/// Run every open window's `on_closed`, one window's panic stopping no other's.
+#[cfg(any(test, all(target_os = "macos", zgx_winit_patched)))]
+fn run_all_closed() {
+    let windows = CLOSED_HANDLERS.with(|all| {
+        all.borrow()
+            .iter()
+            .filter_map(std::rc::Weak::upgrade)
+            .collect::<Vec<_>>()
+    });
+    for window in windows {
+        // (The panic hook has logged it.)
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.run()));
+    }
+}
 #[derive(Debug)]
 enum Event {
     Quit,
@@ -773,7 +869,7 @@ pub struct WindowContext {
     #[allow(dead_code)]
     native_diagnostics: crate::native_host::NativeDiagnosticsHandle,
     close_requested: Option<Box<dyn FnMut() -> bool>>,
-    closed: Option<Box<dyn FnOnce()>>,
+    closed: Rc<ClosedHandlers>,
     menu_action: Option<Box<dyn FnMut(crate::MenuAction)>>,
 }
 impl WindowContext {
@@ -903,19 +999,32 @@ impl WindowContext {
     /// Called once before UI state is disposed. Pending tasks are cancelled
     /// on closure. Each handler given runs, in the order given: a second
     /// doesn't replace the first.
+    ///
+    /// A session's end on macOS (a logout, a restart, a shutdown) closes the
+    /// windows without asking `on_close_requested`: save here, before
+    /// returning, as nothing need run after. Every window's handlers run one
+    /// after another on the main thread. How long they have is no promise:
+    /// Apple's archived Daemons and Services Programming Guide ("Terminating
+    /// Processes") says a foreground app that hasn't quit in 45 seconds makes
+    /// the system cancel the logout (it isn't killed), of apps that aren't
+    /// Cocoa's; for Cocoa it documents only two minutes after
+    /// `NSTerminateLater`, which zgx doesn't answer. zgx sets no limit of its
+    /// own, so a longer save still finishes. One that runs the run loop (a
+    /// native modal dialog) when the session ends is cut off where it is.
     pub fn on_closed(&mut self, handler: impl FnOnce() + 'static) {
-        self.closed = Some(then(self.closed.take(), handler));
+        self.closed.0.borrow_mut().push_back(Box::new(handler));
     }
 }
-/// `first`, if there is one, then `next`.
-fn then(first: Option<Box<dyn FnOnce()>>, next: impl FnOnce() + 'static) -> Box<dyn FnOnce()> {
-    match first {
-        Some(first) => Box::new(move || {
-            first();
-            next();
-        }),
-        None => Box::new(next),
-    }
+/// A new window's `on_closed` handlers, found at a session's end.
+fn closed_handlers() -> Rc<ClosedHandlers> {
+    let handlers = Rc::new(ClosedHandlers::default());
+    #[cfg(any(test, all(target_os = "macos", zgx_winit_patched)))]
+    CLOSED_HANDLERS.with(|all| {
+        let mut all = all.borrow_mut();
+        all.retain(|window| window.strong_count() > 0);
+        all.push(Rc::downgrade(&handlers));
+    });
+    handlers
 }
 /// A desktop application: its fonts, first window, menus and native
 /// events. [`Application::run`] starts the event loop.
@@ -1099,11 +1208,14 @@ impl Application {
         {
             let quit = proxy.clone();
             winit::platform::macos::set_terminate_gate(Some(Rc::new(move || {
-                if !CLOSE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed) {
-                    return true;
-                }
-                let _ = quit.send_event(Event::QuitRequested);
-                false
+                may_quit(
+                    current_quit_reason(),
+                    CLOSE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed),
+                    run_all_closed,
+                    || {
+                        let _ = quit.send_event(Event::QuitRequested);
+                    },
+                )
             })));
         }
         let native_events = if let Some(id) = &self.application_id {
@@ -2227,7 +2339,7 @@ impl Host {
             viewport,
             frames: frames.clone(),
             close_requested: None,
-            closed: None,
+            closed: closed_handlers(),
             tasks: TaskSpawner {
                 pending: pending.clone(),
                 proxy: proxy.clone(),
@@ -7068,9 +7180,7 @@ impl Drop for Host {
             window.set_visible(false);
         }
         self.pending.borrow_mut().clear();
-        if let Some(callback) = self.context.closed.take() {
-            callback();
-        }
+        self.context.closed.run();
         // The renderer's surface first, while its window still is (fields
         // drop in order, and `window` comes before `renderer`); then its
         // Metal layer leaves the view. The layer (raw-window-metal's)
@@ -8644,15 +8754,16 @@ impl ApplicationHandler<Event> for WindowManager {
     /// its last window), and what a window holds on it would go after: its
     /// renderer's surface and its popups' (Mesa's WSI destroys their
     /// buffers and queues through the display), and its pointer grab
-    /// (`popup_window::x11::release_grab`), all through freed memory.
-    #[cfg(target_os = "linux")]
+    /// (`popup_window::x11::release_grab`), all through freed memory. On
+    /// macOS a quit AppKit carries out (`terminate:`) exits the process after
+    /// this: `run_app` never returns to close a window still open.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        self.contain(event_loop, None, |this| {
-            let open: Vec<u64> = this.hosts.keys().copied().collect();
-            for token in open {
-                this.close(token);
-            }
-        });
+        let open: Vec<u64> = self.hosts.keys().copied().collect();
+        for token in open {
+            // Each on its own: one whose `on_closed` panics keeps none open.
+            self.contain(event_loop, None, |this| this.close(token));
+        }
     }
 }
 impl WindowManager {
@@ -9749,17 +9860,140 @@ mod tests {
         assert_eq!(held.take(), Some((2, "b2", vec!["b1"])));
     }
 
-    /// Every `on_closed` handler runs, in order: a window's own state and
-    /// its `open` state each had one, and the second dropped the first.
+    /// Every `on_closed` handler runs once, in order: a window's own state
+    /// and its `open` state each had one, and the second dropped the first.
     #[test]
-    fn closing_runs_every_handler_given_in_order() {
-        let ran = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let (a, b, c) = (ran.clone(), ran.clone(), ran.clone());
-        let handler = super::then(None, move || a.borrow_mut().push(1));
-        let handler = super::then(Some(handler), move || b.borrow_mut().push(2));
-        let handler = super::then(Some(handler), move || c.borrow_mut().push(3));
-        handler();
+    fn closing_runs_every_handler_given_in_order_once() {
+        let (window, ran) = recording(&[1, 2, 3]);
+        window.run();
+        window.run();
         assert_eq!(*ran.borrow(), [1, 2, 3]);
+    }
+    type Ran = std::rc::Rc<std::cell::RefCell<Vec<i32>>>;
+    /// A window's handlers (found at a session's end, as a window's are),
+    /// each noting its number; a negative one panics.
+    fn recording(numbers: &[i32]) -> (std::rc::Rc<super::ClosedHandlers>, Ran) {
+        let window = super::closed_handlers();
+        let ran = Ran::default();
+        for &n in numbers {
+            let ran = ran.clone();
+            window.0.borrow_mut().push_back(Box::new(move || {
+                assert!(n >= 0, "handler {n}");
+                ran.borrow_mut().push(n);
+            }));
+        }
+        (window, ran)
+    }
+    /// What a quit asks and runs: `may_quit`'s answer, then how often it
+    /// asked and closed.
+    fn quit(reason: Option<&[u8; 4]>, handlers: bool) -> (bool, i32, i32) {
+        let (asked, closed) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+        let allowed = super::may_quit(
+            reason.copied(),
+            handlers,
+            || closed.set(closed.get() + 1),
+            || asked.set(asked.get() + 1),
+        );
+        (allowed, asked.get(), closed.get())
+    }
+
+    #[test]
+    fn a_logout_a_restart_and_a_shutdown_end_the_session_and_quit_all_does_not() {
+        for reason in [b"rlgo", b"rest", b"shut", b"logo", b"rrst", b"rsdn"] {
+            assert!(super::ends_session(*reason), "{reason:?}");
+        }
+        // kAEQuitAll, a quit's own code, and nothing.
+        for reason in [b"quia", b"quit", b"\0\0\0\0"] {
+            assert!(!super::ends_session(*reason), "{reason:?}");
+        }
+    }
+
+    /// The reason's read from where an event may hold it. (The events are
+    /// made here and sent nowhere.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_quit_events_reason_is_read_as_an_attribute_or_a_parameter() {
+        use objc2_foundation::NSAppleEventDescriptor;
+        let code = |c: &[u8; 4]| u32::from_be_bytes(*c);
+        let event = || {
+            NSAppleEventDescriptor::appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID(
+                code(b"aevt"), code(b"quit"), None, -1, 0,
+            )
+        };
+        let reason = NSAppleEventDescriptor::descriptorWithTypeCode(code(b"rlgo"));
+        assert_eq!(super::quit_reason(&event()), None);
+        let given = event();
+        given.setParamDescriptor_forKeyword(&reason, code(b"why?"));
+        assert_eq!(super::quit_reason(&given), Some(*b"rlgo"));
+        let given = event();
+        given.setAttributeDescriptor_forKeyword(&reason, code(b"why?"));
+        assert_eq!(super::quit_reason(&given), Some(*b"rlgo"));
+    }
+
+    /// ⌘Q asks (once, and waits) if a window has something to ask, and
+    /// otherwise goes on; a session's end asks nothing and runs `on_closed`
+    /// before it answers, whether or not a window would ask.
+    #[test]
+    fn a_quit_asks_and_a_sessions_end_closes() {
+        assert_eq!(quit(None, true), (false, 1, 0));
+        assert_eq!(quit(Some(b"quia"), true), (false, 1, 0));
+        assert_eq!(quit(None, false), (true, 0, 0));
+        assert_eq!(quit(Some(b"shut"), true), (true, 0, 1));
+        assert_eq!(quit(Some(b"shut"), false), (true, 0, 1));
+    }
+
+    /// A session's end, then the app's exit: each handler ran once, and a
+    /// panic in one stops neither its window's others nor another window's.
+    #[test]
+    fn a_sessions_end_runs_every_windows_handlers_once_past_a_panic() {
+        let (a, ran_a) = recording(&[1, -1, 2]);
+        let (b, ran_b) = recording(&[3]);
+        assert!(super::may_quit(
+            Some(*b"rlgo"),
+            true,
+            super::run_all_closed,
+            || { panic!("a session's end asks nothing") }
+        ));
+        assert_eq!(
+            (&*ran_a.borrow(), &*ran_b.borrow()),
+            (&vec![1, 2], &vec![3])
+        );
+        // The exit closes them.
+        a.run();
+        b.run();
+        super::run_all_closed();
+        assert_eq!(
+            (&*ran_a.borrow(), &*ran_b.borrow()),
+            (&vec![1, 2], &vec![3])
+        );
+    }
+
+    /// The session ending as a window closes (its handler lets AppKit run):
+    /// the one running isn't run again, and those left run once.
+    #[test]
+    fn a_session_ending_as_a_window_closes_runs_nothing_twice() {
+        let (window, ran) = recording(&[]);
+        let notes = ran.clone();
+        window.0.borrow_mut().push_back(Box::new(move || {
+            notes.borrow_mut().push(1);
+            super::run_all_closed();
+        }));
+        let notes = ran.clone();
+        window
+            .0
+            .borrow_mut()
+            .push_back(Box::new(move || notes.borrow_mut().push(2)));
+        window.run();
+        assert_eq!(*ran.borrow(), [1, 2]);
+    }
+
+    /// A closed window's handlers are let go.
+    #[test]
+    fn a_closed_window_is_not_kept_for_a_sessions_end() {
+        let (window, ran) = recording(&[1]);
+        drop(window);
+        super::run_all_closed();
+        assert!(ran.borrow().is_empty());
     }
     use super::*;
 
