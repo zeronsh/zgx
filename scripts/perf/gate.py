@@ -714,7 +714,8 @@ def differing(before, after):
 
 def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, asked=None):
     """For each cell that grew with `LAYOUT_OURS`% or less of it zgx's,
-    Luau's or Rust's own, whether the heap's layout accounts for it: its
+    Luau's or Rust's own (`other`, mostly Luau's collector's frames, is
+    compared by the range as libc is), whether the heap's layout accounts for it: its
     base counted under each of `SHIFTS`, and what it asks of the C library
     on both sides. The widest `LAYOUT_MAX`, within `LAYOUT_BUDGET`; lines
     of a table, `(name, rise %, why)`. Report only: it fails nothing.
@@ -727,7 +728,9 @@ def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, a
         if name not in found or delta is None or not before:
             continue
         groups, total = found[name]
-        ours = {g: groups[g] for g in ('zgx', 'luau', 'rust', 'other') if groups.get(g, 0) > 0}
+        # `other` is mostly Luau's collector's unattributed frames, which move
+        # with the heap as libc does: compared by the range, printed below.
+        ours = {g: groups[g] for g in ('zgx', 'luau', 'rust') if groups.get(g, 0) > 0}
         most = max(ours.values(), default=0) / before * 100
         if total <= 0 or delta <= 0:
             continue
@@ -769,7 +772,8 @@ def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, a
             if allocated:
                 own = ', given the change\'s own ' + ', '.join(
                     f'{n} {c:+,} ({b:+,} bytes)' for n, c, b in allocated)
-            lines.append((name, delta, f"layout{own}: zgx {groups['zgx']:+,}, the same calls and bytes; {over}"))
+            other = f", other {groups['other']:+,}" if groups.get('other') else ''
+            lines.append((name, delta, f"layout{own}: zgx {groups['zgx']:+,}{other}, the same calls and bytes; {over}"))
     return lines
 
 

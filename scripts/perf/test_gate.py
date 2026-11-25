@@ -157,6 +157,13 @@ class LayoutTests(unittest.TestCase):
         # What fell is not work.
         self.assertTrue(self.told(groups={'zgx': -90_000}).startswith('layout:'))
 
+    def test_a_rise_in_other_alone_is_compared_by_the_range_and_printed(self):
+        # The collector's unattributed frames move with the heap, as libc's do.
+        why = self.told(groups={'other': 120_000}, total=200_000)
+        self.assertTrue(why.startswith('layout:'), why)
+        self.assertIn('other +120,000', why)
+        self.assertIn("past the base's own range", self.told(groups={'other': 120_000}, shifts=(0, 50_000)))
+
     def test_one_percent_more_compares_at_the_same_cost_of_zgx_is_the_changes(self):
         self.assertIn('memcmp +3,000 calls', self.told(head={'memcmp': (303_000, 2_020_000)}))
 
