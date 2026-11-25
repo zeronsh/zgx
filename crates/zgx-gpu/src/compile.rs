@@ -22,6 +22,8 @@ pub(crate) fn spawn<T: Send + Sync + 'static>(
     let slot: Slot<T> = Arc::default();
     let filled = slot.clone();
     let job: Job = Box::new(move || {
+        #[cfg(test)]
+        held::wait();
         let _ = filled.set(make());
         zgx::image::wake_waiting();
     });
@@ -136,4 +138,37 @@ pub(crate) fn declared_since(seen: &mut u64) -> Option<Vec<Arc<zgx::decoration::
     *seen = count;
     let declared = DECLARED.lock().unwrap_or_else(|p| p.into_inner());
     Some(declared.iter().filter_map(Weak::upgrade).collect())
+}
+
+/// Compiles held until a test lets them go (`hold`), so that what it reads
+/// before one ends doesn't depend on how fast the machine compiles.
+#[cfg(test)]
+pub(crate) mod held {
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    /// The longest one compile is held: a frame that (wrongly) waits for it
+    /// goes on then, and its test fails on what it drew, rather than hang.
+    const LONGEST: Duration = Duration::from_secs(10);
+    /// How many tests hold compiles.
+    static HOLDERS: Mutex<usize> = Mutex::new(0);
+    static LET_GO: Condvar = Condvar::new();
+
+    /// Compiles that would start on the compile thread wait while this
+    /// lives. Every test's: the thread is the process's.
+    pub(crate) struct Held(());
+    pub(crate) fn hold() -> Held {
+        *HOLDERS.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        Held(())
+    }
+    impl Drop for Held {
+        fn drop(&mut self) {
+            *HOLDERS.lock().unwrap_or_else(|p| p.into_inner()) -= 1;
+            LET_GO.notify_all();
+        }
+    }
+    pub(super) fn wait() {
+        let holders = HOLDERS.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = LET_GO.wait_timeout_while(holders, LONGEST, |holders| *holders > 0);
+    }
 }

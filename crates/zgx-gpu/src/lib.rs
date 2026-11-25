@@ -23999,7 +23999,10 @@ mod shader_compile_tests {
         let (mut gpu, mut scene) = renderer();
         let shader = green();
         filled(&mut scene, &shader);
+        // Still compiling as the frame is drawn, however fast it compiles.
+        let held = compile::held::hold();
         let (pixel, awaited) = frame(&mut gpu, &mut scene);
+        drop(held);
         assert_eq!(pixel, [255, 0, 0, 255], "the box's colour meanwhile");
         assert!(awaited, "a frame went without it");
         assert!(compiled(&gpu, &shader));
