@@ -579,6 +579,13 @@ def count(binary, env, checkout=None, placement=None, out='/dev/null', fair=Fals
     return int(found.group(1).replace(',', ''))
 
 
+# Each scene's change in instructions, exactly: the counts' difference under
+# the placement whose percent the row shows (the median's own, for a scene
+# counted under several), for what compares it in instructions
+# (`layout_rows`).
+CHANGES = {}
+
+
 def compared(name, package, env, base, head):
     """A scene's counts on the base (a binary and its checkout, or `None`
     for a scene new in the head) and the head, the change in percent, and
@@ -590,11 +597,17 @@ def compared(name, package, env, base, head):
         return None, after, None, []
     before = count(base[0], env, base[1], fair=fair)
     deltas = [(after - before) / before * 100]
+    differences = [after - before]
     if scripted(name, package) and abs(deltas[0]) > RECOUNT:
         for placement in PLACEMENTS:
             placed = count(base[0], env, base[1], placement, fair=fair)
-            deltas.append((count(head[0], env, head[1], placement, fair=fair) - placed) / placed * 100)
-    return before, after, statistics.median(deltas), deltas
+            moved = count(head[0], env, head[1], placement, fair=fair) - placed
+            deltas.append(moved / placed * 100)
+            differences.append(moved)
+    median = statistics.median(deltas)
+    # (An odd number of counts: the median is one of them.)
+    CHANGES[name] = differences[deltas.index(median)]
+    return before, after, median, deltas
 
 
 def worth_explaining(rows, floor=None, spread=None, most=None):
@@ -712,7 +725,7 @@ def differing(before, after):
     return copied, allocated
 
 
-def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, asked=None):
+def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, asked=None, changes=None):
     """For each cell that grew with `LAYOUT_OURS`% or less of it zgx's,
     Luau's or Rust's own (`other`, mostly Luau's collector's frames, is
     compared by the range as libc is), whether the heap's layout accounts for it: its
@@ -721,10 +734,11 @@ def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, a
     of a table, `(name, rise %, why)`. Report only: it fails nothing.
     `counted` and `asked` are for tests (`count`, `library_calls`)."""
     counted = count if counted is None else counted
+    changes = CHANGES if changes is None else changes
     asked = library_calls if asked is None else asked
     start = clock()
     lines, taken = [], 0
-    for name, before, _, delta, _ in sorted(rows, key=lambda row: -(row[3] or 0.0)):
+    for name, before, after, delta, _ in sorted(rows, key=lambda row: -(row[3] or 0.0)):
         if name not in found or delta is None or not before:
             continue
         groups, total = found[name]
@@ -754,18 +768,24 @@ def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, a
             lines.append((name, delta, f'no range: {str(error).splitlines()[0]}'))
             continue
         low, high = min(base_counts), max(base_counts)
-        spread = min((high - low) / before * 100, LAYOUT_CEILING)
+        # In instructions, the gate's change (the median's own difference,
+        # kept exactly) against the base's range: no percent turned back
+        # into a count decides a rise at its edge.
+        rise = changes.get(name, after - before)
+        reach = min(high - low, LAYOUT_CEILING / 100 * before)
+        spread = reach / before * 100
         sides = [asked(WORK / side / example, env, checkout) for side, checkout in
                  (('gate-bin-base', base), ('gate-bin-head', ROOT))]
         if None in sides:
             lines.append((name, delta, 'no counts of what it asks of the C library'))
             continue
         copied, allocated = differing(*sides)
-        over = f'base {low / 1e6:,.2f}-{high / 1e6:,.2f} M over {len(SHIFTS)} shifts ({spread:.3f}%)'
+        over = (f'base {low / 1e6:,.2f}-{high / 1e6:,.2f} M over {len(SHIFTS)} shifts '
+                f'({reach:,.0f}, {spread:.4f}%; the rise {rise:,.0f})')
         if copied:
             what = ', '.join(f'{n} {c:+,} calls {b:+,} bytes' for n, c, b in copied)
             lines.append((name, delta, f'not layout: it does more ({what}); {over}'))
-        elif delta > spread:
+        elif rise > reach:
             lines.append((name, delta, f"past the base's own range: {over}"))
         else:
             own = ''
@@ -781,7 +801,7 @@ def layout_lines(found):
     """The layout table."""
     return ['**Heap layout** (cells that grew with none of it zgx\'s own work, asked how far their base moves by '
             'where the heap puts things; report only, gating nothing)', '', '| scene | change | |',
-            '| --- | ---: | --- |', *(f'| {name} | {delta:+.3f}% | {why} |' for name, delta, why in found)]
+            '| --- | ---: | --- |', *(f'| {name} | {delta:+.4f}% | {why} |' for name, delta, why in found)]
 
 
 def base_checkout():

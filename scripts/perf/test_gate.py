@@ -141,11 +141,31 @@ class LayoutTests(unittest.TestCase):
         with patch.object(gate, 'LAYOUT_MAX', max_):
             return gate.layout_rows(
                 rows, found, scenes, None, clock=clock or (lambda: 0.0),
-                counted=lambda *a, **k: next(counts), asked=lambda *a: next(sides))[0][2]
+                counted=lambda *a, **k: next(counts), asked=lambda *a: next(sides), changes={name: total})[0][2]
 
     def test_a_rise_inside_the_bases_own_range_is_layout(self):
         self.assertTrue(self.told().startswith('layout:'), self.told())
-        self.assertIn('over 8 shifts (0.300%)', self.told(shifts=(0, 3_000_000)))
+        self.assertIn('over 8 shifts (300,000, 0.3000%; the rise 200,000)', self.told(shifts=(0, 3_000_000)))
+
+    def test_the_rise_is_the_medians_own_difference_kept_exactly(self):
+        # Three placements, the middle percent's own count difference, not a
+        # percent turned back into one (its base is not the row's).
+        # (`compared` counts the head first, then the base; each placement's
+        # base, then its head.)
+        counts = iter([1_000_400, 1_000_000,   # the row's own: +0.04%
+                       2_000_000, 2_001_000,   # a placement: +0.05%
+                       1_000_000, 1_000_300])  # another: +0.03%
+        with patch.object(gate, 'count', side_effect=lambda *a, **k: next(counts)), \
+                patch.object(gate, 'CHANGES', {}):
+            _, _, median, _ = gate.compared('app-mail', 'zgx-script', {}, ('b', None), ('h', None))
+            self.assertAlmostEqual(median, 0.04)
+            self.assertEqual(gate.CHANGES['app-mail'], 400)
+
+    def test_a_rise_equal_to_the_range_is_inside_it(self):
+        # md-stream on #2463: a rise and a range that print alike are compared
+        # in instructions, not as rounded percents.
+        self.assertTrue(self.told(delta=0.25, total=250_000, shifts=(0, 250_000)).startswith('layout:'))
+        self.assertIn("past the base's own range", self.told(delta=0.25001, total=250_010, shifts=(0, 250_000)))
 
     def test_a_rise_past_it_is_not(self):
         self.assertIn("past the base's own range", self.told(shifts=(0, 50_000)))
@@ -183,7 +203,10 @@ class LayoutTests(unittest.TestCase):
         self.assertIn('read it', self.told(delta=0.31, shifts=(0, 90_000_000)))
 
     def test_a_range_is_no_wider_than_the_ceiling(self):
-        self.assertIn("past the base's own range", self.told(delta=0.30, shifts=(0, 250_000)))
+        # A range past 0.3% reads as 0.3%; a rise past it is a person's to read
+        # first, whatever the range.
+        self.assertIn('(300,000, 0.3000%; the rise 290,000)', self.told(delta=0.29, total=290_000, shifts=(0, 500_000)))
+        self.assertIn('read it', self.told(delta=0.30001, total=300_010, shifts=(0, 500_000)))
 
     def test_the_widest_cells_are_shifted_and_the_rest_say_so(self):
         rows = [(n, 100_000_000, 0, d, [d]) for n, d in (('small', 0.05), ('wide', 0.2))]

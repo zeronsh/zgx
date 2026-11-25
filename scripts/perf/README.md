@@ -69,7 +69,9 @@ change's cost, when all of these hold:
   calls as it starts). Equal calls are not enough: a struct that grew copies
   longer at the same calls. Allocations may differ, and the row then says
   how, for the change to explain as its own;
-- the rise is inside the base's own range: the base counted under 8 blocks
+- the rise is inside the base's own range (compared in instructions, the
+  gate's change as counted against the base's highest less its lowest, so a
+  rise at the edge isn't decided by rounding): the base counted under 8 blocks
   (16 to 3,600 bytes, spread over the page) kept from before it starts, the
   range the cell moves by with no change at all, that day;
 - and the rise is 0.3% or less, whatever the range. Past it a person reads
