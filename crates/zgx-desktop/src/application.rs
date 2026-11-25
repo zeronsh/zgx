@@ -2005,6 +2005,9 @@ struct Host {
     /// When to draw again a plane's frame left for a tick (its last drawable
     /// not yet shown: `GpuRenderer::planes_owed`), though nothing else asks.
     plane_retry: Option<std::time::Instant>,
+    /// Until when the script holds the window's frame (`Ui::hold_frames`):
+    /// no frame is drawn before then unless it lets go.
+    frames_held: Option<std::time::Instant>,
     /// Until when input keeps frames at the display's full rate (`INPUT_FULL_RATE`).
     #[cfg(any(target_os = "macos", windows))]
     input_until: Option<std::time::Instant>,
@@ -2510,6 +2513,7 @@ impl Host {
             #[cfg(target_os = "macos")]
             planes_drawn_at: None,
             plane_retry: None,
+            frames_held: None,
             #[cfg(any(target_os = "macos", windows))]
             input_until: None,
             #[cfg(any(target_os = "macos", windows))]
@@ -3170,6 +3174,14 @@ impl Host {
             self.show_error(&message);
         }
         self.show_issues();
+        // The script holds the frame (`Ui::hold_frames`: a page waiting on
+        // its content): nothing drawn, what changed kept for the frame that
+        // shows as it lets go, or as the hold runs out (`about_to_wait`).
+        self.frames_held = self.context.ui.frames_held(std::time::Instant::now());
+        if self.frames_held.is_some() {
+            zgx_gpu::present_log::log(|| "frame held".into());
+            return Ok(());
+        }
         // A large removal's effects are freed a chunk per frame (`Ui::reclaim`,
         // as the frame is prepared): frames keep coming until they are.
         if self.context.ui.reclaiming() {
@@ -3233,6 +3245,11 @@ impl Host {
             joined = self.held_damage.with(&report.damage, full[0]);
             &joined[..]
         };
+        // What a hold kept back shows with this frame, unless it too waits
+        // for one to be granted.
+        if damage.is_empty() || !self.frame_paced || self.present_ready {
+            self.context.ui.held_frame_drawn();
+        }
         // Native views: split this frame's paint into the planes under and
         // over them; paint moving between planes repaints on both.
         let planned = match &mut self.renderer {
@@ -7016,8 +7033,16 @@ impl Host {
                 .is_some_and(|link| link.running());
         #[cfg(not(any(target_os = "macos", windows)))]
         let paced = false;
+        // A hold just over, let go or run out, draws now, whatever paces
+        // frames: nothing new need have changed since, so no refresh may be
+        // on its way.
+        let hold_over = hold_ended(
+            &mut self.frames_held,
+            &self.context.ui,
+            std::time::Instant::now(),
+        );
         // Scene damage accumulates until the refresh paints it in one frame.
-        if !paced || due || self.frame_arrived || self.force {
+        if !paced || due || self.frame_arrived || self.force || hold_over {
             #[cfg(target_os = "macos")]
             {
                 self.refresh_frame = paced && self.frame_arrived;
@@ -8986,6 +9011,7 @@ impl WindowManager {
                     host.popups.deadline(),
                     host.renderer_retry,
                     host.plane_retry,
+                    host.frames_held,
                     host.touch.hold_deadline(),
                     host.trim_at,
                     host.release_images_at,
@@ -9574,6 +9600,15 @@ impl FrameDamage {
     fn clear(&mut self) {
         self.0.clear();
     }
+}
+/// Whether the hold `held` says the window draws under (`Ui::hold_frames`) is
+/// over at `now`: let go, or run out. Said once.
+fn hold_ended(
+    held: &mut Option<std::time::Instant>,
+    ui: &zgx::widgets::Ui,
+    now: std::time::Instant,
+) -> bool {
+    held.take_if(|_| ui.frames_held(now).is_none()).is_some()
 }
 /// A frame the compositor hasn't granted yet: its `damage`, and every view
 /// its flush scrolled, whole. A scroll's flush damages only what copying
@@ -11452,6 +11487,166 @@ mod tests {
             40. + step
         );
         assert_eq!(probe.clicks, 1, "the pointer tape pressed the button once");
+    }
+
+    /// A hold let go, or run out, is over once, with nothing new changed.
+    #[test]
+    fn a_hold_let_go_or_run_out_is_over_once() {
+        use std::time::{Duration, Instant};
+        let ui = zgx::widgets::Ui::new(100., 100.);
+        let now = Instant::now;
+        let mut held = None;
+        assert!(!hold_ended(&mut held, &ui, now()), "none held");
+        ui.held_frame_drawn();
+        ui.hold_frames(Duration::from_millis(200));
+        held = ui.frames_held(now());
+        let until = held.expect("held");
+        assert!(!hold_ended(&mut held, &ui, now()), "still held");
+        assert_eq!(held, Some(until), "and waited for");
+        ui.release_frames();
+        assert!(hold_ended(&mut held, &ui, now()), "let go");
+        assert!(!hold_ended(&mut held, &ui, now()), "said once");
+        ui.held_frame_drawn();
+        ui.hold_frames(Duration::from_millis(200));
+        held = ui.frames_held(now());
+        let until = held.expect("held again");
+        assert!(hold_ended(&mut held, &ui, until), "run out");
+        assert!(!hold_ended(&mut held, &ui, until), "said once");
+    }
+
+    /// A held window rests: its loop turns for the hold's end alone, and no
+    /// redraw is asked for. Let go in a later turn, with nothing changed
+    /// since, what it held back draws in that turn.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires an owned X11 display and GPU; run alone with --test-threads=1"]
+    fn a_held_window_rests_and_draws_as_it_is_let_go() {
+        use std::time::{Duration, Instant};
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        use zgx::compose::prelude::*;
+        const SETTLE: Duration = Duration::from_millis(700);
+        const HELD: Duration = Duration::from_millis(150);
+        struct Probe {
+            factory: WindowFactory,
+            host: Option<Host>,
+            wide: Option<zgx::reactive::Signal<f32>>,
+            settle: Instant,
+            release: Option<Instant>,
+            drawn: u64,
+            turns: u32,
+            redraws: u32,
+            completed: bool,
+        }
+        impl ApplicationHandler<Event> for Probe {
+            fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+                let handle = self.factory.allocate();
+                let mut host = Host::new(WindowOptions::default(), handle, self.factory.clone());
+                let ui = &mut host.context.ui;
+                let wide = ui.signal(20.);
+                let width = wide.clone();
+                let _view = ui.mount(
+                    div()
+                        .h(20.)
+                        .reactive_style(move || Styles::new().w(width.get()).bg(rgb(0x808080))),
+                );
+                host.create_window(event_loop).unwrap();
+                self.wide = Some(wide);
+                self.host = Some(host);
+                self.settle = Instant::now() + SETTLE;
+            }
+            fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+                let host = self.host.as_mut().unwrap();
+                if matches!(event, WindowEvent::RedrawRequested) {
+                    if self.release.is_some() {
+                        self.redraws += 1;
+                    }
+                    host.draw().unwrap();
+                }
+            }
+            fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+                let Some(host) = &mut self.host else { return };
+                let now = Instant::now();
+                match self.release {
+                    // The window's own first frames, done with.
+                    None if now < self.settle => {
+                        host.update().unwrap();
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(self.settle));
+                    }
+                    None => {
+                        host.update().unwrap();
+                        assert!(host.frames_tried > 0, "the window drew");
+                        self.drawn = host.frames_tried;
+                        host.context.ui.hold_frames(Duration::from_millis(250));
+                        self.wide.as_ref().unwrap().set(60.);
+                        assert!(!host.update().unwrap(), "no turn is owed at once");
+                        assert_eq!(host.frames_tried, self.drawn, "nothing drawn");
+                        let until = host.frames_held.expect("held");
+                        assert!(until > now + HELD, "and its end waited for");
+                        self.release = Some(now + HELD);
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(now + HELD));
+                    }
+                    Some(release) if now < release => {
+                        self.turns += 1;
+                        assert!(!host.update().unwrap());
+                        assert_eq!(host.frames_tried, self.drawn, "still held");
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(release));
+                    }
+                    Some(_) => {
+                        // A later turn: nothing has changed since.
+                        host.context.ui.release_frames();
+                        host.update().unwrap();
+                        assert_eq!(host.frames_tried, self.drawn + 1, "drawn as it was let go");
+                        assert_eq!(host.frames_held, None);
+                        println!("held: {} turns, {} redraws", self.turns, self.redraws);
+                        assert!(self.turns <= 3, "{} turns while held", self.turns);
+                        assert_eq!(self.redraws, 0, "redraws asked for while held");
+                        // And one it wasn't asked for again: nothing to draw.
+                        host.update().unwrap();
+                        assert_eq!(host.frames_tried, self.drawn + 1, "drawn once");
+                        self.completed = true;
+                        host.suspend();
+                        event_loop.exit();
+                    }
+                }
+            }
+        }
+        let event_loop = EventLoop::<Event>::with_user_event()
+            .with_x11()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let factory = WindowFactory {
+            fonts: Default::default(),
+            text_language: Default::default(),
+            file_routes: Default::default(),
+            application_id: None,
+            activation: Rc::default(),
+            menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
+            reserved: Rc::default(),
+            pending: Rc::new(RefCell::new(VecDeque::new())),
+            next: Rc::new(Cell::new(1)),
+            alive: Rc::new(Cell::new(true)),
+            clipboard: Rc::new(RefCell::new(None)),
+            gpu_contexts: Rc::new(RefCell::new(Vec::new())),
+            #[cfg(any(target_os = "macos", windows))]
+            early_gpu: Rc::default(),
+            proxy: event_loop.create_proxy(),
+            runtime: zgx::reactive::Runtime::new(),
+        };
+        let mut probe = Probe {
+            factory,
+            host: None,
+            wide: None,
+            settle: Instant::now(),
+            release: None,
+            drawn: 0,
+            turns: 0,
+            redraws: 0,
+            completed: false,
+        };
+        event_loop.run_app(&mut probe).unwrap();
+        assert!(probe.completed);
     }
 
     /// A geometry change held for pacing falls due in the event loop's turn

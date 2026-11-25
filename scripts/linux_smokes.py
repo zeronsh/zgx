@@ -174,6 +174,7 @@ SMOKES = [
     ("clipboard-shutdown", "cargo test -p zgx-desktop --lib retained_window_factory_releases_native_clipboard_after_manager_shutdown --locked -- --ignored --test-threads=1", True),
     ("host-suspend", "cargo test -p zgx-desktop --lib host_suspend_recreates_native_resources_and_retains_editor_state --locked -- --ignored --test-threads=1", True),
     ("accessibility-between-frames", "cargo test -p zgx-desktop --lib a_held_accessibility_update_due_before_the_frame_drops_what_unmounted --locked -- --ignored --test-threads=1", True),
+    ("held-frames", "cargo test -p zgx-desktop --lib a_held_window_rests_and_draws_as_it_is_let_go --locked -- --ignored --test-threads=1", True),
     ("exit-closes-windows", "cargo test -p zgx-desktop --lib windows_still_open_close_before_the_event_loop_ends --locked -- --ignored --test-threads=1", True),
     ("wheel-tape", "cargo test -p zgx-desktop --lib a_wheel_tape_plays_back_through_the_windows_input_path --locked -- --ignored --test-threads=1", True),
     ("atspi", "/usr/bin/python3 scripts/atspi_smoke.py {bin}/atspi --output {out}", False),
@@ -226,7 +227,7 @@ COST = {
     "wayland-ime-burst": 8,
     "native-menus": 12, "native-menus-wayland": 12,
     "wayland-input": 13,
-    "clipboard-shutdown": 3, "host-suspend": 3, "exit-closes-windows": 3, "accessibility-between-frames": 3,
+    "clipboard-shutdown": 3, "host-suspend": 3, "exit-closes-windows": 3, "held-frames": 3, "accessibility-between-frames": 3,
 }
 
 
