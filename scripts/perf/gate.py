@@ -99,6 +99,25 @@ FUNCTIONS_MAX = int(os.environ.get('ZGX_GATE_FUNCTIONS_MAX', '10'))
 # its time limit after the table and ended with no verdict (#1534, #1586).
 FUNCTIONS_FLOOR = float(os.environ.get('ZGX_GATE_FUNCTIONS_FLOOR', '0.02'))
 FUNCTIONS_BUDGET = float(os.environ.get('ZGX_GATE_FUNCTIONS_BUDGET', '600'))
+# A cell that grew with none of it zgx's own can be the heap's: where things
+# lie changes what `memcmp` and `memcpy` cost, and how often the allocator
+# splits, at the same calls and bytes (`README.md`, "Heap layout"). Such a
+# cell is asked how far its base moves by that alone: counted again with one
+# block kept from before it starts, at `SHIFTS` (spread over a page, an
+# allocation's own chunk a step), and the base's range over them is what a
+# rise may be. `ZGX_GATE_LAYOUT=0` leaves it out.
+LAYOUT = os.environ.get('ZGX_GATE_LAYOUT', '1') != '0'
+SHIFTS = (16, 528, 1040, 1552, 2064, 2576, 3088, 3600)
+# No more than this of the cell may be zgx's own work, Luau's or Rust's.
+LAYOUT_OURS = 0.02
+# Calls and bytes the same to this, and to a handful (what a binary does as
+# it starts differs by one or two calls).
+LAYOUT_SAME, LAYOUT_FEW = 0.02, 8
+# However wide the base's range, a rise past this is for a person to read.
+LAYOUT_CEILING = 0.3
+# At most so many cells, the widest rise first, within so many seconds.
+LAYOUT_MAX = int(os.environ.get('ZGX_GATE_LAYOUT_MAX', '8'))
+LAYOUT_BUDGET = float(os.environ.get('ZGX_GATE_LAYOUT_BUDGET', '300'))
 
 # name, package, example, environment: sized to a few billion instructions.
 # The windowed scenes' headless twins run with RENDER=0: update, layout and
@@ -533,19 +552,24 @@ def warm(binary, env, checkout):
     WARM.add(binary)
 
 
-def count(binary, env, checkout=None, placement=None, out='/dev/null', fair=False):
+def count(binary, env, checkout=None, placement=None, out='/dev/null', fair=False, shift=None):
     """The run's instructions (and cachegrind's file of them by function in
     `out`), the binary warmed first (`warm`). A run that fails is the gate's
     failure, not the change's: under cachegrind a script's time budget
     (`ZGX_GATE` lifts it in the benches) or a missing GPU would otherwise
     look like a result. `fair`: valgrind hands its lock to threads in the
-    order they asked (`--fair-sched=yes`, the scenes in `FAIR`)."""
+    order they asked (`--fair-sched=yes`, the scenes in `FAIR`). `shift`:
+    with a block of so many bytes kept from before it starts (`heap_shift`)."""
     warm(binary, env, checkout)
     command = ['valgrind', '--tool=cachegrind', '--cache-sim=no', *(['--fair-sched=yes'] if fair else []),
                f'--cachegrind-out-file={out}', str(binary)]
+    environ = environment(binary, env, checkout, placement)
+    if shift is not None:
+        environ['LD_PRELOAD'] = f'{heap_shift()} {environ["LD_PRELOAD"]}'
+        environ['ZGX_GATE_SHIFT'] = f'{shift:04d}'
     result = subprocess.run(
         ['setarch', '-R', *command] if shutil.which('setarch') else command,
-        env=environment(binary, env, checkout, placement), capture_output=True, text=True)
+        env=environ, capture_output=True, text=True)
     found = re.search(r'I\s+refs:\s+([\d,]+)', result.stderr)
     if result.returncode or not found:
         why = 'a script hit its time budget' if 'time budget' in result.stdout + result.stderr else 'it failed'
@@ -584,12 +608,13 @@ def worth_explaining(rows, floor=None, spread=None, most=None):
     return sorted(grew, key=lambda row: -row[3])[:most]
 
 
-def by_function(rows, scenes, base, budget=None, clock=time.monotonic):
+def by_function(rows, scenes, base, budget=None, clock=time.monotonic, found=None):
     """For the cells that grew most, each side run again writing what it
     counted by function, and the difference (`cgdiff.py`) in the log and in
     `ZGX_GATE_FUNCTIONS`, with its totals by whose code it is for the
     table. The counts above are the first runs': these only explain them.
-    Never the gate's failure."""
+    Never the gate's failure. `found` is given each cell's totals by whose
+    code, and its total."""
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     import cgdiff
     into = pathlib.Path(FUNCTIONS)
@@ -615,6 +640,8 @@ def by_function(rows, scenes, base, budget=None, clock=time.monotonic):
             continue
         (into / f'{name}.txt').write_text(report + '\n')
         print(f'=== {name} by function\n{report}', flush=True)
+        if found is not None:
+            found[name] = (groups, total)
         summary.append(f'| {name} | {total:+,} | ' + ' | '.join(f'{groups[g]:+,}' for g in cgdiff.GROUPS) + ' |')
     if not summary:
         return []
@@ -628,6 +655,129 @@ def layout_of(deltas):
     """Deltas that disagree in sign, where the heap lies: layout, not the
     change's work."""
     return '; layout' if min(deltas) < 0 < max(deltas) else ''
+
+
+def preload(name):
+    """`name`.c built for preloading, once a run."""
+    built = WORK / f'{name}.so'
+    if built not in COPIED:
+        WORK.mkdir(parents=True, exist_ok=True)
+        source = pathlib.Path(__file__).with_name(f'{name}.c')
+        subprocess.run(['cc', '-O2', '-fno-builtin', '-fno-tree-loop-distribute-patterns', '-shared', '-fPIC', '-o',
+                        str(built), str(source)], check=True)
+        COPIED.add(built)
+    return built
+
+
+def heap_shift():
+    """`heap_shift.c` built for preloading (`count`'s `shift`)."""
+    return preload('heap_shift')
+
+
+def library_calls(binary, env, checkout):
+    """What `binary` asks of the C library in the scene `env` describes
+    (`count_calls.c`): each function's calls and bytes, `{'memcpy': (calls,
+    bytes), ...}`, from a native run as `allocations` is, or None when it
+    failed."""
+    warm(binary, env, checkout)
+    out = WORK / 'calls.txt'
+    out.unlink(missing_ok=True)
+    environ = environment(binary, env, checkout)
+    environ['LD_PRELOAD'] = f'{environ["LD_PRELOAD"]} {preload("count_calls")}'
+    environ['ZGX_CALLS_OUT'] = str(out)
+    result = subprocess.run([str(binary)], env=environ, capture_output=True, text=True)
+    if result.returncode or not out.exists():
+        return None
+    found = {}
+    for line in out.read_text().splitlines():
+        name, calls, size = line.split()
+        found[name] = (int(calls), int(size))
+    return found
+
+
+def differing(before, after):
+    """What `after` asks of the C library that `before` doesn't: the copying
+    and comparing functions that do more calls or bytes than `LAYOUT_SAME`
+    allows, as (name, calls, bytes) differences, and, apart, the same of the
+    allocating ones (a change's own allocations, which it must explain)."""
+    copied, allocated = [], []
+    for name in before:
+        calls = after[name][0] - before[name][0]
+        size = after[name][1] - before[name][1]
+        few = lambda change, was: abs(change) <= max(LAYOUT_FEW, was * LAYOUT_SAME / 100)
+        bytes_few = lambda change, was: abs(change) <= max(LAYOUT_FEW * 64, was * LAYOUT_SAME / 100)
+        if few(calls, before[name][0]) and bytes_few(size, before[name][1]):
+            continue
+        (allocated if name in ('malloc', 'realloc') else copied).append((name, calls, size))
+    return copied, allocated
+
+
+def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, asked=None):
+    """For each cell that grew with `LAYOUT_OURS`% or less of it zgx's,
+    Luau's or Rust's own, whether the heap's layout accounts for it: its
+    base counted under each of `SHIFTS`, and what it asks of the C library
+    on both sides. The widest `LAYOUT_MAX`, within `LAYOUT_BUDGET`; lines
+    of a table, `(name, rise %, why)`. Report only: it fails nothing.
+    `counted` and `asked` are for tests (`count`, `library_calls`)."""
+    counted = count if counted is None else counted
+    asked = library_calls if asked is None else asked
+    start = clock()
+    lines, taken = [], 0
+    for name, before, _, delta, _ in sorted(rows, key=lambda row: -(row[3] or 0.0)):
+        if name not in found or delta is None or not before:
+            continue
+        groups, total = found[name]
+        ours = {g: groups[g] for g in ('zgx', 'luau', 'rust', 'other') if groups.get(g, 0) > 0}
+        most = max(ours.values(), default=0) / before * 100
+        if total <= 0 or delta <= 0:
+            continue
+        if most > LAYOUT_OURS:
+            worst = max(ours, key=ours.get)
+            lines.append((name, delta, f"the change's: {worst} {ours[worst]:+,} ({most:+.3f}%)"))
+            continue
+        if delta > LAYOUT_CEILING:
+            lines.append((name, delta, f'past {LAYOUT_CEILING:g}%: read it'))
+            continue
+        if taken >= LAYOUT_MAX or clock() - start > LAYOUT_BUDGET:
+            lines.append((name, delta, 'not shifted'))
+            continue
+        taken += 1
+        _, package, example, env = scenes[name]
+        binary = WORK / 'gate-bin-base' / example
+        try:
+            fair = name in FAIR
+            base_counts = [counted(binary, env, base, fair=fair, shift=shift) for shift in SHIFTS]
+        except Infra as error:
+            lines.append((name, delta, f'no range: {str(error).splitlines()[0]}'))
+            continue
+        low, high = min(base_counts), max(base_counts)
+        spread = min((high - low) / before * 100, LAYOUT_CEILING)
+        sides = [asked(WORK / side / example, env, checkout) for side, checkout in
+                 (('gate-bin-base', base), ('gate-bin-head', ROOT))]
+        if None in sides:
+            lines.append((name, delta, 'no counts of what it asks of the C library'))
+            continue
+        copied, allocated = differing(*sides)
+        over = f'base {low / 1e6:,.2f}-{high / 1e6:,.2f} M over {len(SHIFTS)} shifts ({spread:.3f}%)'
+        if copied:
+            what = ', '.join(f'{n} {c:+,} calls {b:+,} bytes' for n, c, b in copied)
+            lines.append((name, delta, f'not layout: it does more ({what}); {over}'))
+        elif delta > spread:
+            lines.append((name, delta, f"past the base's own range: {over}"))
+        else:
+            own = ''
+            if allocated:
+                own = ', given the change\'s own ' + ', '.join(
+                    f'{n} {c:+,} ({b:+,} bytes)' for n, c, b in allocated)
+            lines.append((name, delta, f"layout{own}: zgx {groups['zgx']:+,}, the same calls and bytes; {over}"))
+    return lines
+
+
+def layout_lines(found):
+    """The layout table."""
+    return ['**Heap layout** (cells that grew with none of it zgx\'s own work, asked how far their base moves by '
+            'where the heap puts things; report only, gating nothing)', '', '| scene | change | |',
+            '| --- | ---: | --- |', *(f'| {name} | {delta:+.3f}% | {why} |' for name, delta, why in found)]
 
 
 def base_checkout():
@@ -922,11 +1072,22 @@ def main():
         if args.markdown:
             with args.markdown.open('a') as out:
                 out.write('\n' + '\n'.join(lines) + '\n')
+    found = {}
     if FUNCTIONS:
-        explained = by_function(rows, {scene[0]: scene for scene in SCENES}, base)
+        explained = by_function(rows, {scene[0]: scene for scene in SCENES}, base, found=found)
         if args.markdown and explained:
             with args.markdown.open('a') as out:
                 out.write('\n'.join(explained) + '\n')
+    if LAYOUT and found:
+        started = time.monotonic()
+        told = layout_rows(rows, found, {scene[0]: scene for scene in SCENES}, base)
+        if told:
+            lines = layout_lines(told)
+            lines.append(f'\n(it took {time.monotonic() - started:.0f} s)')
+            print('\n'.join(lines), flush=True)
+            if args.markdown:
+                with args.markdown.open('a') as out:
+                    out.write('\n' + '\n'.join(lines) + '\n')
     if failed:
         sys.exit(verdict)
 
