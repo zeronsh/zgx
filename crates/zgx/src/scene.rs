@@ -3618,10 +3618,12 @@ pub struct Scene {
     recycled_placements: Vec<Vec<ChildPlacement>>,
     content_revision: u64,
     /// The deepest stack and the item count of the last paint walk
-    /// (`layer_items_within`), a whole one's and a damaged one's apart: the
-    /// next of its kind starts at those sizes (a fade's few strips after a
-    /// whole repaint allocate for their few items, not the window's).
-    walk_hints: std::cell::Cell<[(usize, usize); 2]>,
+    /// (`layer_items_within`), a whole one's, a damaged one's and one around
+    /// what moves (`layer_items_around`) apart: the next of its kind starts
+    /// at those sizes (a fade's few strips after a whole repaint allocate
+    /// for their few items, not the window's; a scrolled frame makes a walk
+    /// around its content, of few items, before its own, of many).
+    walk_hints: [std::cell::Cell<(usize, usize)>; 3],
     /// Dirty fixed-size containers whose ancestors stayed clean.
     layout_roots: Vec<NodeId>,
     /// A walk stopped at a child of a row or column (`stops_alone`), to
@@ -17802,9 +17804,15 @@ impl Scene {
         } else {
             Some(self.viewport)
         };
-        // Sized as the last walk was, rather than grown from nothing each frame.
+        // Sized as the last walk of its kind was, rather than grown from
+        // nothing each frame.
+        let walk = if AROUND {
+            2
+        } else {
+            usize::from(damage.is_some())
+        };
         let (stack_hint, items_hint) = match from {
-            None => self.walk_hints.get()[usize::from(damage.is_some())],
+            None => self.walk_hints[walk].get(),
             Some(_) => (1, 0),
         };
         let mut stack = Vec::with_capacity(stack_hint.max(1));
@@ -18103,9 +18111,7 @@ impl Scene {
         }
         // (A subtree's walk leaves the window's hints.)
         if from.is_none() {
-            let mut hints = self.walk_hints.get();
-            hints[usize::from(damage.is_some())] = (deepest, result.len());
-            self.walk_hints.set(hints);
+            self.walk_hints[walk].set((deepest, result.len()));
         }
         // Painted outside their parent's fade (a scroll view's scrollbar):
         // put right after the walk, which takes no check for them.
@@ -19956,6 +19962,66 @@ mod tests {
                 _ => assert!(searched > 2000, "case {case}: searched {searched} times"),
             }
         }
+    }
+    /// A scrolled frame makes two damaged walks: around the content, of few
+    /// items, and the window's, of many. Each is sized by the last of its own
+    /// kind: neither grows to the other's size, nor reserves it.
+    #[test]
+    fn a_walk_around_content_and_the_windows_size_their_lists_apart() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let quad = || {
+            NodeKind::Quad(QuadStyle {
+                fill: Color(60, 70, 90, 255),
+                ..Default::default()
+            })
+        };
+        let mut scene = Scene::new(400., 900.);
+        let root = scene.root();
+        let content = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        for _ in 0..150 {
+            scene.append(content, quad(), sized(180., 4.));
+        }
+        for _ in 0..3 {
+            scene.append(root, quad(), sized(20., 20.));
+        }
+        scene.flush();
+        let clip = Rect::new(0., 0., 400., 900.);
+        let frame = |scene: &Scene| {
+            let around = scene.layer_items_around(content, clip).expect("plain");
+            let window = scene.layer_items_within(None, Some(&[clip]));
+            assert!(
+                around.len() * 8 < window.len(),
+                "{} around, {} in all",
+                around.len(),
+                window.len()
+            );
+            (
+                (around.len(), around.capacity()),
+                (window.len(), window.capacity()),
+            )
+        };
+        frame(&scene);
+        for _ in 0..3 {
+            let (around, window) = frame(&scene);
+            assert_eq!(around.0, around.1, "around's own items, and no more room");
+            assert_eq!(window.0, window.1, "sized once, not grown to");
+        }
+        // Its content gone: the next walk reserves what the last used, and
+        // the one after what is left; nothing is kept between walks.
+        scene.remove(content);
+        scene.flush();
+        let small = |scene: &Scene| {
+            let items = scene.layer_items_within(None, Some(&[clip]));
+            (items.len(), items.capacity())
+        };
+        small(&scene);
+        let (items, room) = small(&scene);
+        assert_eq!(items, room);
+        assert!(room < 10, "{room}");
     }
     #[test]
     fn a_kept_ink_union_is_the_ink_worked_out_over_every_child() {
