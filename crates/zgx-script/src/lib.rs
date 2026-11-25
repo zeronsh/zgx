@@ -2962,6 +2962,17 @@ impl ScriptHost {
         }
         self
     }
+    /// The catalog of messages scripts read (`ui.t`, `ui.locale`): loaded
+    /// by [`i18n`](Self::i18n) or a script's `ui.i18n`, `None` before any.
+    /// A host's own text takes messages from it as scripts do
+    /// (`catalog.t("inbox.count").arg("n", 3).get()`), and they follow its
+    /// locale, as a `set_locale` here does the scripts'. A catalog another
+    /// `ui.i18n` (another directory or source) or a `retarget` loads is
+    /// another one: ask again.
+    #[doc(hidden)]
+    pub fn i18n_catalog(&self) -> Option<zgx::i18n::I18n> {
+        self.0.locales.handle()
+    }
     /// Adds a plugin from source held in memory.
     pub fn plugin(self, name: impl Into<String>, code: impl Into<String>) -> Self {
         let script = Script::Inline {
