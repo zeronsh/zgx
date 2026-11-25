@@ -19,7 +19,7 @@ hyphens = ["zgx/hyphens", "dep:hypher"]
 [dependencies]
 hypher = { version = "0.1.8", optional = true }
 smallvec = "1.16"
-zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+zgx = { path = "../zgx", version = "0.2.0", default-features = false }
 cosmic-text = { package = "zgx-cosmic-text", version = "0.19.14", path = "../../vendor/cosmic-text", features = ["shape-run-cache"] }
 unicode-segmentation = "1.12"
 rustc-hash = "2.1"

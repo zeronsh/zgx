@@ -31,14 +31,14 @@ audio-streams = ["audio", "zgx-script/audio-streams"]
 # Built for wasm32 only: elsewhere the crate is empty, and zgx's `dom`
 # feature, enabled only here, stays off in every native build.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-zgx = { path = "../zgx", version = "0.1.10", default-features = false, features = ["dom"] }
+zgx = { path = "../zgx", version = "0.2.0", default-features = false, features = ["dom"] }
 wasm-bindgen = "=0.2.127"
 js-sys = "0.3.104"
 rustc-hash = "2.1"
 # The browser's clock, as zgx's timers read it.
 web-time = "1.1"
 web-sys = { version = "0.3.104", features = ["Document", "Element", "HtmlElement", "Node", "Window", "Performance", "console"] }
-zgx-script = { path = "../zgx-script", version = "0.1.10", default-features = false, optional = true }
+zgx-script = { path = "../zgx-script", version = "0.2.0", default-features = false, optional = true }
 # The fetcher's requests awaited (`luau`).
 wasm-bindgen-futures = { version = "0.4.77", optional = true }
 
