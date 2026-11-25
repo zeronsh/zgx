@@ -4822,7 +4822,12 @@ impl Host {
             }
         }
         #[cfg(all(target_os = "macos", zgx_winit_patched))]
-        crate::services::add(window.id(), &self.context.ui);
+        {
+            let (proxy, token) = (self.proxy.clone(), self.context.window.token);
+            crate::services::add(window.id(), &self.context.ui, move || {
+                let _ = proxy.send_event(Event::Wake(token));
+            });
+        }
         #[cfg(all(target_os = "macos", zgx_winit_patched))]
         {
             let (proxy, token) = (self.proxy.clone(), self.context.window.token);
