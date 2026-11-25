@@ -60,7 +60,10 @@ allocator chunk. Two builds of one commit (an A/A) read 0 in every cell.
 change's cost, when all of these hold:
 
 - zgx's, Luau's and Rust's own instructions, each, grew by 0.02% of the cell
-  or less (the split `cgdiff.py` gives);
+  or less (the split `cgdiff.py` gives). `other`, mostly Luau's collector's
+  unattributed frames, moves with the heap as the C library's functions do
+  (app-mail's +136,000 on #2193): it is compared by the range and its number
+  printed on the row;
 - what it asks of the C library is the same: the calls **and** bytes of
   `memcpy`, `memmove`, `memset` and `memcmp` (to 0.02%, and a handful of
   calls as it starts). Equal calls are not enough: a struct that grew copies
