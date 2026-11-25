@@ -263,3 +263,57 @@ return ui.column { w_full = true, h_full = true,
     assert!(h.find("first").is_some(), "the modal opened");
     assert_eq!(h.text("y"), "210");
 }
+
+/// Opened beside a layout that never settles, its reveal waits: no frame is
+/// asked for and none changes anything, so the window idles. Once the layout
+/// settles (mended by a hover, which moves no focus), the control shows.
+#[test]
+fn a_reveal_waiting_on_a_layout_that_never_settles_keeps_no_window_awake() {
+    let mut h = Harness::inline(
+        r##"
+local open = ui.state("open", false)
+local broken = ui.state("broken", true)
+local y = ui.state("y", 0)
+local r = ui.ref()
+return ui.column { w_full = true, h_full = true,
+    ui.button { id = "opener", label = "Open", on_click = function() open:set(true) end },
+    ui.text { id = "y", function() return `{y:get()}` end },
+    ui.modal { open = open, label = "m", w = 300, p = 0, build = function()
+        return ui.column { w_full = true,
+            ui.div { ref = r, h = 5, w = function()
+                if not broken:get() then return 50 end
+                return (r.width or 100) + 1
+            end },
+            ui.div { id = "mend", w = 40, h = 20, on_hover = function(inside) if inside then broken:set(false) end end },
+            ui.scroll { w = 250, h = 100, offset = y,
+                ui.column { w_full = true, ui.div { h = 300 }, ui.div { id = "first", focusable = true, w = 10, h = 10 } } } }
+    end },
+}
+"##,
+    );
+    h.frames(3);
+    h.click("opener");
+    // Any transition of its opening over.
+    h.frames(60);
+    let error = h.error().unwrap_or_default();
+    assert!(error.contains("did not settle"), "{error:?}");
+    let first = h.find("first");
+    assert!(first.is_some() && h.ui.input.focused() == first);
+    let (offset, at) = (h.text("y"), h.bounds("first"));
+    h.ui.scene.borrow_mut().flush();
+    for frame in 0..5 {
+        assert!(!h.wants_frame(), "frame {frame} asked for another");
+        assert!(!h.ui.spare_work_wanted());
+        h.ui.try_prepare_frame().unwrap();
+        assert!(
+            h.ui.scene.borrow_mut().flush().damage.is_empty(),
+            "frame {frame} drew"
+        );
+    }
+    assert_eq!((h.text("y"), h.bounds("first")), (offset, at));
+    // Mended by a hover, which moves no focus: the reveal goes on.
+    h.hover("mend");
+    h.frames(3);
+    assert_eq!(h.ui.input.focused(), first, "focus stayed");
+    assert_eq!(h.text("y"), "210");
+}
