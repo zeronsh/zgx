@@ -119,6 +119,103 @@ class ExplainTests(unittest.TestCase):
 
 
 
+class LayoutTests(unittest.TestCase):
+    """The heap layout rows: the base's own range says what is layout, and a
+    change's own work is never taken for it (each with the mutant that would
+    slip past a weaker rule)."""
+
+    # What the base asks: the same in every test but where one says.
+    ASKED = {'memcpy': (10_000, 500_000), 'memmove': (100, 5_000), 'memset': (300, 9_000),
+             'memcmp': (300_000, 2_000_000), 'malloc': (20_000, 800_000), 'realloc': (900, 60_000)}
+
+    def told(self, delta=0.10, groups=None, head=None, shifts=(0, 400_000), total=200_000, name='cell', max_=8,
+             clock=None):
+        before = 100_000_000
+        base = list(shifts) + [0] * (len(gate.SHIFTS) - len(shifts))
+        found = {name: ({'zgx': 1_000, 'luau': 500, 'libc': total - 1_500, 'rust': 0, 'linker': 0, 'other': 0,
+                         **(groups or {})}, total)}
+        scenes = {name: (name, 'zgx-script', 'bench', {})}
+        counts = iter([before + extra for extra in base])
+        sides = iter([self.ASKED, {**self.ASKED, **(head or {})}])
+        rows = [(name, before, before + total, delta, [delta])]
+        with patch.object(gate, 'LAYOUT_MAX', max_):
+            return gate.layout_rows(
+                rows, found, scenes, None, clock=clock or (lambda: 0.0),
+                counted=lambda *a, **k: next(counts), asked=lambda *a: next(sides))[0][2]
+
+    def test_a_rise_inside_the_bases_own_range_is_layout(self):
+        self.assertTrue(self.told().startswith('layout:'), self.told())
+        self.assertIn('over 8 shifts (0.300%)', self.told(shifts=(0, 3_000_000)))
+
+    def test_a_rise_past_it_is_not(self):
+        self.assertIn("past the base's own range", self.told(shifts=(0, 50_000)))
+
+    def test_zgxs_own_work_is_the_changes_however_wide_the_range(self):
+        # +0.05% of zgx: the mutant a wide range would hide.
+        self.assertIn("the change's: zgx", self.told(groups={'zgx': 50_000}, total=60_000, delta=0.06))
+        self.assertIn("the change's: luau", self.told(groups={'luau': 50_000}, total=60_000, delta=0.06))
+        # What fell is not work.
+        self.assertTrue(self.told(groups={'zgx': -90_000}).startswith('layout:'))
+
+    def test_one_percent_more_compares_at_the_same_cost_of_zgx_is_the_changes(self):
+        self.assertIn('memcmp +3,000 calls', self.told(head={'memcmp': (303_000, 2_020_000)}))
+
+    def test_the_same_calls_copying_one_percent_longer_is_the_changes(self):
+        # A struct that grew: no call more, each a little longer.
+        why = self.told(head={'memcpy': (10_000, 505_000)})
+        self.assertIn('memcpy +0 calls +5,000 bytes', why)
+
+    def test_a_call_or_two_as_it_starts_is_not_work(self):
+        self.assertTrue(self.told(head={'memcmp': (300_001, 2_000_012)}).startswith('layout:'))
+
+    def test_the_changes_own_allocations_are_printed_to_be_explained(self):
+        why = self.told(head={'malloc': (20_600, 900_000)})
+        self.assertTrue(why.startswith("layout, given the change's own malloc +600 (+100,000 bytes)"), why)
+
+    def test_past_the_ceiling_a_person_reads_it(self):
+        self.assertIn('read it', self.told(delta=0.31, shifts=(0, 90_000_000)))
+
+    def test_a_range_is_no_wider_than_the_ceiling(self):
+        self.assertIn("past the base's own range", self.told(delta=0.30, shifts=(0, 250_000)))
+
+    def test_the_widest_cells_are_shifted_and_the_rest_say_so(self):
+        rows = [(n, 100_000_000, 0, d, [d]) for n, d in (('small', 0.05), ('wide', 0.2))]
+        found = {n: ({'zgx': 0, 'luau': 0, 'libc': 1, 'rust': 0, 'linker': 0, 'other': 0}, 50_000) for n in ('small', 'wide')}
+        scenes = {n: (n, 'zgx', 'bench', {}) for n in found}
+        with patch.object(gate, 'LAYOUT_MAX', 1):
+            told = gate.layout_rows(rows, found, scenes, None, clock=lambda: 0.0,
+                                    counted=lambda *a, shift=None, **k: 100_000_000 + (0 if shift == 16 else 250_000),
+                                    asked=lambda *a: self.ASKED)
+        self.assertEqual([t[0] for t in told], ['wide', 'small'])
+        self.assertTrue(told[0][2].startswith('layout'), told)
+        self.assertEqual(told[1][2], 'not shifted')
+
+    def test_it_stops_at_its_budget(self):
+        self.assertIn('not shifted', self.told(clock=iter([0.0, 10_000.0]).__next__))
+
+    def test_a_cell_that_shrank_or_is_new_is_not_asked(self):
+        rows = [('shrank', 100_000_000, 0, -0.2, [-0.2]), ('new', None, 1, None, [])]
+        self.assertEqual(gate.layout_rows(rows, {'shrank': ({'zgx': 0}, -5)}, {}, None, clock=lambda: 0.0), [])
+
+    def test_a_shift_preloads_one_block_of_four_digits(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as work, \
+                patch.object(gate, 'WORK', pathlib.Path(work)), patch.object(gate, 'WARM', set()), \
+                patch.object(gate, 'same_run', return_value=pathlib.Path('same_run.so')), \
+                patch.object(gate, 'heap_shift', return_value='heap_shift.so'):
+            def run(command, env=None, **_):
+                seen.append(env)
+                return COUNTED
+            with patch.object(gate.subprocess, 'run', side_effect=run):
+                gate.count(pathlib.Path(work) / 'bench', {}, shift=16)
+                gate.count(pathlib.Path(work) / 'bench', {}, shift=3600)
+                gate.count(pathlib.Path(work) / 'bench', {})
+        # (The first of each pair is the warm-up, uncounted.)
+        shifted = [env for env in seen if env and 'ZGX_GATE_SHIFT' in env]
+        self.assertEqual([env['ZGX_GATE_SHIFT'] for env in shifted], ['0016', '3600'])
+        self.assertTrue(all(env['LD_PRELOAD'].startswith('heap_shift.so same_run.so') for env in shifted), shifted)
+
+
 class FairTests(unittest.TestCase):
     def fair_counts(self, name, package):
         asked = []
