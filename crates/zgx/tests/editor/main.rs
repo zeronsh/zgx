@@ -66,6 +66,10 @@ mod editor_layer_scroll;
 mod editor_line_marks;
 #[path = "../editor_long_documents.rs"]
 mod editor_long_documents;
+#[path = "../editor_metrics_borrowed.rs"]
+mod editor_metrics_borrowed;
+#[path = "../editor_metrics_when.rs"]
+mod editor_metrics_when;
 #[path = "../editor_model_normalization.rs"]
 mod editor_model_normalization;
 #[path = "../editor_native_caret.rs"]
@@ -98,6 +102,8 @@ mod editor_streaming_history;
 mod editor_text_drag;
 #[path = "../editor_text_drag_windows.rs"]
 mod editor_text_drag_windows;
+#[path = "../editor_text_metrics.rs"]
+mod editor_text_metrics;
 #[path = "../editor_theme_marks.rs"]
 mod editor_theme_marks;
 #[path = "../editor_undo_keys.rs"]

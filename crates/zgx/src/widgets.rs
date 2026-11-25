@@ -289,6 +289,9 @@ struct NaturalMetrics {
     key: RefCell<Option<NaturalMetricsKey>>,
     revision: Cell<u64>,
     published: Signal<u64>,
+    /// A query took the key before the refresh that would have: that refresh
+    /// tells of the change.
+    early: Cell<bool>,
     queued: Cell<bool>,
     spans: Cell<u64>,
     wrapped: Rc<crate::editor_lines::LineCache>,
@@ -302,6 +305,7 @@ impl NaturalMetrics {
             key: RefCell::new(None),
             revision: Cell::new(0),
             published: runtime.signal(0),
+            early: Cell::new(false),
             queued: Cell::new(false),
             spans: Cell::new(0),
             wrapped: Rc::default(),
@@ -1347,6 +1351,13 @@ impl EditorHandle {
     }
     /// Exact natural metrics at a finite, positive content width. A reactive
     /// reader follows content, IME and typography changes after layout settles.
+    /// Asked in an edit's own turn (the value's effect, `on_change`), it
+    /// measures the edited text. A value the app sets is measured once the
+    /// editor takes it: an effect on the value that runs before then measures
+    /// the text before, and again with the new one after layout.
+    /// Asked from inside the editor's own callbacks (a highlighter,
+    /// `line_insets`, caret edges), it may be the last measured, or `None` at
+    /// a width not measured yet.
     /// Passwords and unmounted editors return `None`.
     ///
     /// The first query per revision/width visits every hard line, shaping via
@@ -1358,24 +1369,29 @@ impl EditorHandle {
         if !width.is_finite() || width <= 0. || self.hint.secure.get() {
             return None;
         }
-        // The first query starts tracking: its key is taken here, and from
-        // now on every refresh keeps it current.
-        if !self.natural.wanted.replace(true) || self.natural.key.borrow().is_none() {
-            let key = {
-                let e = self.editor.borrow();
-                let scene = self.scene.borrow();
-                self.natural.key_of(
-                    &e,
-                    &scene,
-                    self.node,
-                    &self.typography.borrow(),
-                    self.hint.secure.get(),
-                )
+        // The first query starts tracking, and every refresh then keeps its
+        // key current. Asked before the refresh of an edit (an effect on the
+        // text that runs first), the key is taken here: what it measures is
+        // the editor's text as it is now, and the refresh still tells those
+        // who read it before.
+        let key = {
+            // Asked by a callback that runs inside a key or a press (a line
+            // asked for its room, laid out for the caret): what was kept.
+            let Ok(e) = self.editor.try_borrow() else {
+                return self.kept_metrics(width);
             };
-            self.natural.take_key(key?);
-        }
-        if !self.scene.borrow().contains(self.node) {
-            return None;
+            let scene = self.scene.borrow();
+            self.natural.key_of(
+                &e,
+                &scene,
+                self.node,
+                &self.typography.borrow(),
+                self.hint.secure.get(),
+            )
+        };
+        let tracked = self.natural.wanted.replace(true);
+        if self.natural.take_key(key?) && tracked {
+            self.natural.early.set(true);
         }
         let revision = self.natural.revision.get();
         if let Some(sample) = self.natural.sample.get()
@@ -1442,6 +1458,15 @@ impl EditorHandle {
         };
         self.natural.sample.set(Some(sample));
         Some(sample)
+    }
+    /// The metrics kept at `width`, while its model is borrowed.
+    #[cold]
+    fn kept_metrics(&self, width: f32) -> Option<EditorTextMetrics> {
+        if !self.scene.borrow().contains(self.node) {
+            return None;
+        }
+        let revision = self.natural.revision.get();
+        (self.natural.sample.get()).filter(|kept| kept.revision == revision && kept.width == width)
     }
     /// The value it is bound to; edits set it.
     pub fn value(&self) -> &EditorValue {
@@ -9157,7 +9182,7 @@ impl Ui {
                     None
                 };
                 if let Some(key) = key
-                    && metrics.take_key(key)
+                    && (metrics.take_key(key) | metrics.early.replace(false))
                     && !metrics.queued.replace(true)
                     && let Some(storage) = storage.upgrade()
                 {
