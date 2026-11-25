@@ -70,5 +70,6 @@ int main(void) {
     AT(zgx_registrar, state);
     AT(zgx_registrar, host_ref);
     AT(zgx_registrar, async_action);
+    AT(zgx_registrar, highlighter);
     return 0;
 }

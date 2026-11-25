@@ -209,6 +209,8 @@ struct Pending {
 /// What a registrar's `host` points at while a module's entry runs.
 struct Loading {
     pending: RefCell<Vec<Pending>>,
+    /// Its line highlighters, registered with the host once it has loaded.
+    highlighters: RefCell<Vec<(String, crate::native_highlight::Native)>>,
     /// The host it loads into, for a handle to it (`host_ref`).
     host: ScriptHost,
 }
@@ -295,6 +297,61 @@ unsafe extern "C" fn register_async_action(
 ) {
     // SAFETY: As `register_function`'s.
     unsafe { pend(host, name, len, Kind::Async(call), User { ptr: user, free }) }
+}
+
+/// `Host::highlighter`: kept with the module's other registrations until
+/// it has loaded, then the host's (`ui.highlighter`).
+unsafe extern "C" fn register_highlighter(
+    host: *mut c_void,
+    name: *const u8,
+    len: usize,
+    kinds: *const abi::Bytes,
+    count: usize,
+    call: abi::Highlight,
+    user: *mut c_void,
+    free: abi::Free,
+) {
+    // SAFETY: The registrar's arguments, lent for the call; `host` the
+    // `Loading` the registrar was made with.
+    let (loading, name, kinds) = unsafe {
+        let kinds = (0..count)
+            .map(|k| {
+                let kind = &*kinds.add(k);
+                name_of(kind.ptr, kind.len)
+            })
+            .collect::<Vec<_>>();
+        (&*(host as *const Loading), name_of(name, len), kinds)
+    };
+    let user = User { ptr: user, free };
+    let line = move |line: &[u8], state: u32, push: &mut dyn FnMut(u32, u32, u32)| -> u32 {
+        // (The whole `User`, not its pointer alone: it frees the module's
+        // highlighter as this closure goes.)
+        let user = &user;
+        unsafe extern "C" fn sink(sink: *mut c_void, from: u32, to: u32, kind: u32) {
+            // SAFETY: The `&mut dyn FnMut` lent below, for the call alone.
+            unsafe { (*(sink as *mut &mut dyn FnMut(u32, u32, u32)))(from, to, kind) }
+        }
+        let mut push = push;
+        // SAFETY: The module's highlighter, its `user` alive while this is,
+        // `line` and the sink lent for the call.
+        unsafe {
+            call(
+                user.ptr,
+                line.as_ptr(),
+                line.len(),
+                state,
+                (&raw mut push).cast(),
+                sink,
+            )
+        }
+    };
+    loading.highlighters.borrow_mut().push((
+        name,
+        crate::native_highlight::Native {
+            kinds,
+            line: Box::new(line),
+        },
+    ));
 }
 
 /// What a module's function or action is called with, and what an error
@@ -1703,6 +1760,7 @@ impl ScriptHost {
         remove_images_of(self, &said.name);
         let loading = Loading {
             pending: RefCell::default(),
+            highlighters: RefCell::default(),
             host: self.clone(),
         };
         let registrar = Registrar {
@@ -1714,6 +1772,7 @@ impl ScriptHost {
             state,
             host_ref,
             async_action: register_async_action,
+            highlighter: register_highlighter,
         };
         // SAFETY: The tables an entry is called with, `registrar` alive
         // through the call.
@@ -1731,6 +1790,14 @@ impl ScriptHost {
         if let Some(registers) = &said.registers {
             // (Refused, what it registered is freed here, unused.)
             held_to(registers, &pending)?;
+        }
+        for (name, native) in loading.highlighters.into_inner() {
+            crate::native_highlight::register(
+                &self.0.functions,
+                &self.0.highlighters,
+                name,
+                native,
+            );
         }
         let module: Rc<str> = Rc::from(&*said.name);
         let mut members = Vec::new();
@@ -1833,5 +1900,143 @@ impl ScriptHost {
                 Some(error) => Err(error.to_string()),
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod registrar_tests {
+    //! The registrar's last entry, its highlighter, between modules and
+    //! hosts built at either side of it.
+    use super::*;
+    use std::cell::Cell;
+    use std::mem::offset_of;
+
+    thread_local! {
+        static HIGHLIGHTER_TAKEN: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+    mod either {
+        use super::HIGHLIGHTER_TAKEN;
+        use zgx_module::{Host, Value};
+        zgx_module::register!("either", |host: &Host| {
+            host.function("either.one", |_| Value::from(1.0));
+            let taken = host.highlighter("either.lines", &["word"], |_, state, _| state);
+            HIGHLIGHTER_TAKEN.with(|t| t.set(Some(taken)));
+        });
+    }
+
+    /// A host's registrar as `enter` makes it, `size` bytes of it said.
+    fn registrar(loading: &Loading, size: usize) -> Registrar {
+        Registrar {
+            size: size as u32,
+            host: std::ptr::from_ref(loading) as *mut c_void,
+            function: register_function,
+            function_taking: register_function_taking,
+            action: register_action,
+            state,
+            host_ref,
+            async_action: register_async_action,
+            highlighter: register_highlighter,
+        }
+    }
+    fn host_loading() -> (zgx::reactive::Runtime, Loading) {
+        let runtime = zgx::reactive::Runtime::new();
+        let host = ScriptHost::inline(&runtime, "app", "return ui.text { \"x\" }");
+        (
+            runtime,
+            Loading {
+                pending: RefCell::default(),
+                highlighters: RefCell::default(),
+                host,
+            },
+        )
+    }
+
+    /// A module built with highlighters, on a host from before them: it
+    /// loads, its functions with it, and is told it has no highlighter.
+    #[test]
+    fn a_new_module_on_an_old_host_loads_without_its_highlighter() {
+        let (_runtime, loading) = host_loading();
+        let old = registrar(&loading, offset_of!(Registrar, highlighter));
+        HIGHLIGHTER_TAKEN.with(|t| t.set(None));
+        // SAFETY: The module's entry, with tables alive through the call.
+        assert_eq!(unsafe { either::zgx_module_v1(&API, &old) }, 0);
+        assert_eq!(HIGHLIGHTER_TAKEN.with(Cell::get), Some(false));
+        assert_eq!(loading.pending.borrow().len(), 1, "its function");
+        assert!(loading.highlighters.borrow().is_empty());
+        // On a host that has them, the same module takes one.
+        let (_runtime, loading) = host_loading();
+        let new = registrar(&loading, size_of::<Registrar>());
+        // SAFETY: As above.
+        assert_eq!(unsafe { either::zgx_module_v1(&API, &new) }, 0);
+        assert_eq!(HIGHLIGHTER_TAKEN.with(Cell::get), Some(true));
+        assert_eq!(loading.highlighters.borrow().len(), 1);
+        // A registrar shorter than the interface before highlighters is
+        // another interface's.
+        let older = registrar(&loading, offset_of!(Registrar, async_action));
+        // SAFETY: As above.
+        assert_eq!(
+            unsafe { either::zgx_module_v1(&API, &older) },
+            abi::REFUSED_ABI
+        );
+    }
+
+    /// The registrar as a module built before highlighters reads it.
+    #[repr(C)]
+    struct OldRegistrar {
+        size: u32,
+        host: *mut c_void,
+        function: unsafe extern "C" fn(
+            *mut c_void,
+            *const u8,
+            usize,
+            abi::Function,
+            *mut c_void,
+            abi::Free,
+        ),
+        function_taking: *const c_void,
+        action: *const c_void,
+        state: *const c_void,
+        host_ref: *const c_void,
+        async_action: *const c_void,
+    }
+    unsafe extern "C" fn old_entry(api: *const Api, registrar: *const Registrar) -> u32 {
+        // (Registered, never called here.)
+        unsafe extern "C" fn one(_: *mut c_void, _: *const Raw, _: usize, _: *mut Raw) -> u32 {
+            abi::FAILED
+        }
+        unsafe extern "C" fn free(_: *mut c_void) {}
+        // SAFETY: The runtime's tables, read as the module was built to.
+        unsafe {
+            let old = &*(registrar as *const OldRegistrar);
+            if (*api).abi != abi::ABI || (old.size as usize) < size_of::<OldRegistrar>() {
+                return abi::REFUSED_ABI;
+            }
+            (old.function)(
+                old.host,
+                b"old.one".as_ptr(),
+                7,
+                one,
+                std::ptr::null_mut(),
+                free,
+            );
+        }
+        0
+    }
+
+    /// A module built before highlighters, on a host that has them: the
+    /// registrar is longer than it reads, and it loads as it did.
+    #[test]
+    fn an_old_module_on_a_new_host_loads_as_it_did() {
+        assert_eq!(
+            size_of::<OldRegistrar>(),
+            offset_of!(Registrar, highlighter),
+            "the old layout"
+        );
+        let (_runtime, loading) = host_loading();
+        let new = registrar(&loading, size_of::<Registrar>());
+        // SAFETY: The test's entry, with tables alive through the call.
+        assert_eq!(unsafe { old_entry(&API, &new) }, 0);
+        assert_eq!(loading.pending.borrow().len(), 1);
+        assert!(loading.highlighters.borrow().is_empty());
     }
 }

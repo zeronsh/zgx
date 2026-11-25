@@ -91,6 +91,7 @@ mod meter;
 mod modifiers;
 #[cfg(feature = "modules")]
 mod modules;
+mod native_highlight;
 #[cfg(feature = "modules")]
 #[doc(hidden)]
 pub use modules::{RegisteredAction, RegisteredFunction};
@@ -2256,6 +2257,10 @@ struct Inner {
     locales: Rc<i18n::Locales>,
     actions: Actions,
     functions: Functions,
+    /// Its modules' line highlighters (`ui.highlighter`), by name: freed
+    /// with it, once no textarea or script holds one.
+    #[cfg_attr(not(feature = "modules"), allow(dead_code))]
+    highlighters: native_highlight::Owned,
     current: RefCell<Option<Rc<Loaded>>>,
     generation: Signal<u64>,
     /// Where focus was as a reload began, before its scripts ran.
@@ -2473,6 +2478,7 @@ impl ScriptHost {
             window_state: RefCell::default(),
             actions: Actions::default(),
             functions: Functions::default(),
+            highlighters: Default::default(),
             current: RefCell::default(),
             generation: runtime.signal(0),
             focus: zgx::compose::FocusHold::default(),
@@ -5499,6 +5505,7 @@ impl ScriptHost {
         // (A VM whose scripts call no module makes no `ui.module`: one
         // closure fewer for every VM to hold and its collector to walk.)
         lazy.ui(&["module"], modules::install);
+        lazy.ui(&["highlighter"], native_highlight::install);
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
         let webs = self.0.webs.clone();

@@ -7051,7 +7051,43 @@ fn code_editor(
     if code.group_scrollbar.get() {
         view = view.group_scrollbar();
     }
-    if let Some(highlight) = &code.highlight {
+    if let Some(native) = &code.native_highlight {
+        // The textarea's states are the highlighter's plus one; its first
+        // line's (0) is the highlighter's `start`.
+        let (native, color_of, theme) = (native.clone(), color_of.clone(), theme.clone());
+        let colors: std::cell::RefCell<(u64, Vec<Option<zgx::scene::Color>>)> =
+            std::cell::RefCell::new((u64::MAX, Vec::new()));
+        view = view.span_highlighter(move |line, state| {
+            let mut kept = colors.borrow_mut();
+            if kept.0 != theme.revision() {
+                *kept = (
+                    theme.revision(),
+                    native
+                        .colors
+                        .iter()
+                        .map(|c| c.as_deref().and_then(|c| color_of(c)))
+                        .collect(),
+                );
+            }
+            let from = if state == 0 {
+                native.start.get()
+            } else {
+                state - 1
+            };
+            let mut out = Vec::new();
+            let next = (native.native.line)(line.as_bytes(), from, &mut |a, b, kind| {
+                if let Some(Some(color)) = kept.1.get(kind as usize)
+                    && a >= 1
+                    && b >= a
+                {
+                    let mut style = zgx::widgets::SpanStyle::default();
+                    style.color = Some(*color);
+                    out.push((a as usize - 1..b as usize, style));
+                }
+            });
+            (out, next.saturating_add(1))
+        });
+    } else if let Some(highlight) = &code.highlight {
         let (highlight, vm, states) = (highlight.clone(), vm.clone(), states.clone());
         view = view.span_highlighter(move |line, state| {
             // A whole number is passed as itself (most highlighters' states,

@@ -1068,6 +1068,71 @@ impl Host<'_> {
         // SAFETY: `call` reads `user` as the `F` it is, and the box's free.
         unsafe { self.raw_async_action(name, call::<F>, user.cast(), free_box_of(user)) }
     }
+    /// Registers a line highlighter a textarea calls itself, with no script
+    /// between (`ui.highlighter(name, styles)`, which maps `kinds` to
+    /// colours): given a line and what the line before left (0: nothing
+    /// open), it hands each span to `push` (bytes from 1, both ends in, and
+    /// its kind's number in `kinds`) and returns what this line leaves.
+    /// Called on the interface's thread alone, as long as the host or a
+    /// textarea or script of it holds it, then dropped once. False where the
+    /// runtime is older than highlighters: the module loads without one.
+    /// Unstable: its shape may change in any release.
+    #[doc(hidden)]
+    pub fn highlighter<F>(&self, name: &str, kinds: &[&str], highlight: F) -> bool
+    where
+        F: Fn(&[u8], u32, &mut dyn FnMut(u32, u32, u32)) -> u32 + 'static,
+    {
+        let r = self.registrar();
+        if (r.size as usize)
+            < std::mem::offset_of!(abi::Registrar, highlighter) + size_of::<usize>()
+        {
+            return false;
+        }
+        unsafe extern "C" fn call<G: Fn(&[u8], u32, &mut dyn FnMut(u32, u32, u32)) -> u32>(
+            user: *mut c_void,
+            line: *const u8,
+            len: usize,
+            state: u32,
+            sink: *mut c_void,
+            push: abi::Push,
+        ) -> u32 {
+            // SAFETY: `user` is the `G` boxed below; `line` lent for the
+            // call; `sink` the runtime's, for `push`.
+            unsafe {
+                let line = if len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(line, len)
+                };
+                (*(user as *const G))(line, state, &mut |from, to, kind| {
+                    push(sink, from, to, kind)
+                })
+            }
+        }
+        let names: Vec<abi::Bytes> = kinds
+            .iter()
+            .map(|k| abi::Bytes {
+                ptr: k.as_ptr(),
+                len: k.len(),
+            })
+            .collect();
+        let user = Box::into_raw(Box::new(highlight));
+        // SAFETY: The registrar's own host, inside the entry call; `names`
+        // lent for it.
+        unsafe {
+            (r.highlighter)(
+                r.host,
+                name.as_ptr(),
+                name.len(),
+                names.as_ptr(),
+                names.len(),
+                call::<F>,
+                user.cast(),
+                free_box_of(user),
+            )
+        }
+        true
+    }
 }
 
 /// A handle to a host for a module's own threads ([`Host::ui`]): `Send`,
@@ -1638,7 +1703,9 @@ pub unsafe fn enter(
     let (api_ref, registrar) = unsafe { (&*api, &*registrar) };
     if api_ref.abi != abi::ABI
         || (api_ref.size as usize) < size_of::<Api>()
-        || (registrar.size as usize) < size_of::<abi::Registrar>()
+        // (A registrar may end before its highlighter: `Host::highlighter`
+        // says so, and the module loads without one.)
+        || (registrar.size as usize) < std::mem::offset_of!(abi::Registrar, highlighter)
     {
         return abi::REFUSED_ABI;
     }

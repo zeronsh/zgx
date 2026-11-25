@@ -425,7 +425,35 @@ pub struct Registrar {
         user: *mut c_void,
         free: Free,
     ),
+    // The interface's third part (a registrar this long has it).
+    /// Registers a line highlighter a textarea calls itself
+    /// (`ui.highlighter(name, styles)`), with no script between: `kinds`
+    /// names what its spans' kinds are, by their number.
+    pub highlighter: unsafe extern "C" fn(
+        host: *mut c_void,
+        name: *const u8,
+        len: usize,
+        kinds: *const Bytes,
+        count: usize,
+        call: Highlight,
+        user: *mut c_void,
+        free: Free,
+    ),
 }
+
+/// A line highlighter's call: `line`'s spans, each handed to `push` as
+/// bytes from 1 (both ends in) and a kind, from the state the line before
+/// left (0: nothing open); returns what this line leaves.
+pub type Highlight = unsafe extern "C" fn(
+    user: *mut c_void,
+    line: *const u8,
+    len: usize,
+    state: u32,
+    sink: *mut c_void,
+    push: Push,
+) -> u32;
+/// Where a highlighter hands each span.
+pub type Push = unsafe extern "C" fn(sink: *mut c_void, from: u32, to: u32, kind: u32);
 
 /// A module's entry, exported as [`ENTRY`]: called once per host it is
 /// loaded into. Returns 0, or a reason it can't load.

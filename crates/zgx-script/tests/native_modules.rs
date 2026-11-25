@@ -913,6 +913,10 @@ fn the_c_header_is_the_rust_interface() {
             "zgx_registrar.async_action",
             offset_of!(Registrar, async_action),
         ),
+        (
+            "zgx_registrar.highlighter",
+            offset_of!(Registrar, highlighter),
+        ),
     ];
     for (name, rust) in expected {
         assert_eq!(number(name), rust, "{name}");
