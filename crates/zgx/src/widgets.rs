@@ -2780,6 +2780,15 @@ impl Drop for FramePreparationGuard<'_> {
     }
 }
 
+/// A menu's own scroller (`compose_menu_scroll`), kept with its viewport
+/// (`Ui::retain`) for `Ui::scroll_report`: its offset, and its viewport's
+/// and content's sizes.
+pub(crate) struct MenuScroll {
+    pub offset: Signal<f32>,
+    pub size: Signal<(f32, f32)>,
+    pub extent: Signal<(f32, f32)>,
+}
+
 /// An open popup: where its window is, in window coordinates, and what it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[doc(hidden)]
@@ -4668,6 +4677,32 @@ impl Ui {
             .or_default()
             .push(Rc::new(RefCell::new(f)));
     }
+    /// `(offset, range)` of the first scroll view in `root`'s subtree (itself
+    /// included), depth first, if any.
+    #[doc(hidden)]
+    pub fn scroll_within(&self, scene: &Scene, root: NodeId) -> Option<(f32, f32)> {
+        // The root itself may be inside one (its content), which the report
+        // finds from there.
+        if let Some((offset, range, _)) = self.scroll_report(root) {
+            return Some((offset, range));
+        }
+        let mut stack = vec![(root, 0_usize)];
+        while let Some((node, depth)) = stack.pop() {
+            if let Some((offset, range, _)) = self.scroll_report(node) {
+                return Some((offset, range));
+            }
+            if depth < 4 {
+                stack.extend(
+                    scene
+                        .children(node)
+                        .iter()
+                        .rev()
+                        .map(|child| (*child, depth + 1)),
+                );
+            }
+        }
+        None
+    }
     fn popup_infos(&self) -> Vec<PopupInfo> {
         let scene = self.scene.borrow();
         let kinds = self.storage.popup_kinds.borrow();
@@ -4871,7 +4906,8 @@ impl Ui {
         self.storage.pixel_scale.clone()
     }
     /// Whether input is being dispatched, so a scroll now is the user's.
-    pub(crate) fn is_dispatching(&self) -> bool {
+    #[doc(hidden)]
+    pub fn is_dispatching(&self) -> bool {
         self.storage.dispatching.get()
     }
     /// Hold the style of the element opening now (`None`: it has none).
@@ -4983,7 +5019,26 @@ impl Ui {
     /// or content inside). An offset past its range and a stretch left
     /// behind look alike on screen; these tell them apart.
     pub fn scroll_report(&self, id: NodeId) -> Option<(f32, f32, f32)> {
-        crate::elastic::report(self, id)
+        if let Some(report) = crate::elastic::report(self, id) {
+            return Some(report);
+        }
+        let scene = self.scene.borrow();
+        let owned = self.storage.owned.borrow();
+        // A menu's, from its viewport, its content, or just inside.
+        std::iter::once(id)
+            .chain(scene.ancestors(id).take(3))
+            .find_map(|node| {
+                let resources = &owned.get(&node)?.resources;
+                resources
+                    .iter()
+                    .find_map(|r| r.downcast_ref::<MenuScroll>())
+            })
+            .map(|menu| {
+                let range = (menu.extent.with_untracked(|e| e.1)
+                    - menu.size.with_untracked(|s| s.1))
+                .max(0.);
+                (menu.offset.with_untracked(|o| *o), range, 0.)
+            })
     }
     /// Take a trackpad's swipe between pages as navigation, as Safari does:
     /// a gesture that starts across where nothing under it scrolls that way
@@ -5359,6 +5414,15 @@ impl Ui {
             .portals
             .borrow_mut()
             .retain(|(_, other)| *other != overlay);
+    }
+    /// Whether `node` keeps a `T` (`NodeHandle::retain`).
+    #[doc(hidden)]
+    pub fn retains<T: Any>(&self, node: NodeId) -> bool {
+        self.storage
+            .owned
+            .borrow()
+            .get(&node)
+            .is_some_and(|owned| owned.resources.iter().any(|r| r.is::<T>()))
     }
     /// Each portal's owner and overlay, in the order they mounted: a
     /// modal's, popover's or menu's panel shows in an overlay under the

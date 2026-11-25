@@ -5,6 +5,10 @@ use zgx::compose::{View, prelude::*};
 
 type Factory = Rc<dyn Fn() -> View>;
 
+/// Kept by the node a host's view mounts as: what is in it is the host's,
+/// not the script's that shows it (`controls`).
+pub(crate) struct HostView;
+
 thread_local! {
     static VIEWS: RefCell<HashMap<String, Factory>> = RefCell::default();
 }
@@ -17,7 +21,7 @@ pub fn host_view(name: impl Into<String>, make: impl Fn() -> View + 'static) {
 pub(crate) fn view(name: &str) -> View {
     let make = VIEWS.with(|views| views.borrow().get(name).cloned());
     match make {
-        Some(make) => make(),
+        Some(make) => make().on_mount(|handle| handle.retain(HostView)),
         None => div(),
     }
 }

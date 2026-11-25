@@ -342,6 +342,24 @@ return ui.button {
 }
 ```
 
+## Controls on screen
+
+```luau
+ui.controls(opts: { limit: number? }?) -> { Control }
+ui.press(handle: number) -> boolean
+ui.text_of(handle: number, cap: number?) -> string
+```
+
+`ui.controls()` lists what a person could use in the window that has the keys (the active one) as the accessibility tree has it: in document order, with popups, menus and modals last, each as `{ role, name, x, y, w, h, disabled, selected, checked, expanded, pressed, haspopup, focused, handle }`. `role` is ARIA's name for it (`"button"`, `"link"`, `"menuitem"`, `"tab"`, `"dialog"`…), `name` its accessible name or else its text, and the box is the part of it that shows, in the window's points. A plain group, a text, a scroll view or a table's rows and cells are left out, and so is what is hidden or has no box. `selected`, `checked`, `expanded` and `pressed` are nil where a control can't be (`checked` is a checkbox's, a radio's, a switch's or a checked or radio menu item's; `pressed` a toggle button's), and `haspopup` says what it opens (`"menu"`, `"dialog"`), else nil. A menu or a list box with a scroll view adds `scroll_offset` and `scroll_range` (points) and `at_start` and `at_end`, whether it rests at that end, with no further to go. `limit` stops the list there. Nothing is built until it is called, and it costs nothing in a frame that doesn't.
+
+`ui.press(handle)` presses and releases the primary button at the middle of the control `handle` names, through the window's input as `zgx inspect click` does. It returns false, doing nothing, for a handle whose control is gone, hidden or covered there by something else. While a handler is handling input (a click's `on_click`) it returns false, doing nothing: press from a command, a timer or a task.
+
+`ui.text_of(handle, cap)` is the text the control shows, its texts a word apart, at most `cap` characters (400 if not given), leaving out what is hidden from assistive technology or does not show: a dialog's, say, to send as a notice. `""` once the control is gone.
+
+A Rust host gives the window with `ScriptHost::window_controls(&ui)` (`zgx-run` does); without one they do nothing (`{}`, false and `""`). They are the app's own: a plugin that calls one gets an error.
+
+Under a host's guard (`ScriptHost::guard`: a template previewed), a script's reach is its own view: `ui.controls` lists only what it mounted, its popups, menus and dialogs with it, not a control the host draws beside it or a `ui.host_view`'s. `ui.press` and `ui.text_of` of any other control are errors that say so, `ui.text_of` leaves out a host view inside what it reads, and a press whose middle lies over a host view does nothing. The guard is not asked: a host that wrote one before needs no new answer. With no view mounted in the window, nothing is listed.
+
 ## Example
 
 ```lua

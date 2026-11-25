@@ -134,6 +134,8 @@ export const sets = [
         description: 'Plugins that add to an app, filter it and replace parts of it, and what the app lets them see and do.' },
       { slug: 'accessibility-audit', src: 'docs/accessibility-audit.md', title: 'Accessibility audit',
         description: 'zgx audit: what a screen reader gets of an app, through what it opens, as JSON for agents and CI.' },
+      { slug: 'controls-on-screen', src: 'docs/reference/native.md', title: 'Controls on screen', sections: ['Controls on screen'], unwrap: true,
+        description: 'ui.controls, ui.press and ui.text_of: what is on screen as the accessibility tree has it, for guides and tests.' },
       { slug: 'design-systems', src: 'docs/reference/design.md', title: 'Design systems' },
       '---API reference---',
       { slug: 'reference', src: 'docs/reference/index.md', title: 'Reading the reference' },

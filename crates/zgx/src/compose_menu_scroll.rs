@@ -2,7 +2,7 @@
 use crate::{
     input::{EventPhase, InputEvent},
     scene::{NodeId, Transform},
-    widgets::Ui,
+    widgets::{MenuScroll, Ui},
 };
 
 pub(crate) fn mount(ui: &mut Ui, panel: NodeId, viewport: NodeId, content: NodeId) {
@@ -19,6 +19,14 @@ pub(crate) fn mount(ui: &mut Ui, panel: NodeId, viewport: NodeId, content: NodeI
     let size = ui.observe_content_size(viewport);
     let extent = ui.observe_content_size(content);
     let offset = ui.signal(0_f32);
+    ui.retain(
+        viewport,
+        MenuScroll {
+            offset: offset.clone(),
+            size: size.clone(),
+            extent: extent.clone(),
+        },
+    );
     let read_size = size.clone();
     let read_extent = extent.clone();
     let read_offset = offset.clone();

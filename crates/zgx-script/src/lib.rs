@@ -47,6 +47,7 @@ mod calls;
 mod canvas;
 pub mod check;
 mod command;
+mod controls;
 mod counted;
 mod data;
 mod design;
@@ -3744,6 +3745,13 @@ impl ScriptHost {
         });
         *self.0.hold.borrow_mut() = Some(effect);
     }
+    /// Lets `ui.controls()` list what window `ui` shows and `ui.press(handle)`
+    /// press it, as a person would: nothing is built until a script asks.
+    /// With several windows, the active one answers (else the last given).
+    #[doc(hidden)]
+    pub fn window_controls(&self, ui: &zgx::widgets::Ui) {
+        controls::Windows::of(&self.0.runtime).add(&self.0.shared, ui);
+    }
     /// Keep `ui.window.visible` as the app's window shows, `visible` at
     /// first (as it opened), and `show` it as a script sets it: an app that
     /// opens its window hidden (`WindowOptions::visible`) shows it with
@@ -5602,6 +5610,9 @@ impl ScriptHost {
                 audio::install(lua, globals, audio, plugin)
             });
         }
+        // Last: a module's names are looked for in order, and few scripts
+        // name these.
+        lazy.ui(&["controls", "press", "text_of"], controls::install);
         self.install_require(
             &lua,
             script.dir(),

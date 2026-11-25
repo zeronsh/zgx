@@ -929,6 +929,8 @@ pub fn run_hosting(
         host.window_zoom(&cx.ui);
         // `ui.window.hold_frames`: the frame held while what it changes to comes.
         host.window_hold(&cx.ui);
+        // `ui.controls` and `ui.press`.
+        host.window_controls(&cx.ui);
         // `ui.window.active` and `ui.window.shown`.
         host.window_state(&cx.ui);
         // `ui.window.size`.

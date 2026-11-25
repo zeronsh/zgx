@@ -10031,6 +10031,12 @@ impl NodeHandle {
     pub fn node(&self) -> NodeId {
         self.node
     }
+    /// Whether it is `ui`'s (a window's, as nodes are: their ids say nothing
+    /// in another).
+    #[doc(hidden)]
+    pub fn is_in(&self, ui: &Ui) -> bool {
+        self.ui.same(&ui.downgrade())
+    }
     /// Whether `other` lies inside this node (a descendant, not the node
     /// itself), in the same window; `false` once either or the UI is gone.
     pub fn holds(&self, other: &NodeHandle) -> bool {
@@ -10497,6 +10503,13 @@ impl NodeHandle {
             return false;
         };
         ui.input.lock_pointer(&ui.scene, self.node)
+    }
+    /// If this is a scroll view or list (or inside one's root), how far it is
+    /// scrolled along its axis and how far it can scroll: `(offset, range)`.
+    #[doc(hidden)]
+    pub fn scroll_extent(&self) -> Option<(f32, f32)> {
+        let (offset, range, _) = self.ui.upgrade()?.scroll_report(self.node)?;
+        Some((offset, range))
     }
     /// Let the pointer go, if the node holds its lock.
     pub fn unlock_pointer(&self) {

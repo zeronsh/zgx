@@ -264,10 +264,64 @@ pub fn own_text(scene: &Scene, node: NodeId) -> Option<String> {
         _ => None,
     }
 }
-/// The first text inside `node` (itself included), depth first.
-pub fn first_text(scene: &Scene, node: NodeId) -> Option<String> {
+/// The text shown inside the control `handle` names (`Control::handle`), a
+/// word apart, at most `cap` characters: what a reader sees of it, not
+/// what is hidden from assistive technology or does not show. None when
+/// the node is gone.
+#[doc(hidden)]
+pub fn subtree_text(ui: &Ui, handle: u64, cap: usize) -> Option<String> {
+    subtree_text_where(ui, handle, cap, |_| false)
+}
+/// `subtree_text`, without what `foreign` says isn't to be read.
+pub(crate) fn subtree_text_where(
+    ui: &Ui,
+    handle: u64,
+    cap: usize,
+    foreign: impl Fn(NodeId) -> bool,
+) -> Option<String> {
+    let node = NodeId::from_bits(handle);
+    let scene = ui.scene.borrow();
+    let semantics = ui.semantics.borrow();
+    if !scene.contains(node) {
+        return None;
+    }
+    let mut out = String::new();
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
+        if semantics.get(n).is_some_and(|s| s.hidden) || !shows(&scene, n) || foreign(n) {
+            continue;
+        }
+        if let Some(text) = own_text(&scene, n) {
+            let text = text.trim();
+            if !text.is_empty() {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(text);
+                if out.chars().count() >= cap {
+                    break;
+                }
+            }
+        }
+        stack.extend(scene.children(n).iter().rev());
+    }
+    Some(out.chars().take(cap).collect())
+}
+/// The first text inside `node` (itself included), depth first.
+pub fn first_text(scene: &Scene, node: NodeId) -> Option<String> {
+    first_text_where(scene, node, |_| false)
+}
+/// `first_text`, without what `foreign` says isn't to be read.
+fn first_text_where(
+    scene: &Scene,
+    node: NodeId,
+    foreign: impl Fn(NodeId) -> bool,
+) -> Option<String> {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if foreign(n) {
+            continue;
+        }
         if let Some(text) = own_text(scene, n) {
             return Some(text);
         }
@@ -1281,5 +1335,174 @@ mod modifier_tap_tests {
             seen.borrow().as_slice(),
             [Modifiers::default(), alt, Modifiers::default()]
         );
+    }
+}
+
+/// One live control of a window as `controls` lists it.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Control {
+    /// Its role, as ARIA names it.
+    pub role: &'static str,
+    /// Its accessible name, else its text.
+    pub name: String,
+    /// The part of its box that shows, in window points.
+    pub bounds: Rect,
+    /// It is disabled.
+    pub disabled: bool,
+    /// Selected, if it can be (a tab, an option).
+    pub selected: Option<bool>,
+    /// Checked, if it can be (a checkbox, a radio, a switch, a checked or
+    /// radio menu item): on or off.
+    pub checked: Option<bool>,
+    /// Open, if it can be (a menu's trigger, a disclosure).
+    pub expanded: Option<bool>,
+    /// Pressed, if it is a toggle button (`aria-pressed`).
+    pub pressed: Option<bool>,
+    /// What it opens (`aria-haspopup`): "dialog" or "menu".
+    pub has_popup: Option<&'static str>,
+    /// A menu's or list box's scroll view: `(offset, range)`, if it has one.
+    pub scroll: Option<(f32, f32)>,
+    /// It has the keyboard focus.
+    pub focused: bool,
+    /// Names it for `press`, as long as it is there.
+    pub handle: u64,
+}
+
+/// The controls on screen, in document order with the layers drawn over
+/// the window (popups, modals) last, as the accessibility tree has them:
+/// nodes with a role of their own (not structure such as a group, a text, a
+/// scroll view or a table's rows), that show and have a box that does. `limit` stops the list there. Nothing is
+/// built until it is asked for.
+#[doc(hidden)]
+pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
+    controls_where(ui, limit, |_, _| true, |_| false)
+}
+/// `controls`, those that `keep` says are to be listed (asked of a node only
+/// once it is a control that shows), named without what is `foreign`.
+pub(crate) fn controls_where(
+    ui: &Ui,
+    limit: Option<usize>,
+    keep: impl Fn(&Scene, NodeId) -> bool,
+    foreign: impl Fn(NodeId) -> bool,
+) -> Vec<Control> {
+    let scene = ui.scene.borrow();
+    let semantics = ui.semantics.borrow();
+    let focused = ui.input.focused();
+    let mut out = Vec::new();
+    let mut stack = vec![scene.root()];
+    while let Some(node) = stack.pop() {
+        if limit.is_some_and(|limit| out.len() >= limit) {
+            break;
+        }
+        stack.extend(scene.children(node).iter().rev().copied());
+        let Some(s) = semantics.get(node) else {
+            continue;
+        };
+        // Structure and plain text are not controls.
+        let structural = matches!(
+            s.role,
+            Role::Window
+                | Role::Group
+                | Role::Label
+                | Role::ScrollView
+                | Role::ScrollBar
+                | Role::Document
+                | Role::Article
+                | Role::Grid
+                | Role::Row
+                | Role::Cell
+        );
+        if s.hidden || structural || !shows(&scene, node) || scene.in_held_popup(node) {
+            continue;
+        }
+        if !keep(&scene, node) {
+            continue;
+        }
+        let role = semantic_role_name(s);
+        let Some(bounds) = scene
+            .visible_bounds(node)
+            .filter(|b| b.width > 0. && b.height > 0.)
+        else {
+            continue;
+        };
+        let name = Some(s.label.clone())
+            .filter(|label| !label.is_empty())
+            .or_else(|| first_text_where(&scene, node, &foreign))
+            .unwrap_or_default();
+        out.push(Control {
+            role,
+            name,
+            bounds,
+            disabled: s.disabled,
+            selected: s.selected,
+            checked: s.checked,
+            expanded: s.expanded,
+            pressed: s.pressed,
+            has_popup: s.has_popup.map(popup_name),
+            scroll: matches!(s.role, Role::Menu | Role::ListBox)
+                .then(|| ui.scroll_within(&scene, node))
+                .flatten(),
+            focused: focused == Some(node),
+            handle: node.to_bits(),
+        });
+    }
+    out
+}
+
+/// Presses the control `handle` names (`Control::handle`) as `click` does
+/// (`press_control`, as `press` is a key's):
+/// the primary button down and up at the middle of the part of it that
+/// shows, through the window's input. False, doing nothing, when the node
+/// is gone, doesn't show, or is covered there by something else.
+#[doc(hidden)]
+pub fn press_control(ui: &mut Ui, handle: u64) -> bool {
+    press_control_where(ui, handle, |_, _| true)
+}
+/// `press_control`, if what the pointer would land on is one `allowed` says
+/// may be pressed (a control's middle may lie over another's).
+pub(crate) fn press_control_where(
+    ui: &mut Ui,
+    handle: u64,
+    allowed: impl Fn(&Scene, NodeId) -> bool,
+) -> bool {
+    let node = NodeId::from_bits(handle);
+    let shown = {
+        let scene = ui.scene.borrow();
+        // (A popup held back, the app being at the back, is none to press.)
+        if !scene.contains(node) || !shows(&scene, node) || scene.in_held_popup(node) {
+            return false;
+        }
+        let Some(shown) = scene.visible_bounds(node) else {
+            return false;
+        };
+        let off = scene.hit_offset(node);
+        let (x, y) = middle(Rect::new(
+            shown.x + off.x,
+            shown.y + off.y,
+            shown.width,
+            shown.height,
+        ));
+        let hit = ui.input.pointer_target(&scene, x, y);
+        let reached = hit.is_none_or(|hit| {
+            hit == node
+                || scene.ancestors(hit).any(|a| a == node)
+                || scene.ancestors(node).any(|a| a == hit)
+        });
+        if !reached || hit.is_some_and(|hit| !allowed(&scene, hit)) {
+            return false;
+        }
+        shown
+    };
+    click_at(ui, shown);
+    true
+}
+
+/// A pop-up kind as ARIA names it (`haspopup`).
+fn popup_name(kind: zgx::semantics::PopupKind) -> &'static str {
+    use zgx::semantics::PopupKind;
+    match kind {
+        PopupKind::Menu => "menu",
+        PopupKind::Dialog => "dialog",
     }
 }
