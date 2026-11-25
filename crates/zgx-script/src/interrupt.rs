@@ -333,6 +333,31 @@ struct WasmLooks {
     first: Cell<u32>,
     /// When the call's checks last looked, if they have.
     looked: Cell<Option<Instant>>,
+    /// How many safepoints into this call its first look was (`first`, as
+    /// it was when the call started).
+    call_first: Cell<u32>,
+}
+/// In the browser, how the looks went for the last call stopped for its
+/// time (`last_looks`): what a test of the stop's promptness reads, as time
+/// alone (wall time, here) also counts what the machine took from the page.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug)]
+pub struct WasmStopLooks {
+    /// The time between the look that stopped it and the one before.
+    pub gap: Duration,
+    /// The safepoints between those two looks.
+    pub stride: u32,
+    /// How many safepoints into the call its first look was.
+    pub first: u32,
+}
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WASM_STOP_LOOKS: Cell<Option<WasmStopLooks>> = const { Cell::new(None) };
+}
+/// The looks of the last call stopped for its time on this thread.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn last_looks() -> Option<WasmStopLooks> {
+    WASM_STOP_LOOKS.with(Cell::get)
 }
 #[cfg(target_arch = "wasm32")]
 thread_local! {
@@ -342,6 +367,7 @@ thread_local! {
             stride: Cell::new(WASM_FIRST_LOOK),
             first: Cell::new(WASM_FIRST_LOOK),
             looked: Cell::new(None),
+            call_first: Cell::new(WASM_FIRST_LOOK),
         }
     };
 }
@@ -351,15 +377,16 @@ thread_local! {
 /// where they came later, twice as many where they came in under half of
 /// it, from 1 to `WASM_CHECK_EVERY`.
 #[cfg(target_arch = "wasm32")]
-fn pace(now: Instant) {
+fn pace(now: Instant) -> (Option<Instant>, u32) {
     WASM_LOOKS.with(|looks| {
-        let paced = match looks.looked.replace(Some(now)) {
+        let stride = looks.stride.get();
+        let last = looks.looked.replace(Some(now));
+        let paced = match last {
             // No fewer safepoints than the first look waited for, where
             // the thread's looks came slowly (`WasmLooks::first`).
             None => WASM_SECOND_LOOK.min(looks.first.get()),
             Some(last) => {
                 let gap = now.saturating_duration_since(last);
-                let stride = looks.stride.get();
                 if gap > WASM_LOOK_GAP {
                     let scaled = u128::from(stride) * WASM_LOOK_GAP.as_nanos() / gap.as_nanos();
                     let scaled = scaled.max(1) as u32;
@@ -373,7 +400,10 @@ fn pace(now: Instant) {
             }
         };
         looks.stride.set(paced);
-    });
+        // The last look and the stride since, for a stop's account: values
+        // it read anyway, nothing more worked out per look.
+        (last, stride)
+    })
 }
 impl Watchdog {
     /// The process's watchdog.
@@ -719,6 +749,7 @@ impl Installed {
                     WASM_LOOKS.with(|looks| {
                         let first = looks.first.get().saturating_mul(2).min(WASM_FIRST_LOOK);
                         looks.first.set(first);
+                        looks.call_first.set(first);
                         looks.checks.set(1);
                         looks.stride.set(first);
                         looks.looked.set(None);
@@ -1019,14 +1050,13 @@ unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
     #[cfg(target_arch = "wasm32")]
     let looked = watch.deadline.get().map(|_| {
         let now = Instant::now();
-        pace(now);
-        now
+        (now, pace(now))
     });
     match watch.deadline.get() {
         // Its first look: the budget starts now (`Deadline::lazy`).
         #[cfg(target_arch = "wasm32")]
         Some(d) if d.lazy() => {
-            let started = looked.map(|now| d.started_at(now));
+            let started = looked.map(|(now, _)| d.started_at(now));
             // Due from its start, as `publish` sets it from a call's: a
             // stop's account (`record_stop`) counts from there, and tells
             // this call's stop from the last's (a lazy budget's due time
@@ -1040,9 +1070,24 @@ unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
             Verdict::Continue
         }
         #[cfg(target_arch = "wasm32")]
-        Some(d) if looked.is_some_and(|now| d.exceeded_at(now)) => {
+        Some(d) if looked.is_some_and(|(now, _)| d.exceeded_at(now)) => {
             record_stop(&watch.alarm, &d);
-            WASM_LOOKS.with(|looks| looks.checks.set(OUT_OF_TIME));
+            WASM_LOOKS.with(|looks| {
+                // The look that stopped it, not a later one raising it again
+                // (after a `pcall` caught it, every check looks).
+                if looks.checks.get() != OUT_OF_TIME
+                    && let Some((now, (Some(before), stride))) = looked
+                {
+                    WASM_STOP_LOOKS.with(|last| {
+                        last.set(Some(WasmStopLooks {
+                            gap: now.saturating_duration_since(before),
+                            stride,
+                            first: looks.call_first.get(),
+                        }));
+                    });
+                }
+                looks.checks.set(OUT_OF_TIME);
+            });
             Verdict::OutOfTime
         }
         #[cfg(not(target_arch = "wasm32"))]
