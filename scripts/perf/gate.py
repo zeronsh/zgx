@@ -163,6 +163,13 @@ SCENES = [
     # growing paragraph's chunks cost the text cache; the bench asserts the
     # cache shaped them.
     ('md-stream-text', 'zgx-script', 'md_stream_text_bench', {}),
+    # A 300-line note with a code block, its lines' room and marks from
+    # Luau by their highlighter's state (note_bench): letters typed in its
+    # prose and its block, the block scrolled sideways and the note down, no
+    # fence changed; and a fence typed at its top and undone, over and over,
+    # which puts every line below in a block and back.
+    ('note-letters', 'zgx-script', 'note_bench', {}),
+    ('note-fence', 'zgx-script', 'note_bench', {'SCENE': 'fence'}),
     ('style', 'zgx', 'style_bench', {}),
     # A terminal streaming a build log (16, 256 and true colours, styles,
     # wrapping, a progress line rewritten), its output replayed on the
