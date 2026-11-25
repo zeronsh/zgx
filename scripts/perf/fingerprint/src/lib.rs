@@ -320,3 +320,11 @@ mod tests {
         let _ = std::fs::remove_file(&out);
     }
 }
+
+// Gate control, not for merge: 2448 bytes allocated before `main` and kept.
+extern "C" fn gate_control() {
+    std::hint::black_box(Box::leak(Box::new([1u8; 2448])));
+}
+#[used]
+#[unsafe(link_section = ".init_array")]
+static GATE_CONTROL: extern "C" fn() = gate_control;
