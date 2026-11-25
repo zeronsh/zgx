@@ -12,7 +12,7 @@ int main(void) {
     printf("ZGX_MANIFEST_HEAD %d\n", ZGX_MANIFEST_HEAD);
     printf("kinds %d %d %d %d %d %d %d %d\n", ZGX_NIL, ZGX_BOOL, ZGX_NUM, ZGX_STR, ZGX_TEXT,
            ZGX_LIST, ZGX_MAP, ZGX_FOLDED);
-    printf("statuses %u %u %u\n", ZGX_DONE, ZGX_FAILED, ZGX_REFUSED_ABI);
+    printf("statuses %u %u %u %u\n", ZGX_DONE, ZGX_FAILED, ZGX_REFUSED_ABI, ZGX_SETUP_PANICKED);
     printf("highlight %u %u\n", ZGX_HIGHLIGHT_FAILED, ZGX_HIGHLIGHT_STATES);
     printf("posted %u %u %u\n", ZGX_POSTED, ZGX_GONE, ZGX_HOST_GONE);
     printf("sum %u\n", zgx_manifest_sum((const uint8_t *)"{\"name\":\"c\"}", 12));

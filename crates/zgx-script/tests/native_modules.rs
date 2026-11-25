@@ -939,7 +939,13 @@ fn the_c_header_is_the_rust_interface() {
     assert_eq!(c["kinds"], kinds);
     assert_eq!(
         c["statuses"],
-        format!("{} {} {}", abi::DONE, abi::FAILED, abi::REFUSED_ABI)
+        format!(
+            "{} {} {} {}",
+            abi::DONE,
+            abi::FAILED,
+            abi::REFUSED_ABI,
+            abi::SETUP_PANICKED
+        )
     );
     assert_eq!(
         c["highlight"],
@@ -2783,4 +2789,314 @@ return ui.column {
         "{}",
         app.text("wrong")
     );
+}
+
+/// A module whose functions and actions panic, by hand (`register!`).
+mod panicky {
+    use zgx_module::{Host, Value};
+    zgx_module::register!("panicky", |host: &Host| {
+        host.function("panicky.boom", |_| panic!("boom in a function"));
+        host.try_function(
+            "panicky.try_boom",
+            |_| -> Result<Value, zgx_module::Failed> { panic!("boom in a try") },
+        );
+        host.function_taking("panicky.take_boom", |_| panic!("boom taking"));
+        host.action("panicky.act_boom", |_| panic!("boom in an action"));
+        host.try_action(
+            "panicky.try_act_boom",
+            |_| -> Result<(), zgx_module::Failed> { panic!("boom in a try action") },
+        );
+        host.async_action("panicky.later_boom", |_, _promise| {
+            panic!("boom in an async action")
+        });
+        host.function("panicky.fine", |_| Value::from("still here"));
+    });
+}
+
+/// The same, written with the macros.
+#[zgx_module::module(name = "panics")]
+mod panics {
+    use zgx_module::export;
+    /// Panics with `why`.
+    #[export]
+    fn boom(why: &str) -> f64 {
+        panic!("{why}")
+    }
+    /// Panics.
+    #[export(action)]
+    fn act(why: &str) {
+        panic!("{why}")
+    }
+    /// Answers, after the others panicked.
+    #[export]
+    fn fine() -> f64 {
+        42.0
+    }
+}
+
+/// A module whose setup panics.
+mod setup_panics {
+    zgx_module::register!("setup_panics", |host: &zgx_module::Host| {
+        host.function("setup_panics.never", |_| zgx_module::Value::NIL);
+        panic!("boom as it loads");
+    });
+}
+
+/// A panic in a module's function or action is raised in the script that
+/// called, as an error it returned would be: the app goes on, and so does the
+/// module. An async action's promise rejects. A panic as a module loads
+/// refuses it.
+#[test]
+fn a_panic_in_a_module_is_an_error_not_an_end() {
+    let script = r#"
+        local said = {}
+        local function try(name, f)
+            local ok, why = pcall(f)
+            -- (An error's first line: its traceback follows.)
+            table.insert(said, name .. "=" .. (if ok then "ok" else string.match(tostring(why), "^[^\n]*")))
+        end
+        try("function", function() return ui.call_sync("panicky.boom", 1) end)
+        try("try", function() return ui.call_sync("panicky.try_boom", 1) end)
+        try("taking", function() return ui.call_sync("panicky.take_boom", { 1 }) end)
+        try("action", function() ui.invoke("panicky.act_boom", 1) end)
+        try("try action", function() ui.invoke("panicky.try_act_boom", 1) end)
+        try("macro function", function() return ui.module("panics").boom("boom by macro") end)
+        try("macro action", function() ui.invoke("panics.act", "boom by macro action") end)
+        table.insert(said, "after=" .. ui.call_sync("panicky.fine", 1) .. " " .. ui.module("panics").fine())
+        local rejected = ui.state("rejected", "")
+        ui.call("panicky.later_boom", 1):after(nil, function(e) rejected:set(tostring(e.message or e)) end)
+        return ui.column {
+            ui.text { table.concat(said, "\n"), id = "said" },
+            ui.text { function() return rejected:get() end, id = "rejected" },
+        }
+    "#;
+    let mut app = TestApp::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", script);
+        // SAFETY: The test's own entries.
+        unsafe {
+            host.enter_module(panicky::zgx_module_v1, &panicky::zgx_module_manifest)
+                .unwrap();
+            host.enter_module(panics::zgx_module_v1, &panics::zgx_module_manifest)
+                .unwrap();
+        }
+        host
+    });
+    assert_eq!(app.error(), None);
+    let said = app.text("said");
+    let lines: Vec<&str> = said.lines().collect();
+    for (at, (name, why)) in [
+        (
+            "function",
+            "panicky.boom (module `panicky`): panicked: boom in a function",
+        ),
+        (
+            "try",
+            "panicky.try_boom (module `panicky`): panicked: boom in a try",
+        ),
+        (
+            "taking",
+            "panicky.take_boom (module `panicky`): panicked: boom taking",
+        ),
+        (
+            "action",
+            "panicky.act_boom (module `panicky`): panicked: boom in an action",
+        ),
+        (
+            "try action",
+            "panicky.try_act_boom (module `panicky`): panicked: boom in a try action",
+        ),
+        (
+            "macro function",
+            "panics.boom (module `panics`): panicked: boom by macro",
+        ),
+        (
+            "macro action",
+            "panics.act (module `panics`): panicked: boom by macro action",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            lines[at].starts_with(&format!("{name}=")) && lines[at].contains(why),
+            "{}: {:?}",
+            at + 1,
+            lines[at]
+        );
+    }
+    assert_eq!(lines[7], "after=still here 42", "the modules still answer");
+    assert!(app.wait_until(|app| !app.text("rejected").is_empty()));
+    let rejected = app.text("rejected");
+    assert!(
+        rejected.contains("panicky.later_boom")
+            && rejected.contains("panicked: boom in an async action"),
+        "{rejected}"
+    );
+
+    let refused = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", r#"return ui.text { "x", id = "x" }"#);
+        // SAFETY: The test's own entry.
+        let why = unsafe {
+            host.enter_module(
+                setup_panics::zgx_module_v1,
+                &setup_panics::zgx_module_manifest,
+            )
+        }
+        .unwrap_err();
+        assert!(why.contains("its setup panicked"), "{why}");
+        assert!(
+            host.registered_function("setup_panics.never").is_none(),
+            "nothing of it registered"
+        );
+        host
+    });
+    assert_eq!(refused.error(), None);
+}
+
+thread_local! {
+    /// What `unruly` saw: its jobs, timers, observers and drops.
+    static UNRULY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+thread_local! {
+    /// A handle to `unruly`'s host, kept past it.
+    static KEPT_UI: std::cell::RefCell<Option<zgx_module::Ui>> = const { std::cell::RefCell::new(None) };
+}
+fn unruly_saw(what: &str) {
+    UNRULY.with_borrow_mut(|u| u.push(what.to_owned()));
+}
+
+/// A module whose jobs, timers, observers and drops panic.
+mod unruly {
+    use super::unruly_saw;
+    use zgx_module::{Host, Value};
+    /// Panics as it is dropped (a job posted to a host gone, freed unrun).
+    pub struct Loud;
+    impl Drop for Loud {
+        fn drop(&mut self) {
+            unruly_saw("dropped");
+            panic!("boom in a drop");
+        }
+    }
+    zgx_module::register!("unruly", |host: &Host| {
+        let ui = host.ui();
+        super::KEPT_UI.with_borrow_mut(|kept| *kept = Some(host.ui()));
+        host.function("unruly.go", move |_| {
+            let ui = ui.clone();
+            // Two jobs: the first panics, the second still runs.
+            std::thread::spawn(move || {
+                ui.post(|_| panic!("boom in a job"));
+                ui.post(|_| unruly_saw("the job after"));
+            })
+            .join()
+            .unwrap();
+            Value::NIL
+        });
+        host.after(std::time::Duration::from_millis(1), |_| {
+            panic!("boom in a timer")
+        })
+        .forget();
+        host.after(std::time::Duration::from_millis(2), |_| {
+            unruly_saw("the timer after")
+        })
+        .forget();
+        host.every(std::time::Duration::from_millis(1), |_| {
+            unruly_saw("every");
+            panic!("boom every time");
+        })
+        .forget();
+        let shared = host.shared("unruly.x", Value::from(0.0)).unwrap();
+        std::mem::forget(shared.observe(|_, value| {
+            unruly_saw(&format!("observed {}", value.num().unwrap_or(-1.)));
+            panic!("boom in an observer");
+        }));
+        std::mem::forget(shared);
+    });
+}
+
+/// A panic in a module's job, timer, observer or drop is caught where the
+/// runtime called it (printed, with no script to raise it in): the jobs and
+/// timers after it run, a repeating timer that panics stops, an observer
+/// observes the next change, and a closure that panics as it is dropped is
+/// dropped.
+#[test]
+fn a_panic_off_a_call_ends_nothing() {
+    UNRULY.with_borrow_mut(Vec::clear);
+    let app = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", r#"return ui.text { "x", id = "x" }"#);
+        // SAFETY: The test's own entry.
+        unsafe { host.enter_module(unruly::zgx_module_v1, &unruly::zgx_module_manifest) }.unwrap();
+        host
+    });
+    app.settle();
+    app.host.registered_function("unruly.go").unwrap()(Value::Nil).unwrap();
+    app.frames(6);
+    let shared = app.host.shared("unruly.x", 0.);
+    shared.set(Value::Num(1.));
+    app.frames(1);
+    shared.set(Value::Num(2.));
+    app.frames(1);
+    let saw = UNRULY.with_borrow(Clone::clone);
+    assert!(saw.contains(&"the job after".to_owned()), "{saw:?}");
+    assert!(saw.contains(&"the timer after".to_owned()), "{saw:?}");
+    assert_eq!(
+        saw.iter().filter(|s| *s == "every").count(),
+        1,
+        "stopped: {saw:?}"
+    );
+    assert!(
+        saw.contains(&"observed 1".to_owned()) && saw.contains(&"observed 2".to_owned()),
+        "{saw:?}"
+    );
+    assert_eq!(app.error(), None);
+    // A job posted once its host is gone is freed unrun, here: its drop
+    // panics.
+    drop(shared);
+    drop(app);
+    let ui = KEPT_UI.with_borrow_mut(Option::take).unwrap();
+    let loud = unruly::Loud;
+    assert!(!ui.post(move |_| {
+        let _loud = &loud;
+    }));
+    assert!(
+        UNRULY.with_borrow(|u| u.contains(&"dropped".to_owned())),
+        "the job, freed unrun"
+    );
+}
+
+/// A module's state whose drop panics, as its thread ends: caught there.
+mod state_drop {
+    #[derive(Default)]
+    pub struct Loud;
+    impl Drop for Loud {
+        fn drop(&mut self) {
+            panic!("boom dropping a state");
+        }
+    }
+    zgx_module::register!("state_drop", |host: &zgx_module::Host| {
+        let state = host.state::<Loud>();
+        host.function("state_drop.touch", move |_| {
+            state.with(|_| ());
+            zgx_module::Value::NIL
+        });
+    });
+}
+
+#[test]
+fn a_panic_dropping_a_modules_state_is_caught_as_its_thread_ends() {
+    let ended = std::thread::spawn(|| {
+        let app = TestApp::new(|runtime| {
+            let host = ScriptHost::inline(runtime, "app", r#"return ui.text { "x", id = "x" }"#);
+            // SAFETY: The test's own entry.
+            unsafe {
+                host.enter_module(state_drop::zgx_module_v1, &state_drop::zgx_module_manifest)
+            }
+            .unwrap();
+            host
+        });
+        app.host.registered_function("state_drop.touch").unwrap()(Value::Nil).unwrap();
+        drop(app);
+        // The thread ends here: its states are dropped, Loud panicking.
+    })
+    .join();
+    assert!(ended.is_ok(), "the thread ended, its state's panic caught");
 }

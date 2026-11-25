@@ -185,7 +185,7 @@ Only the app, by name in its `zgx.json` (in development, by path) or in its bund
 
 ### Failures
 
-A panic in a module ends the process: nothing unwinds across an `extern "C"` function. That is what a panic in a host's own function does to most apps now. A module that wants to survive one catches it itself.
+Nothing unwinds across an `extern "C"` function. A panic in a module's function or action is caught on the module's side of the boundary (`zgx_module::__private::guard`, around every call the macros and `Host` register) and fails the call as a returned error would, raised in the script that called; the module stays loaded. One in a module's setup refuses the module (`abi::SETUP_PANICKED`). A line highlighter's (`Host::highlighter`) is caught the same way, and turns it off for its textarea. An async action's rejects its promise with the panic's message (a promise dropped as the start unwinds is kept and settled once the panic is caught). A job's, timer's, observer's or drop's is caught and printed (`guard_quiet`): a repeating timer that panics stops. A state's `Default` that panics ends the process, as there is no state to keep.
 
 ## 3. What a module call costs
 
@@ -338,7 +338,7 @@ Zeron's host goes past functions and state in six places. The target is a generi
 - **Two allocators.** A module frees what it allocates and the runtime what it allocates; values are always the runtime's, so nothing crosses to be freed by the other. A module that wants mimalloc sets it itself.
 - **A module is trusted code.** It runs in the app's process with the app's rights. The sandbox is for scripts and plugins; nothing here extends it to modules, which is why only the app may name one.
 - **Signing.** macOS's hardened runtime loads only libraries signed by the app's team (section 6, step 5). Windows and Linux ask nothing.
-- **A panic is an abort** (section 2).
+- **A panic is caught wherever the runtime calls a module** (section 2), but in a state's `Default`.
 - **The runtime's features are fixed at its build.** An app that needs a feature the published runtime lacks (an audio codec, say) needs another published flavour, or the interim build of section 8.
 - **Open: templates in a bundle.** An app whose people lay their own templates over its interface (Zeron's) runs that interface from a copy with the template applied. A bundle's interface is bytecode, loaded only from the bundle itself, so the copy can't be made from it, and the bundle doesn't carry the sources a template would be laid over. Until it does (sources beside the bytecode, or templates applied at load), an app whose people use templates is built with `zgx build --ui source`, which keeps `ui/` as source and checks its modules alone.
 - **What a bundle checks is what its host reads.** Each file a host reads from the bundle (scripts, and the images, themes and locales it reads through its files) is checked as it is read. A file an app reads itself, with its own Rust (Zeron's template survey, say), isn't: it is the app's data, never run as code, and the app is trusted as its binary is.

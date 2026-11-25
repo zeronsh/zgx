@@ -113,7 +113,7 @@ argument 1 (query) field `limit` must be a whole number from 0 to 4294967295 or 
 
 A function returning `Result<T, E>` fails when it returns `Err`: the error is raised the same way, the function's own message after its name. `E` is `zgx_module::Failed` or anything that becomes one (`String`, `&str`). Say what was wrong with what the script passed, as the end of a sentence: `Err("has no row 12".into())`.
 
-A panic in a module ends the process: nothing unwinds across the boundary. Return an error instead.
+A panic in a module's function or action doesn't end the app: it is caught where the runtime called the module, and raised in the script that called as an error the function returned would be, its message after `panicked:`. The module stays loaded, its state as the panic left it (a `#[state]` borrowed by the call is let go). An async action that panics rejects its promise with the same message. A panic as the module loads (in `register!`'s setup) refuses it: nothing of it is registered, and `load_module` says so. A posted job, a timer, an observer or a drop that panics is caught where the runtime called it and printed, with no script to raise it in: the jobs and timers after it run, a repeating timer that panics stops, and an observer goes on observing. The one panic that still ends the process is a module state's `Default` (`#[state]`, `Host::state`): there is no state to go on with. Return an error instead all the same: a panic is printed as any is, and leaves whatever it was doing half done.
 
 ### Actions
 

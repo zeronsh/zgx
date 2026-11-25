@@ -39,8 +39,13 @@
 //! }
 //! ```
 //!
-//! A panic in a module ends the process, as one in a host's own function
-//! does today: nothing unwinds across the boundary.
+//! A panic in a module's function or action is caught where the runtime
+//! called it, and raised in the script that called as an error the function
+//! returned would be ("panicked: …"); the module stays loaded, and its state
+//! is as the panic left it. One in its setup refuses the module; one in a
+//! job, timer, observer or drop is caught and printed; one in a state's
+//! `Default` ends the process. Nothing unwinds across the boundary. Return an error rather than panic: a panic
+//! still prints, and leaves whatever it was doing half done.
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("zgx-module reads values by their 64-bit layout");
@@ -722,7 +727,8 @@ impl Host<'_> {
             // SAFETY: `user` is the `Option<F>` boxed below, alive until
             // its timer ends; `host` lent for the call.
             if let Some(fire) = unsafe { &mut *(user as *mut Option<F>) }.take() {
-                fire(&Host::lent(host));
+                // (A panic is caught, printed, and the timer done.)
+                __private::guard_quiet(|| fire(&Host::lent(host)));
             }
             0
         }
@@ -736,8 +742,10 @@ impl Host<'_> {
         unsafe extern "C" fn call<F: FnMut(&Host)>(user: *mut c_void, host: *mut c_void) -> u32 {
             // SAFETY: `user` is the `F` boxed below, alive until its timer
             // ends; `host` lent for the call.
-            (unsafe { &mut *(user as *mut F) })(&Host::lent(host));
-            1
+            let fire = unsafe { &mut *(user as *mut F) };
+            // (A panic is caught and printed, and stops the timer: one that
+            // panics once would again each period.)
+            u32::from(__private::guard_quiet(|| fire(&Host::lent(host))))
         }
         let user = Box::into_raw(Box::new(fire));
         // SAFETY: As `after`'s.
@@ -816,12 +824,22 @@ impl Host<'_> {
     /// thread's hosts have their own.
     pub fn state<T: Default + 'static>(&self) -> State<T> {
         unsafe extern "C" fn init<T: Default>(state: *mut u8) {
+            // (A `T::default` that panics leaves nothing to keep: the one
+            // panic that ends the process, said so.)
+            let made = std::panic::catch_unwind(RefCell::<T>::default).unwrap_or_else(|_| {
+                eprintln!(
+                    "zgx-module: a module's state ({}) panicked as it was made: there is no state to go on with",
+                    std::any::type_name::<T>()
+                );
+                std::process::abort()
+            });
             // SAFETY: Room for a `RefCell<T>`, unwritten.
-            unsafe { state.cast::<RefCell<T>>().write(RefCell::default()) }
+            unsafe { state.cast::<RefCell<T>>().write(made) }
         }
         unsafe extern "C" fn free<T>(state: *mut u8) {
-            // SAFETY: What `init` wrote, dropped once.
-            unsafe { state.cast::<RefCell<T>>().drop_in_place() }
+            // SAFETY: What `init` wrote, dropped once (a panic in its drop
+            // caught and printed).
+            __private::guard_quiet(|| unsafe { state.cast::<RefCell<T>>().drop_in_place() });
         }
         // (By this library's own address too: two modules may name a type
         // alike.)
@@ -866,13 +884,15 @@ impl Host<'_> {
         ) -> u32 {
             // SAFETY: `user` is the `F` boxed below, alive until `free`;
             // the first of `args` is lent for this call (there is always
-            // one); `out` takes what it made.
+            // one); `out` takes what it made, or why it failed.
             unsafe {
-                let made = (*(user as *const G))(Ref {
-                    at: args,
-                    _of: PhantomData,
-                });
-                __private::give(out, made)
+                __private::guard(out, || {
+                    let made = (*(user as *const G))(Ref {
+                        at: args,
+                        _of: PhantomData,
+                    });
+                    __private::give(out, made)
+                })
             }
         }
         let user = Box::into_raw(Box::new(function));
@@ -895,13 +915,15 @@ impl Host<'_> {
         ) -> u32 {
             // SAFETY: As `function`'s.
             unsafe {
-                match (*(user as *const G))(Ref {
-                    at: args,
-                    _of: PhantomData,
-                }) {
-                    Ok(made) => __private::give(out, made),
-                    Err(failed) => __private::fail(out, failed),
-                }
+                __private::guard(out, || {
+                    match (*(user as *const G))(Ref {
+                        at: args,
+                        _of: PhantomData,
+                    }) {
+                        Ok(made) => __private::give(out, made),
+                        Err(failed) => __private::fail(out, failed),
+                    }
+                })
             }
         }
         let user = Box::into_raw(Box::new(function));
@@ -919,10 +941,14 @@ impl Host<'_> {
             out: *mut Raw,
         ) -> u32 {
             // SAFETY: `user` is the `F` boxed below, alive until `free`;
-            // `arg` is owned by this call; `out` takes what it made.
+            // `arg` is owned by this call (dropped as a panic unwinds);
+            // `out` takes what it made, or why it failed.
             unsafe {
-                let made = (*(user as *const G))(Value::owned(arg.read()));
-                __private::give(out, made)
+                let arg = Value::owned(arg.read());
+                __private::guard(out, || {
+                    let made = (*(user as *const G))(arg);
+                    __private::give(out, made)
+                })
             }
         }
         let user = Box::into_raw(Box::new(function));
@@ -946,16 +972,18 @@ impl Host<'_> {
         unsafe extern "C" fn call<G: Fn(Ref<'_>)>(
             user: *mut c_void,
             arg: *const Raw,
-            _out: *mut Raw,
+            out: *mut Raw,
         ) -> u32 {
-            // SAFETY: As `function`'s.
+            // SAFETY: As `function`'s; `out` is written only failing.
             unsafe {
-                (*(user as *const G))(Ref {
-                    at: arg,
-                    _of: PhantomData,
+                __private::guard(out, || {
+                    (*(user as *const G))(Ref {
+                        at: arg,
+                        _of: PhantomData,
+                    });
+                    abi::DONE
                 })
             }
-            abi::DONE
         }
         let user = Box::into_raw(Box::new(action));
         // SAFETY: As `function`'s.
@@ -976,13 +1004,15 @@ impl Host<'_> {
         ) -> u32 {
             // SAFETY: As `function`'s; `out` is written only failing.
             unsafe {
-                match (*(user as *const G))(Ref {
-                    at: arg,
-                    _of: PhantomData,
-                }) {
-                    Ok(()) => abi::DONE,
-                    Err(failed) => __private::fail(out, failed),
-                }
+                __private::guard(out, || {
+                    match (*(user as *const G))(Ref {
+                        at: arg,
+                        _of: PhantomData,
+                    }) {
+                        Ok(()) => abi::DONE,
+                        Err(failed) => __private::fail(out, failed),
+                    }
+                })
             }
         }
         let user = Box::into_raw(Box::new(action));
@@ -1053,8 +1083,9 @@ impl Host<'_> {
             promise: *mut c_void,
         ) {
             // SAFETY: `user` is the `F` boxed below, alive until `free`;
-            // `arg` lent for the call; the promise the module's.
-            unsafe {
+            // `arg` lent for the call; the promise the module's (a panic
+            // drops it, which rejects it).
+            __private::guard_async(|| unsafe {
                 (*(user as *const G))(
                     Ref {
                         at: arg,
@@ -1062,7 +1093,7 @@ impl Host<'_> {
                     },
                     Promise::from_raw(promise),
                 )
-            }
+            })
         }
         let user = Box::into_raw(Box::new(action));
         // SAFETY: `call` reads `user` as the `F` it is, and the box's free.
@@ -1176,7 +1207,8 @@ impl Ui {
             // SAFETY: `user` is the `J` boxed below, run once and freed as
             // it runs; `host` lent for the call.
             let job = *unsafe { Box::from_raw(user as *mut J) };
-            job(&Host::lent(host));
+            // (A panic is caught and printed: the jobs after it run.)
+            __private::guard_quiet(|| job(&Host::lent(host)));
         }
         // (A job that captures nothing allocates nothing.)
         let user = Box::into_raw(Box::new(job));
@@ -1349,13 +1381,17 @@ impl Shared {
         ) {
             // SAFETY: `user` is the `F` boxed below, alive until its
             // observer goes; `host` and `value` lent for the call.
-            (unsafe { &mut *(user as *mut F) })(
-                &Host::lent(host),
-                Ref {
-                    at: value,
-                    _of: PhantomData,
-                },
-            );
+            let observe = unsafe { &mut *(user as *mut F) };
+            // (A panic is caught and printed: it observes the next change.)
+            __private::guard_quiet(|| {
+                observe(
+                    &Host::lent(host),
+                    Ref {
+                        at: value,
+                        _of: PhantomData,
+                    },
+                )
+            });
         }
         let user = Box::into_raw(Box::new(observe));
         // SAFETY: A handle, held; `user` and its `free` the box's.
@@ -1426,6 +1462,10 @@ impl<T> Promise<T> {
     pub fn reject(self, _host: &Host, why: impl Into<Failed>) {
         self.settle(false, Value::from(why.into().0));
     }
+    /// Rejects it with `why` as it is.
+    fn reject_now(self, why: Value) {
+        self.settle(false, why);
+    }
     fn settle(self, ok: bool, value: Value) {
         let promise = std::mem::ManuallyDrop::new(self);
         let mut value = std::mem::ManuallyDrop::new(value);
@@ -1448,6 +1488,11 @@ impl<T: IntoValue> Promise<T> {
 }
 impl<T> Drop for Promise<T> {
     fn drop(&mut self) {
+        // Dropped as an async action's start panics: rejected with the
+        // panic's message once it is caught (`__private::guard_async`).
+        if std::thread::panicking() && __private::defer(self.at) {
+            return;
+        }
         // SAFETY: An unsettled promise, let go of once (any thread).
         unsafe { (api().promise_release)(self.at) }
     }
@@ -1480,8 +1525,9 @@ impl Drop for Timer {
 /// What frees a registration's `user` that is a `Box<F>`.
 fn free_box_of<F>(_: *mut F) -> abi::Free {
     unsafe extern "C" fn free<F>(user: *mut c_void) {
-        // SAFETY: The box a registration made, freed once.
-        drop(unsafe { Box::from_raw(user as *mut F) });
+        // SAFETY: The box a registration made, freed once (a panic in a
+        // closure's drop caught and printed).
+        __private::guard_quiet(|| drop(unsafe { Box::from_raw(user as *mut F) }));
     }
     free::<F>
 }
@@ -1632,6 +1678,72 @@ pub mod __private {
         unsafe { give(out, Value::from(failed.0)) };
         abi::FAILED
     }
+    /// `call`, a call of a module's function or action, whose panic is
+    /// caught at the boundary and fails the call (written to `out`), as an
+    /// error it returned would: raised in the script that called, the
+    /// module still loaded.
+    ///
+    /// # Safety
+    /// As `give`'s, while `call` hasn't written it.
+    #[inline(always)]
+    pub unsafe fn guard(out: *mut Raw, call: impl FnOnce() -> u32) -> u32 {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+            Ok(status) => status,
+            // SAFETY: The caller's: a panicking call wrote nothing.
+            Err(panic) => unsafe { fail(out, panicked(&*panic)) },
+        }
+    }
+    thread_local! {
+        /// Inside an async action's start (`guard_async`), how deep: and
+        /// the promises dropped as it unwound, to reject once it is caught.
+        static STARTING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static DROPPED: std::cell::RefCell<Vec<*mut c_void>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    /// `call`, an async action's start, whose panic is caught at the
+    /// boundary: a promise it dropped as it unwound (its own) is rejected
+    /// with the panic's message, as a call's failure is.
+    #[inline(always)]
+    pub fn guard_async(call: impl FnOnce()) {
+        STARTING.with(|s| s.set(s.get() + 1));
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+        STARTING.with(|s| s.set(s.get() - 1));
+        if let Err(panic) = ran {
+            let why = panicked(&*panic);
+            for promise in DROPPED.with_borrow_mut(std::mem::take) {
+                // SAFETY: A promise the runtime handed this start, dropped
+                // unsettled as it unwound, settled here once, on the
+                // interface's thread.
+                unsafe { super::Promise::<Value>::from_raw(promise) }
+                    .reject_now(Value::from(why.0.as_str()));
+            }
+        }
+    }
+    /// Whether a promise dropped as a panic unwinds is kept to reject
+    /// (inside an async action's start, on its thread), not let go.
+    pub(crate) fn defer(promise: *mut c_void) -> bool {
+        STARTING.with(|s| s.get() > 0) && {
+            DROPPED.with_borrow_mut(|d| d.push(promise));
+            true
+        }
+    }
+    /// `call`, a module's job, timer, observer or drop, whose panic is
+    /// caught at the boundary (printed, as any panic is) with no one to
+    /// tell: whether it didn't panic.
+    #[inline(always)]
+    pub fn guard_quiet(call: impl FnOnce()) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).is_ok()
+    }
+    /// What a call that panicked fails with: the panic's message.
+    #[cold]
+    #[inline(never)]
+    pub fn panicked(panic: &(dyn std::any::Any + Send)) -> Failed {
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("(a panic with no message)");
+        Failed(format!("panicked: {message}"))
+    }
     /// A call failing over the argument at `index` (from 0), named `name`,
     /// which isn't a `T`.
     ///
@@ -1719,8 +1831,14 @@ pub unsafe fn enter(
         return abi::REFUSED_ABI;
     }
     API.store(api.cast_mut(), Ordering::Relaxed);
-    setup(&Host::loading(registrar));
-    0
+    // A panic in setup can't cross into the runtime: the module doesn't
+    // load, and what it registered before it is let go.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        setup(&Host::loading(registrar))
+    })) {
+        Ok(()) => 0,
+        Err(_) => abi::SETUP_PANICKED,
+    }
 }
 
 /// A module's entry, written by hand: `setup` is called with the [`Host`]

@@ -469,6 +469,8 @@ pub type Entry = unsafe extern "C" fn(api: *const Api, registrar: *const Registr
 /// The runtime speaks another [`ABI`], or a shorter [`Api`] than this
 /// module needs.
 pub const REFUSED_ABI: u32 = 1;
+/// The module's setup panicked as it loaded: nothing of it is registered.
+pub const SETUP_PANICKED: u32 = 2;
 
 /// What the symbol of a module's manifest begins with, its name following
 /// as [`ENTRY`]'s. A manifest says what the module is called, what it

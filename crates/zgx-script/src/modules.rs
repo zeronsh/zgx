@@ -1785,6 +1785,11 @@ impl ScriptHost {
                     abi::ABI
                 ));
             }
+            abi::SETUP_PANICKED => {
+                return Err(
+                    "its setup panicked as it loaded (the panic's message was printed)".into(),
+                );
+            }
             code => return Err(format!("the module refused to load ({code})")),
         }
         let pending = loading.pending.into_inner();
