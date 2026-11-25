@@ -630,6 +630,25 @@ thread_local! {
     /// with a load. (A count, not a dispatcher's own flag: one more field
     /// in `InputDispatcher` cost every clone and drop of it.)
     static LOCKS_ENGAGED: Cell<u32> = const { Cell::new(0) };
+    /// Input this thread dispatches is a script's, not a person's
+    /// (`untrusted`): it may not lock the pointer, whatever activation a
+    /// person's press left live.
+    static UNTRUSTED: Cell<bool> = const { Cell::new(false) };
+}
+/// Run `dispatch` as a script's input, not a person's (a scripted press,
+/// `ui.press`): no node may lock the pointer in its handlers, whatever
+/// activation a person's press or key left live, as a browser trusts no
+/// synthetic click. It neither grants activation nor uses a person's.
+#[doc(hidden)]
+pub fn untrusted<R>(dispatch: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            UNTRUSTED.set(self.0);
+        }
+    }
+    let _restore = Restore(UNTRUSTED.replace(true));
+    dispatch()
 }
 
 /// A wheel gesture's scroll view (`State::scroll_latch`).
@@ -2060,6 +2079,9 @@ impl InputDispatcher {
             let state = self.state.borrow();
             if state.pointer_lock == Some(node) {
                 return true;
+            }
+            if UNTRUSTED.get() {
+                return false;
             }
             let active = state.gestures != state.settled
                 || state
