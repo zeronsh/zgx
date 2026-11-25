@@ -461,3 +461,16 @@ lands on its own screen. The arithmetic is `platform_impl/macos/placement.rs`,
 which has no AppKit in it. zgx-desktop's `tests/screen_placement.rs` includes
 it and checks screens left, right, above and below of other heights and
 scales on every platform. `tests/window_position` checks the real screens.
+
+## macOS: a quit is asked of the app, and one inside the event handler waits for it
+
+`applicationShouldTerminate:` asks a gate (`set_terminate_gate`,
+`src/platform/macos.rs`): the app may hold a quit (`Terminate::Cancel`), as
+for a save, and exit itself. `applicationWillTerminate:` sends
+`LoopExiting`, which panics inside the event handler (`event_handler.rs`), in
+an AppKit callback: the process aborted when a handler called `terminate:`,
+⌘Q pressed before the menu bar is made among them. There the quit is now
+cancelled and sent again from the run loop once the handler has returned
+(`terminate_after`); a session's end (`Terminate::EndSession`), never
+cancelled, leaves `LoopExiting` out. zgx-desktop's `tests/quit.rs` quits real
+processes each way.

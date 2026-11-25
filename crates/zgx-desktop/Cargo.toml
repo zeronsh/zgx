@@ -168,6 +168,11 @@ zgx-script = { path = "../zgx-script", version = "0.1.10", optional = true }
 name = "menu_services"
 harness = false
 
+# Quits processes of its own, each an app on the main thread.
+[[test]]
+name = "quit"
+harness = false
+
 # `ZGX_OFFSCREEN`, read once: a process of its own.
 [[test]]
 name = "offscreen"

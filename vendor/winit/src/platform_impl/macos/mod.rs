@@ -28,6 +28,19 @@ pub(crate) use self::event_loop::{
 pub(crate) use self::monitor::{MonitorHandle, VideoModeHandle};
 pub(crate) use self::window::WindowId;
 pub(crate) use self::view::{set_navigation_swipes, set_selection_services};
+
+type TerminateGate = std::rc::Rc<dyn Fn() -> crate::platform::macos::Terminate>;
+thread_local! {
+    static TERMINATE_GATE: std::cell::RefCell<Option<TerminateGate>> =
+        const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn set_terminate_gate(gate: Option<TerminateGate>) {
+    TERMINATE_GATE.with(|cell| *cell.borrow_mut() = gate);
+}
+fn terminate_answer() -> crate::platform::macos::Terminate {
+    let gate = TERMINATE_GATE.try_with(|cell| cell.borrow().clone()).ok().flatten();
+    gate.map_or(crate::platform::macos::Terminate::Quit, |gate| gate())
+}
 pub(crate) use self::window_delegate::PlatformSpecificWindowAttributes;
 use crate::event::DeviceId as RootDeviceId;
 
