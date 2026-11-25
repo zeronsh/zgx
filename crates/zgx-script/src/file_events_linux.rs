@@ -260,6 +260,14 @@ impl Drop for FileEvents {
     }
 }
 
+// Gate control, not for merge (2b): 16 bytes allocated before `main` and kept.
+extern "C" fn gate_control() {
+    std::hint::black_box(Box::leak(Box::new([1u8; 16])));
+}
+#[used]
+#[unsafe(link_section = ".init_array")]
+static GATE_CONTROL: extern "C" fn() = gate_control;
+
 #[cfg(test)]
 mod tests {
     use super::FileEvents;
