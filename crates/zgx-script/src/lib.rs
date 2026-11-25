@@ -103,6 +103,7 @@ mod modules {
     pub(crate) fn failure() -> Option<mlua::Error> {
         None
     }
+    pub(crate) fn forget_host(_: &crate::Functions) {}
     pub(crate) fn install(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
         ui.set(
             "module",
@@ -2333,6 +2334,13 @@ struct Inner {
     /// The scripts' `audio`: the host's engine, made at their first call.
     #[cfg(feature = "audio")]
     audio: Rc<audio::AudioHost>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Its modules' tables go with it (`modules::forget_host`).
+        modules::forget_host(&self.functions);
+    }
 }
 
 /// A wake-up for one waiting task: `notify` before or during the wait ends it.
