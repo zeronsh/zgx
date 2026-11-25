@@ -4374,6 +4374,11 @@ declare ui: {
 	-- `ui.module("words").count(text)`. `zgx types` gives each module the
 	-- app's `zgx.json` names its own type here. The app's own scripts only.
 	module: (name: string) -> any,
+	-- A native module's line highlighter (`zgx_module::Host::highlighter`;
+	-- unstable), for a textarea's `highlight`: called with no script between,
+	-- its kinds coloured as `colours` says (`{ keyword = "$accent" }`). The
+	-- app's own scripts only.
+	highlighter: (name: string, colours: { [string]: string }?) -> any,
 	-- Call a host action for its result (`ScriptHost::async_action`; a
 	-- plain action settles at once with nil): a promise of what it returns.
 	call: (name: string, arg: unknown?) -> Promise,

@@ -101,6 +101,14 @@ typedef uint32_t (*zgx_fire)(void *user, void *host);
  * once; the module settles `promise` later (zgx_api.settle) or lets go of it
  * (zgx_api.promise_release), exactly one of the two. */
 typedef void (*zgx_async_action)(void *user, const zgx_value *arg, void *promise);
+/* Where a line highlighter hands each span: bytes from 1, both ends in,
+ * and its kind's number. */
+typedef void (*zgx_push)(void *sink, uint32_t from, uint32_t to, uint32_t kind);
+/* A line highlighter (zgx_registrar.highlighter; unstable): `line`'s spans,
+ * each to `push` with `sink`, from what the line before left (0: nothing
+ * open); returns what this line leaves. */
+typedef uint32_t (*zgx_highlight)(void *user, const uint8_t *line, size_t len, uint32_t state,
+                                  void *sink, zgx_push push);
 /* A shared state's observer (zgx_api.shared_observe): `value` is what it
  * holds now, lent; `host` the state's host handle, lent. */
 typedef void (*zgx_observe)(void *user, void *host, const zgx_value *value);
@@ -285,6 +293,11 @@ typedef struct zgx_registrar {
     /* Registers an async action scripts call with `ui.call(name, arg)`. */
     void (*async_action)(void *host, const uint8_t *name, size_t len, zgx_async_action call,
                          void *user, zgx_free free);
+    /* Registers a line highlighter a textarea calls itself
+     * (`ui.highlighter(name, colours)`), its spans' kinds named by `kinds`,
+     * `count` of them. Unstable: present where `size` reaches it. */
+    void (*highlighter)(void *host, const uint8_t *name, size_t len, const zgx_bytes *kinds,
+                        size_t count, zgx_highlight call, void *user, zgx_free free);
 } zgx_registrar;
 
 /* A module's entry, called once per host it is loaded into. Returns 0, or

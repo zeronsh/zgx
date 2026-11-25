@@ -198,6 +198,12 @@ path = "tests/native_modules.rs"
 required-features = ["modules"]
 
 [[test]]
+# Its own binary: a module linked in, with the `modules` feature.
+name = "native_highlighter"
+path = "tests/native_highlighter.rs"
+required-features = ["modules"]
+
+[[test]]
 name = "luau_pages"
 path = "tests/luau_pages.rs"
 
