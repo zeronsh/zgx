@@ -5499,6 +5499,8 @@ impl ScriptHost {
         // (A VM whose scripts call no module makes no `ui.module`: one
         // closure fewer for every VM to hold and its collector to walk.)
         lazy.ui(&["module"], modules::install);
+        // CONTROL (#2508's gate, not to merge): one unused key of the name's length.
+        lazy.ui(&["xighlighter"], |_, ui| ui.set("xighlighter", true));
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
         let webs = self.0.webs.clone();
