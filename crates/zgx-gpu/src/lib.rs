@@ -644,10 +644,128 @@ impl Interior {
             bounds.x >= band[0] && bounds.y >= band[1] && x1 <= band[2] && y1 <= band[3]
         })
     }
+    /// The larger part of `rect` in one of its bands, inward to whole device
+    /// pixels, if it has `PANEL_INTERIOR` at least (`split_fill`).
+    fn center(&self, rect: Rect, scale: f32) -> Option<Rect> {
+        let (x1, y1) = (rect.x + rect.width, rect.y + rect.height);
+        self.0
+            .iter()
+            .filter_map(|band| {
+                let left = (rect.x.max(band[0]) * scale).ceil() / scale;
+                let top = (rect.y.max(band[1]) * scale).ceil() / scale;
+                let right = (x1.min(band[2]) * scale).floor() / scale;
+                let bottom = (y1.min(band[3]) * scale).floor() / scale;
+                let (width, height) = (right - left, bottom - top);
+                (width > 0. && height > 0. && width * height >= PANEL_INTERIOR)
+                    .then(|| Rect::new(left, top, width, height))
+            })
+            .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+    }
+}
+/// Whether `quad` fills its rectangle with one colour, and nothing else: no
+/// texture, corners, border, shadow, fade or transform (a `NodeKind::Rect`,
+/// or a panel's interior, `push_panel`). Drawn in pieces on whole device
+/// pixels, it covers the same pixels the same way.
+#[inline(always)]
+fn flat_fill(quad: &Quad) -> bool {
+    quad.options == [0.; 4]
+        && quad.shape == [0.; 4]
+        && quad.border == [0.; 4]
+        && quad.mask == NO_MASK
+        && quad.rect == quad.fade
+        && quad.rect[2] > 0.
+        && quad.rect[3] > 0.
+}
+/// Flat fill `quad` (`flat_fill`) reaching past its region's interior (a
+/// page's background to its rounded card's corners) in pieces: `center`, the
+/// part inside it, drawn without the region, so with the basic shader
+/// (`shading`) rather than the full one with the region at every pixel; and
+/// the bands around it, of the quad's own edges, in the region. Seams lie on
+/// whole device pixels (`Interior::center`). How many pieces it made.
+#[cold]
+#[inline(never)]
+fn split_fill(quads: &mut Vec<Quad>, at: usize, center: Rect, region: f32) -> usize {
+    let quad = quads[at];
+    let mut masked = quad;
+    masked.mask[0] = region;
+    let [x, y, width, height] = quad.rect;
+    let (right, bottom) = (x + width, y + height);
+    let (c_right, c_bottom) = (center.x + center.width, center.y + center.height);
+    let mut pieces = [quad; 5];
+    let mut count = 0;
+    for rect in [
+        [x, y, width, center.y - y],
+        [x, c_bottom, width, bottom - c_bottom],
+        [x, center.y, center.x - x, center.height],
+        [c_right, center.y, right - c_right, center.height],
+    ] {
+        if rect[2] > 0. && rect[3] > 0. {
+            pieces[count] = Quad {
+                rect,
+                fade: rect,
+                ..masked
+            };
+            count += 1;
+        }
+    }
+    let rect = [center.x, center.y, center.width, center.height];
+    pieces[count] = Quad {
+        rect,
+        fade: rect,
+        ..quad
+    };
+    count += 1;
+    quads.splice(at..=at, pieces[..count].iter().copied());
+    count
+}
+/// A box's draws (its quads from `start`, marked partly inside `region`'s
+/// interior by `mark_region`), its flat fills (`flat_fill`) in pieces
+/// (`split_fill`). Out of line, and the box's last step: an item in no region,
+/// or wholly inside one, pays nothing for it, nor for quads it may have added.
+#[cold]
+#[inline(never)]
+fn push_split_fills(
+    (draws, quads): (&mut Vec<Draw>, &mut Vec<Quad>),
+    (interiors, region): (&[Option<Interior>], f32),
+    start: u32,
+    (clip, bounds): (Rect, Rect),
+    polylines: bool,
+    scale: f32,
+) {
+    if let Some(Some(interior)) = interiors.get(region as usize - 1).copied() {
+        let mut at = start as usize;
+        while at < quads.len() {
+            let mut quad = quads[at];
+            // Marked in the region (`mask.x`): as it was before, for the pieces.
+            if quad.mask == [region, 0., 0., 0.] {
+                quad.mask = NO_MASK;
+                if flat_fill(&quad)
+                    && let Some(center) = interior.center(quad_rect(&quad), scale)
+                {
+                    quads[at] = quad;
+                    at += split_fill(quads, at, center, region);
+                    continue;
+                }
+            }
+            at += 1;
+        }
+    }
+    let draw = Draw {
+        shading: Shading::Full,
+        blur: None,
+        start,
+        end: quads.len() as u32,
+        clip,
+        bounds,
+        source: TextureSource::Atlas,
+    };
+    push_draw(draws, quads, draw, true, polylines, scale, None);
 }
 /// Marks `quads` as drawn in clip region `region` (`mask.x`), or without it
 /// where it changes none of their pixels (its index in `mask.w`): not in
-/// perspective, which `quad_rect` bounds only in part, nor blurred.
+/// perspective, which `quad_rect` bounds only in part, nor blurred. Whether
+/// each was marked by its own rectangle, the item lying partly inside: its
+/// flat fills may go in pieces (`push_split_fills`).
 #[inline(always)]
 fn mark_region(
     interiors: &mut Vec<Option<Interior>>,
@@ -657,7 +775,7 @@ fn mark_region(
     bounds: Rect,
     blurred: bool,
     scale: f32,
-) {
+) -> bool {
     let at = region as usize - 1;
     if interiors.len() <= at {
         interiors.resize(at + 1, None);
@@ -683,7 +801,9 @@ fn mark_region(
             };
             quad.mask[lane] = region;
         }
+        return true;
     }
+    false
 }
 /// `item`'s region's index (`region_index`). Under two fades (a faded label
 /// in a faded scroll) the outer one is a record of its own, which the
@@ -11849,9 +11969,32 @@ impl GpuRenderer {
                         let blurred = item.effects.blur_radius > 0.;
                         let item_quads = &mut quads[start as usize..];
                         let interiors = &mut self.region_interiors;
-                        mark_region(
+                        let partly = mark_region(
                             interiors, &clips, region, item_quads, drawn, blurred, self.scale,
                         );
+                        // A box with a flat fill past its region's interior
+                        // is drawn apart, its fill in pieces: nothing it does
+                        // comes back here, where every other item goes on as
+                        // if there were none. (Not a shader's fill.)
+                        if partly
+                            && self.split_shading
+                            && fill_shading.is_none()
+                            && canvas_image.is_none()
+                            && matches!(
+                                item.kind,
+                                NodeKind::Rect(_) | NodeKind::Quad(_) | NodeKind::Panel { .. }
+                            )
+                        {
+                            push_split_fills(
+                                (&mut draws, &mut quads),
+                                (&interiors[..], region),
+                                start,
+                                (draw_clip, drawn),
+                                polylines,
+                                self.scale,
+                            );
+                            continue;
+                        }
                     }
                     let draw = Draw {
                         shading: fill_shading.unwrap_or(Shading::Full),
