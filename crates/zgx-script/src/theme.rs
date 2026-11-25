@@ -318,11 +318,11 @@ pub(crate) fn install(
                 declared.extend(inputs(key, value).map_err(fail)?);
             }
             let themes = themes(lua)?;
-            off_clock(lua, || {
-                for (name, input) in declared {
-                    themes.declare(token(&name), input);
-                }
-            });
+            // At once: each declared alone would evaluate every token there is.
+            let declared = declared
+                .into_iter()
+                .map(|(name, input)| (token(&name), input));
+            off_clock(lua, || themes.declare_inputs(declared));
             Ok(())
         })?,
     )?;

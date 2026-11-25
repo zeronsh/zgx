@@ -106,6 +106,47 @@ fn app_tokens_and_luau_themes() {
     );
 }
 
+/// A call that declares many tokens evaluates them once; one that can't read
+/// them all declares none; and they stay through a reload and a theme's swap.
+#[test]
+fn a_call_declares_its_tokens_at_once() {
+    let mut h = Harness::inline(
+        r##"local declare = function(value)
+            ui.theme.tokens {
+                many = { a = value, b = "{many.a}", c = { deep = "{many.b}" } },
+                ["many.d"] = value, ["many.f"] = value,
+                ["many.e"] = "{many.late}", ["many.late"] = "#050505",
+            }
+        end
+        declare("#010101")
+        local ok = pcall(ui.theme.tokens, { ["half.first"] = "#ffffff", ["half.second"] = true })
+        return ui.column {
+            ui.div { id = "deep", w = 10, h = 10, bg = "$many.c.deep" },
+            ui.div { id = "late", w = 10, h = 10, bg = "$many.e" },
+            ui.text { tostring(ok) .. " " .. tostring(ui.theme.get("half.first")), id = "half" },
+            ui.button { id = "more", w = 20, h = 20, on_click = function() declare("#020202") end },
+            ui.button { id = "light", w = 20, h = 20, on_click = function() ui.theme.set("zgx-light") end },
+        }"##,
+    );
+    assert_eq!(h.fill("deep"), Color(1, 1, 1, 255));
+    assert_eq!(h.fill("late"), Color(5, 5, 5, 255));
+    assert_eq!(h.text("half"), "false nil", "nothing of a call that fails");
+    let before = h.ui.theme().revision();
+    h.click("more");
+    assert_eq!(
+        h.ui.theme().revision() - before,
+        1,
+        "three declared otherwise, and evaluated once"
+    );
+    assert_eq!(h.fill("deep"), Color(2, 2, 2, 255));
+    h.click("light");
+    assert_eq!(h.fill("deep"), Color(2, 2, 2, 255));
+    h.host.reload().unwrap();
+    h.settle();
+    assert_eq!(h.fill("deep"), Color(1, 1, 1, 255), "as it declares them");
+    assert_eq!(h.fill("late"), Color(5, 5, 5, 255));
+}
+
 #[test]
 fn ui_tokens_name_every_token_as_fields() {
     let mut h = Harness::inline(
