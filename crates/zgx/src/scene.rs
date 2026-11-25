@@ -2669,6 +2669,29 @@ impl Constraints {
     }
 }
 type ChildPlacement = (NodeId, Rect, Constraints);
+#[cfg(debug_assertions)]
+thread_local! {
+    static MEASURED_AGAIN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PLACEMENTS_REUSED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// How many times, so far on this thread, a container was measured again in
+/// the layout pass that had measured it, and how many times one measured for
+/// the first time took a freed container's placements: a test's measure of
+/// its reach. Debug builds count; a release build says 0.
+#[doc(hidden)]
+pub fn containers_remeasured_and_reused() -> (u64, u64) {
+    #[cfg(debug_assertions)]
+    return (
+        MEASURED_AGAIN.with(std::cell::Cell::get),
+        PLACEMENTS_REUSED.with(std::cell::Cell::get),
+    );
+    #[cfg(not(debug_assertions))]
+    (0, 0)
+}
+/// Child placements kept from freed nodes, at most.
+const RECYCLED: usize = 64;
+/// The most room placements kept from a freed node may have.
+const RECYCLED_CAPACITY: usize = 16;
 /// `Scene::hit_test_all`'s last answer: its point's bits and the revisions
 /// it was found at (`geometry_revision`, `content_revision`), and its hits.
 struct HitMemo {
@@ -3589,6 +3612,10 @@ pub struct Scene {
     measure_depth: u32,
     /// Measures' working sets, one per level deep (`Scratch`).
     scratch: Vec<Scratch>,
+    /// Child placements of nodes freed, cleared, for nodes measured after
+    /// them: a scrolled list's rows mount as others go, and take theirs
+    /// rather than allocate (`recycle`, at most `RECYCLED`).
+    recycled_placements: Vec<Vec<ChildPlacement>>,
     content_revision: u64,
     /// The deepest stack and the item count of the last paint walk
     /// (`layer_items_within`), a whole one's and a damaged one's apart: the
@@ -3943,6 +3970,7 @@ impl Scene {
             layout_pass: 0,
             measure_depth: 0,
             scratch: Vec::new(),
+            recycled_placements: Vec::new(),
             content_revision: 0,
             walk_hints: Default::default(),
             layout_roots: Vec::new(),
@@ -8799,10 +8827,11 @@ impl Scene {
     pub(crate) fn free_dead(&mut self, id: NodeId) {
         let slot = &mut self.slots[id.index as usize];
         assert!(slot.dead, "freeing a node that was not removed");
-        let node = slot.node.take().unwrap();
+        let mut node = slot.node.take().unwrap();
         slot.dead = false;
         self.dead -= 1;
         self.forget(id, &node);
+        self.recycle(&mut node);
         self.free.push(id.index);
     }
     /// What the scene keeps about `node`, gone, but in the lists `kill`
@@ -8870,13 +8899,43 @@ impl Scene {
             .set(self.filtered.get() - usize::from(node.filtered()));
         self.promoted_count -= usize::from(node.promoted);
     }
+    /// Keep a freed node's child placements, cleared, for a node measured
+    /// next (`recycled_placements`): small ones only, a few dozen.
+    #[inline(never)]
+    fn recycle(&mut self, node: &mut Node) {
+        if let Some(measurement) = &mut node.measurement {
+            let placements = std::mem::take(&mut measurement.children);
+            if (1..=RECYCLED_CAPACITY).contains(&placements.capacity())
+                && self.recycled_placements.len() < RECYCLED
+            {
+                let mut placements = placements;
+                placements.clear();
+                self.recycled_placements.push(placements);
+            }
+        }
+    }
+    /// Child placements for container `id`, measured for the first time: a
+    /// freed node's (`recycle`), if one is kept and it has children, its room
+    /// grown as before.
+    #[cold]
+    #[inline(never)]
+    fn take_recycled_placements(&mut self, id: NodeId) -> Vec<ChildPlacement> {
+        if self.children_raw(self.tree_node(id)).is_empty() {
+            return Vec::new();
+        }
+        #[cfg(debug_assertions)]
+        if !self.recycled_placements.is_empty() {
+            PLACEMENTS_REUSED.with(|count| count.set(count.get() + 1));
+        }
+        self.recycled_placements.pop().unwrap_or_default()
+    }
     fn free_subtree(&mut self, id: NodeId) {
         // Only remove_as enters this walk. It either materialized first or
         // left tombstones in id's parent, outside the freed subtree.
         debug_assert!(
             self.pending_children.get() == u32::MAX || self.pending_children.get() != id.index
         );
-        let node = self.slots[id.index as usize].node.take().unwrap();
+        let mut node = self.slots[id.index as usize].node.take().unwrap();
         self.forget(id, &node);
         if node.effects.blur_radius > 0.0 {
             self.blur_nodes.retain(|entry| *entry != id);
@@ -8890,9 +8949,12 @@ impl Scene {
         if node.style.fade_overflow {
             self.overflow_fades.retain(|(entry, _)| *entry != id);
         }
-        for child in node.head.children.into_inner() {
+        let children = std::mem::take(node.head.children.get_mut());
+        for &child in &children {
             crate::deep(0, || self.free_subtree(child));
         }
+        *node.head.children.get_mut() = children;
+        self.recycle(&mut node);
         self.slots[id.index as usize].generation = self.slots[id.index as usize]
             .generation
             .checked_add(1)
@@ -13760,10 +13822,19 @@ impl Scene {
         let pass = self.layout_pass;
         let node = self.tree_node_mut(id);
         let stale = node.dirty & LAYOUT != 0;
+        #[cfg(debug_assertions)]
+        if layout.is_some() && node.measurement.as_ref().is_some_and(|m| m.pass == pass) {
+            MEASURED_AGAIN.with(|count| count.set(count.get() + 1));
+        }
         let mut children = match &mut node.measurement {
             Some(last) if layout.is_some() && stale && last.pass != pass => {
                 std::mem::take(&mut last.children)
             }
+            // Measured for the first time: a freed node's, if one is kept.
+            None if layout.is_some() => match self.recycled_placements.is_empty() {
+                true => Vec::new(),
+                false => self.take_recycled_placements(id),
+            },
             _ => Vec::new(),
         };
         children.clear();
@@ -16150,6 +16221,8 @@ impl Scene {
         // slots above it free to go at the next rest.
         self.free.sort_unstable_by(|a, b| b.cmp(a));
         self.free.shrink_to_fit();
+        // Kept for what mounts as a list scrolls: at rest, nothing does.
+        self.recycled_placements = Vec::new();
     }
     /// Let `id`'s translation (a spring's, a tween's, a drag's) rest on
     /// whole device pixels, as scroll content's does (`set_pixel_scale`),
