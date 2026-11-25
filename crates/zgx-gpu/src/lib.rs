@@ -24887,3 +24887,25 @@ mod pixel_region_tests {
         assert_eq!(pixel_region(rect(-50., 0., 40., 40.), 2.).2, 0);
     }
 }
+
+#[cfg(all(test, target_os = "macos", zgx_wgpu_hal_patched))]
+mod queue_rest_tests {
+    /// A window at rest lets Metal's queue go: what it draws with next is
+    /// another queue (the first held here, so its address isn't taken again).
+    #[test]
+    fn a_rested_renderers_queue_is_another() {
+        let mut gpu = crate::GpuRenderer::new(16, 16).expect("a renderer");
+        let raw = |gpu: &crate::GpuRenderer| {
+            // SAFETY: The queue's handle is kept, nothing is done with it.
+            unsafe { gpu.queue.as_hal::<wgpu::hal::api::Metal>() }
+                .expect("Metal's queue")
+                .as_raw()
+        };
+        let before = raw(&gpu);
+        let same = raw(&gpu);
+        assert!(std::ptr::eq(&*before, &*same), "unrested, the same queue");
+        gpu.rest_queue();
+        let after = raw(&gpu);
+        assert!(!std::ptr::eq(&*before, &*after), "rested, another queue");
+    }
+}

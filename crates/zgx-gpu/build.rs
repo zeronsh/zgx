@@ -2,6 +2,8 @@
 //! its `links` metadata): on Windows, the preferred Direct3D 12 adapter is
 //! exposed without opening a device on every other one, which that wgpu-hal
 //! adds and crates.io's does not (wgpu's `request_adapter` then ranks them).
+//! On Linux and macOS it gates partial presents and Metal's queue rested. Cargo
+//! gives the metadata only to a crate depending on wgpu-hal itself.
 //!
 //! `own_surfaces` where a window can present through surfaces of the
 //! renderer's own, which keep what they held (`LayerPresent`): macOS
