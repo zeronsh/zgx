@@ -299,6 +299,8 @@ return ui.column { w_full = true, h_full = true,
     assert!(error.contains("did not settle"), "{error:?}");
     let first = h.find("first");
     assert!(first.is_some() && h.ui.input.focused() == first);
+    // Still waiting: nothing runs it while the layout is held.
+    assert_eq!(h.text("y"), "0", "revealed while the layout was held");
     let (offset, at) = (h.text("y"), h.bounds("first"));
     h.ui.scene.borrow_mut().flush();
     for frame in 0..5 {
