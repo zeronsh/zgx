@@ -260,6 +260,10 @@ impl Drop for FileEvents {
     }
 }
 
+// Gate control, not for merge (2a): a string no code reads, kept in the binary.
+#[used]
+static GATE_CONTROL: [u8; 49] = *b"gate control: a constant that only moves the rest";
+
 #[cfg(test)]
 mod tests {
     use super::FileEvents;
