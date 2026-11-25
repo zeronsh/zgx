@@ -728,6 +728,11 @@ impl Runtime {
     pub fn deferring(&self) -> bool {
         self.inner.batch_depth.get() != 0 || self.inner.flushing.get()
     }
+    /// Whether effects are running: some queued ones may still hold what a
+    /// subtree that just mounted looks like.
+    pub(crate) fn flushing(&self) -> bool {
+        self.inner.flushing.get()
+    }
     /// Defers effects until the outermost batch finishes; mutations remain visible.
     pub fn batch<R>(&self, f: impl FnOnce() -> R) -> R {
         self.inner.batch_depth.set(self.inner.batch_depth.get() + 1);

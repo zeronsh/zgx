@@ -182,3 +182,84 @@ fn a_controlled_open_hears_its_close_once() {
     h.frames(3);
     assert_eq!(h.text("closed"), "closed=1");
 }
+
+/// What a ref in a modal's 250-wide `ui.scroll` reads as its width while the
+/// modal opens, its first focusable control in the scroll with the ref
+/// (`in_scroll`), or before it (nothing to reveal then).
+fn scroll_widths(in_scroll: bool) -> String {
+    let (before, inside) = match in_scroll {
+        true => (
+            "",
+            "ui.div { id = \"first\", focusable = true, w = 10, h = 10 }",
+        ),
+        false => (
+            "ui.div { id = \"first\", focusable = true, w = 10, h = 10 },",
+            "ui.div { w = 10, h = 10 }",
+        ),
+    };
+    let app = r##"
+local widths = ui.state("widths", "")
+local open = ui.state("open", false)
+local function content(): any
+    local r = ui.ref()
+    ui.effect(function() widths:set(`{widths:peek()} {r.width}`) end)
+    return ui.column { ref = r, w_full = true, INSIDE }
+end
+return ui.column { w_full = true, h_full = true,
+    ui.button { id = "opener", label = "Open", on_click = function() open:set(true) end },
+    ui.text { id = "widths", function() return widths:get() end },
+    ui.modal { open = open, label = "m", w = 300, p = 0, build = function()
+        return ui.column { w_full = true, BEFORE ui.scroll { w = 250, h = 100, content() } }
+    end },
+}
+"##
+    .replace("INSIDE", inside)
+    .replace("BEFORE", before);
+    let mut h = Harness::inline(&app);
+    h.frames(3);
+    h.click("opener");
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    let first = h.find("first");
+    assert!(first.is_some(), "the modal opened");
+    assert_eq!(h.ui.input.focused(), first);
+    h.text("widths")
+}
+
+/// A modal's first control in a `ui.scroll` with its own `w`: a ref in it
+/// never reads a scroll view's default width (320) on the way, and reads just
+/// what it does with the control outside the scroll.
+#[test]
+fn a_scroll_in_an_opening_modal_is_never_its_default_width() {
+    let widths = scroll_widths(true);
+    assert!(
+        !widths.contains("320") && widths.ends_with(" 250"),
+        "{widths}"
+    );
+    assert_eq!(widths, scroll_widths(false));
+}
+
+/// Its first control below the fold is shown as the modal opens.
+#[test]
+fn a_first_control_below_the_fold_shows_as_the_modal_opens() {
+    let mut h = Harness::inline(
+        r##"
+local open = ui.state("open", false)
+local y = ui.state("y", 0)
+return ui.column { w_full = true, h_full = true,
+    ui.button { id = "opener", label = "Open", on_click = function() open:set(true) end },
+    ui.text { id = "y", function() return `{y:get()}` end },
+    ui.modal { open = open, label = "m", w = 300, p = 0, build = function()
+        return ui.column { w_full = true, ui.scroll { w = 250, h = 100, offset = y,
+            ui.column { w_full = true, ui.div { h = 300 }, ui.div { id = "first", focusable = true, w = 10, h = 10 } } } }
+    end },
+}
+"##,
+    );
+    h.frames(3);
+    h.click("opener");
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    assert!(h.find("first").is_some(), "the modal opened");
+    assert_eq!(h.text("y"), "210");
+}
