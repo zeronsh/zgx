@@ -153,6 +153,7 @@ mod node;
 mod opens;
 mod paged;
 mod persist;
+mod real_paths;
 mod reloads;
 mod reorder;
 mod router;
@@ -1694,6 +1695,8 @@ fn require_module<const LENDING: bool>(
     lua: &Lua,
     name: String,
 ) -> mlua::Result<mlua::Value> {
+    // (As `within` has it, each folder followed once a load.)
+    use real_paths::within;
     let Require {
         host,
         modules,
@@ -4959,6 +4962,8 @@ impl ScriptHost {
         // What `compile_ahead` compiled goes as this load ends, and what a
         // bundle's files read ahead.
         let _ahead = sources::ReleaseAhead;
+        // Where its folders really are, asked once for the files in each.
+        let _real = real_paths::Load::begin();
         let _read = checked_files::ReleaseRead(match &*self.0.files.borrow() {
             Files::Folder(checked, _) => Some(checked.clone()),
             _ => None,
