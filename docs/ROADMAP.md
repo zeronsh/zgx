@@ -504,3 +504,5 @@ now execute successfully; resource sampling and final quality evidence must be
 associated with their actual source/binary identities. The pending native checks
 listed above prevent a completion claim. Automated suite counts and model-update
 logs do not close those gates.
+
+<!-- gate control A/A: no code; not for merge -->
