@@ -8533,6 +8533,94 @@ pub(crate) fn reveal_in_list(
         ui.prepare_frame();
     }
 }
+/// What a scroll view reveals focus in it with (`mount_scroll`).
+struct ScrollReveal {
+    root: NodeId,
+    viewport: NodeId,
+    content: NodeId,
+    horizontal: bool,
+    offset: Signal<f32>,
+    extent: Signal<(f32, f32)>,
+    size: Signal<(f32, f32)>,
+}
+impl ScrollReveal {
+    /// Moves the view the least that shows focused `target`.
+    ///
+    /// Focused while effects run, with layout to do (a modal's first control,
+    /// as the effect that opens it mounts it), after the next layout: the
+    /// effects still to run hold styles of what just mounted, this view's own
+    /// among them, so laid out now it showed its content the size a scroll
+    /// view has by default (320 wide, whatever its `w`), which observers
+    /// heard and animated from.
+    #[cold]
+    #[inline(never)]
+    fn reveal(self, ui: &Ui, target: NodeId) {
+        if ui.runtime.flushing() && ui.scene.borrow().layout_stale() {
+            self.when_settled(ui, target, None);
+            return;
+        }
+        // Direct focus calls need the same settled allocation as native input.
+        // World bounds include transforms immediately, so an outer scroller
+        // observes the translation applied by an inner bubbling handler.
+        ui.prepare_frame();
+        self.move_to(ui, target);
+    }
+    /// `move_to` once a layout pass has changed nothing since the one at
+    /// `seen`: after-layout work runs in the first pass too, where a viewport
+    /// still has the size its binding gives it in the next. (The preparation's
+    /// own limit on passes bounds it.)
+    fn when_settled(self, ui: &Ui, target: NodeId, seen: Option<u64>) {
+        let weak = ui.downgrade();
+        ui.after_layout(Box::new(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let revision = ui.scene.borrow().layout_revision();
+            match seen == Some(revision) && !ui.scene.borrow().layout_stale() {
+                true => self.move_to(&ui, target),
+                false => self.when_settled(&ui, target, Some(revision)),
+            }
+        }));
+    }
+    /// `reveal`, laid out.
+    fn move_to(&self, ui: &Ui, target: NodeId) {
+        // A target handler may redirect focus before this event bubbles.
+        if ui.input.focused() != Some(target) || !ui.scene.borrow().contains(self.root) {
+            return;
+        }
+        let Some(movement) = focus_movement(ui, target, self.viewport, self.horizontal) else {
+            return;
+        };
+        let along = |size: (f32, f32)| if self.horizontal { size.0 } else { size.1 };
+        let rtl_of = |scene: &crate::scene::Scene| {
+            self.horizontal && scene.direction(self.root) == crate::scene::Direction::Rtl
+        };
+        let limit = (along(self.extent.get()) as f64 - along(self.size.get()) as f64).max(0.);
+        let rtl = rtl_of(&ui.scene.borrow());
+        let movement = if rtl { -movement } else { movement };
+        let position = (self.offset.get() as f64 + movement).clamp(0., limit) as f32;
+        self.offset.set(position);
+        // A surrounding reactive batch can defer the geometry binding.
+        // Publish this translation now for the next ancestor's focus handler.
+        let mut scene = ui.scene.borrow_mut();
+        if scene.contains(self.content) && ui.input.focused() == Some(target) {
+            let rtl = rtl_of(&scene);
+            let offset = self.offset.get();
+            let translation = match (self.horizontal, rtl) {
+                (true, true) => (offset, 0.),
+                (true, false) => (-offset, 0.),
+                (false, _) => (0., -offset),
+            };
+            scene.set_transform(
+                self.content,
+                crate::scene::Transform {
+                    x: translation.0,
+                    y: translation.1,
+                },
+            );
+        }
+    }
+}
 /// A scroll view's own say, from its opening to `mount_scroll`.
 struct ScrollOpen {
     offset: Signal<f32>,
@@ -8643,30 +8731,19 @@ fn mount_scroll(
             if !ui.input.focus_scrolls() {
                 return;
             }
-            // Direct focus calls need the same settled allocation as native input.
-            // World bounds include transforms immediately, so an outer scroller
-            // observes the translation applied by an inner bubbling handler.
-            ui.prepare_frame();
-            // A target handler may redirect focus before this event bubbles.
-            if ui.input.focused() != Some(cx.target) {
-                return;
-            }
-            let Some(movement) = focus_movement(&ui, cx.target, viewport, horizontal) else {
-                return;
-            };
-            let limit =
-                (main_size(wheel_extent.get()) as f64 - main_size(wheel_size.get()) as f64).max(0.);
-            let rtl = rtl_of(&ui.scene.borrow());
-            let movement = if rtl { -movement } else { movement };
-            let position = (wheel_offset.get() as f64 + movement).clamp(0., limit) as f32;
-            wheel_offset.set(position);
-            // A surrounding reactive batch can defer the geometry binding.
-            // Publish this translation now for the next ancestor's focus handler.
-            let mut scene = ui.scene.borrow_mut();
-            if scene.contains(content) && ui.input.focused() == Some(cx.target) {
-                let rtl = rtl_of(&scene);
-                scene.set_transform(content, translation(wheel_offset.get(), rtl));
-            }
+            let (target, reveal) = (
+                cx.target,
+                ScrollReveal {
+                    root,
+                    viewport,
+                    content,
+                    horizontal,
+                    offset: wheel_offset.clone(),
+                    extent: wheel_extent.clone(),
+                    size: wheel_size.clone(),
+                },
+            );
+            reveal.reveal(&ui, target);
         }
         if let InputEvent::Scroll {
             x,

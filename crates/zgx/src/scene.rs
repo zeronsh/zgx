@@ -15814,6 +15814,12 @@ impl Scene {
     pub(crate) fn layout_passes(&self) -> u64 {
         self.layout_pass
     }
+    /// Whether `prepare_layout` has any layout to do.
+    pub(crate) fn layout_stale(&self) -> bool {
+        self.node(self.root).dirty & LAYOUT != 0
+            || !self.layout_roots.is_empty()
+            || self.alone_pending
+    }
     /// Updates geometry for hit testing without consuming pending paint damage.
     /// The next `flush` reports this work and all damage accumulated by layout.
     #[inline(never)]

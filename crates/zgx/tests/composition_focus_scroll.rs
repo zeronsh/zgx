@@ -195,3 +195,79 @@ fn focus_keeps_the_scroll_padding_clear() {
     assert_eq!(ui.input.focused(), view.find("1"));
     assert_eq!(offset.get(), 20.);
 }
+
+/// A modal's first control, in a scroll view sized by its own `w`, focused by
+/// the effect that opens it: the view's content is never laid out at a scroll
+/// view's default size, which its observers would hear (`320`, then `400`).
+#[test]
+fn focus_as_a_modal_opens_lays_its_scroll_out_at_its_own_size() {
+    use std::{cell::RefCell, rc::Rc};
+    let mut ui = Ui::new(1200., 800.);
+    let open = ui.signal(false);
+    let widths: Rc<RefCell<Vec<f32>>> = Rc::default();
+    let listening = Rc::new(RefCell::new(Vec::new()));
+    let (shown, said, runtime) = (open.clone(), widths.clone(), ui.runtime.clone());
+    ui.mount(modal("m", open.clone()).w(460.).p(0.).child(switch_or_none(
+        move || shown.get(),
+        move |shown, _| {
+            let (said, runtime, keep) = (said.clone(), runtime.clone(), listening.clone());
+            shown.then(|| {
+                column().w_full().child(
+                    scroll(runtime.signal(0.)).w(400.).h(100.).child(
+                        column()
+                            .w_full()
+                            .on_mount(move |handle| {
+                                let size = handle.observe_size().expect("size");
+                                let said = said.clone();
+                                keep.borrow_mut().push(runtime.effect(move || {
+                                    said.borrow_mut().push(size.get().0);
+                                }));
+                            })
+                            .child(button().w(10.).h(10.).id("first")),
+                    ),
+                )
+            })
+        },
+    )));
+    ui.prepare_frame();
+    open.set(true);
+    ui.prepare_frame();
+    assert!(ui.input.focused().is_some(), "the control took focus");
+    let widths = widths.borrow();
+    assert!(!widths.contains(&320.), "{widths:?}");
+    assert_eq!(widths.last(), Some(&400.), "{widths:?}");
+}
+
+/// The same, its first control below the fold: shown by the frame that opens
+/// the modal, in a scroll view within a scroll view.
+#[test]
+fn focus_as_a_modal_opens_is_revealed_through_nested_scrolls() {
+    let mut ui = Ui::new(1200., 800.);
+    let (open, outer, inner) = (ui.signal(false), ui.signal(0.), ui.signal(0.));
+    let (shown, to_outer, to_inner) = (open.clone(), outer.clone(), inner.clone());
+    ui.mount(modal("m", open.clone()).w(460.).p(0.).child(switch_or_none(
+        move || shown.get(),
+        move |shown, _| {
+            shown.then(|| {
+                scroll(to_outer.clone())
+                    .w(250.)
+                    .h(120.)
+                    .p(10.)
+                    .child(div().h(150.))
+                    .child(
+                        scroll(to_inner.clone())
+                            .w(200.)
+                            .h(100.)
+                            .p(10.)
+                            .child(div().h(200.))
+                            .child(button().h(40.).child(text("Target"))),
+                    )
+            })
+        },
+    )));
+    ui.prepare_frame();
+    open.set(true);
+    ui.prepare_frame();
+    // As focused directly (`nested_focus_reveal_uses_immediate_inner_translation`).
+    assert_eq!((inner.get(), outer.get()), (160., 140.));
+}
