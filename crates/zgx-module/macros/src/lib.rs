@@ -492,9 +492,12 @@ fn exported(
                 __promise: *mut ::zgx_module::__private::c_void,
             ) {
                 let __len = 1usize;
-                #(#reads)*
-                #borrow
-                #body
+                // (A panic drops the promise, which rejects it.)
+                ::zgx_module::__private::guard_async(|| {
+                    #(#reads)*
+                    #borrow
+                    #body
+                })
             }
         }
     } else if export.action {
@@ -507,9 +510,14 @@ fn exported(
                 __out: *mut ::zgx_module::abi::Raw,
             ) -> u32 {
                 let __len = 1usize;
-                #(#reads)*
-                #borrow
-                #body
+                // SAFETY: `__out` takes why it failed, if it panicked.
+                unsafe {
+                    ::zgx_module::__private::guard(__out, || {
+                        #(#reads)*
+                        #borrow
+                        #body
+                    })
+                }
             }
         }
     } else {
@@ -522,9 +530,14 @@ fn exported(
                 __len: usize,
                 __out: *mut ::zgx_module::abi::Raw,
             ) -> u32 {
-                #(#reads)*
-                #borrow
-                #body
+                // SAFETY: `__out` takes why it failed, if it panicked.
+                unsafe {
+                    ::zgx_module::__private::guard(__out, || {
+                        #(#reads)*
+                        #borrow
+                        #body
+                    })
+                }
             }
         }
     };

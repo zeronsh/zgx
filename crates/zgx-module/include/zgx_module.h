@@ -308,6 +308,8 @@ typedef struct zgx_registrar {
  * a reason it can't load (ZGX_REFUSED_ABI: the runtime speaks another
  * interface, or has a shorter table than the module needs). */
 #define ZGX_REFUSED_ABI 1u
+/* (A Rust module's setup panicked: nothing of it is registered.) */
+#define ZGX_SETUP_PANICKED 2u
 #define ZGX_MODULE_ENTRY(name) \
     uint32_t zgx_module_v1_##name(const zgx_api *api, const zgx_registrar *registrar)
 
