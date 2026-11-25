@@ -120,6 +120,9 @@ impl Rules {
     pub fn set_guard(&self, guard: Rc<Guard>) {
         *self.guard.borrow_mut() = Some(guard);
     }
+    pub fn has_guard(&self) -> bool {
+        self.guard.borrow().is_some()
+    }
     pub fn set_web_guard(&self, guard: Rc<WebGuard>) {
         *self.web_guard.borrow_mut() = Some(guard);
     }
@@ -344,6 +347,36 @@ pub(crate) fn link_guard(
             }
         }
     }))
+}
+
+/// Under a host's `guard` (`ScriptHost::guard`), the view the app's script
+/// mounted: what `ui.controls`, `ui.press` and `ui.text_of` are kept to, so a
+/// script the host only previews can't press a control it draws beside it.
+/// `None` for a host that set none, and for a plugin's VM; the inner `None`,
+/// no view mounted.
+#[cold]
+#[inline(never)]
+fn guarded_view(lua: &Lua) -> Option<Option<zgx::compose::NodeHandle>> {
+    let rules = lua.app_data_ref::<Guarded>().map(|g| g.0.clone())?;
+    if !rules.has_guard() {
+        return None;
+    }
+    // The host these are: the last of those that have them, as `configure`
+    // makes another that keeps them.
+    let root = HOSTS.with_borrow(|hosts| {
+        hosts
+            .iter()
+            .rev()
+            .filter(|(_, held)| Rc::ptr_eq(held, &rules))
+            .find_map(|(host, _)| Some(host.upgrade()?.root.borrow().clone()))
+    });
+    Some(root.flatten())
+}
+pub(crate) fn guarded_root(lua: &Lua) -> Option<Option<zgx::compose::NodeHandle>> {
+    match ACTIVE.get() {
+        true => guarded_view(lua),
+        false => None,
+    }
 }
 
 /// Refuses a plugin's use of a name a host reserved (`what` says which).

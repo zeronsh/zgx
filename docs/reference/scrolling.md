@@ -89,6 +89,8 @@ return ui.list {
 }
 ```
 
+`el:scroll_info()` on a scroll view's or list's element says how far it is scrolled along its axis and how far it can go, in points: `{ offset, range, at_start, at_end }`, `at_start` and `at_end` whether it rests within half a point of either end (it can't scroll that way). Nil for an element that doesn't scroll. It reads the view as last laid out, once; for a value that follows, give the list `at_end`.
+
 To bring a row into view, give the list a `ref` and ask its element: `el:scroll_to_row(i, { align = "center" })`, `i` from 1, `align` `"start"` (its top at the top), `"center"`, `"end"` (its bottom at the bottom) or `"nearest"` (the default: the least scrolling, none if it shows). It works for every kind of list: one of measured rows measures the rows around the target as it lands, so the row ends exactly where asked however far it was.
 
 ```lua

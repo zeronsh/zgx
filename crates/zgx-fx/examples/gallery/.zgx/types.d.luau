@@ -1286,6 +1286,10 @@ declare extern type Element with
 	-- list of measured rows measures those around it as it lands, so it
 	-- ends where asked. False for elements that are not lists.
 	function scroll_to_row(self, i: number, options: { align: ("start" | "center" | "end" | "nearest")? }?): boolean
+	-- How far a scroll view or list is scrolled along its axis and how far it
+	-- can go, in points: `at_start` and `at_end` say whether it rests at
+	-- that end, with no further to go. Nil for anything else.
+	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	-- (Hidden until its API is settled.) The scroll views around it moved
 	-- so it shows, innermost first, as the web's scrollIntoView: `block`
 	-- down ("start" by default) and `inline` across ("nearest"), easing
@@ -1357,6 +1361,44 @@ declare extern type Ref with
 	-- Every mounted node sharing it, in document order.
 	function elements(self): { Element }
 end
+
+-- One control `ui.controls` lists, in window points.
+export type Control = {
+	-- ARIA's name for it: "button", "link", "checkbox", "menuitem", "tab", "dialog"…
+	role: string,
+	-- Its accessible name, else its text.
+	name: string,
+	-- The part of its box that shows.
+	x: number,
+	y: number,
+	w: number,
+	h: number,
+	disabled: boolean,
+	-- Nil where it cannot be selected, checked or opened. `checked`: a
+	-- checkbox, radio, switch, or a checked or radio menu item, on or off.
+	selected: boolean?,
+	checked: boolean?,
+	expanded: boolean?,
+	-- Pressed or not, a toggle button (`aria-pressed`); nil for any other.
+	pressed: boolean?,
+	-- What it opens, if anything: "dialog" or "menu".
+	haspopup: string?,
+	focused: boolean,
+	-- A menu's or list box's scroll view, when it has one: how far it is
+	-- scrolled and how far it can go, and whether it rests at either end,
+	-- with no further to go (`at_start`, `at_end`).
+	scroll_offset: number?,
+	scroll_range: number?,
+	at_start: boolean?,
+	at_end: boolean?,
+	-- Names it for `ui.press` while it is there.
+	handle: number,
+}
+
+export type ControlsOptions = {
+	-- At most this many, in order.
+	limit: number?,
+}
 
 export type ToastOptions = {
 	title: string | UiError,
@@ -24464,6 +24506,20 @@ declare ui: {
 	-- A toast in the window's corner: it goes after `duration` ms (5000;
 	-- 7000 a warning; an error stays), or at its ×. Returns its id.
 	toast: (opts: ToastOptions) -> number,
+	-- The controls on screen, in document order with popups and modals last
+	-- (a plain group, a text, a scroll view or a table's rows are not
+	-- controls). Nothing is built until you ask. `{}` where the host gave
+	-- no window; an error in a plugin. Under a host's guard, only those the
+	-- script mounted.
+	controls: (opts: ControlsOptions?) -> { Control },
+	-- Presses and releases the primary button at the middle of the control
+	-- `handle` names, as `zgx inspect click` does. False, doing nothing,
+	-- for a handle whose control is gone, hidden or covered; an error under
+	-- a host's guard for a control the script didn't mount.
+	press: (handle: number) -> boolean,
+	-- The text a control (`ui.controls`' `handle`) shows, a word apart, at most
+	-- `cap` (400) characters; "" once it is gone. A dialog's, for a notice.
+	text_of: (handle: number, cap: number?) -> string,
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`
