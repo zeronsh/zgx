@@ -9029,6 +9029,20 @@ impl WindowManager {
             self.request_close(token);
             return;
         }
+        // A frame failing again, waiting longer each time: input has it
+        // tried at once.
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::Touch(..)
+        ) && let Some(host) = self.hosts.get_mut(&token)
+            && host.render_fault.is_some()
+        {
+            crate::contain::hurry(&mut host.render_fault);
+            host.render_retry = crate::contain::retry_at(host.render_fault.as_ref());
+        }
         if matches!(event, WindowEvent::Destroyed) {
             self.close(token);
             return;
