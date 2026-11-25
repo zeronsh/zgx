@@ -2,7 +2,7 @@
 
 zgx is on crates.io from 0.1.0 (`zgx = "0.2"`); this lists what changed for apps, newest first.
 
-## 0.2.0 (DATE)
+## 0.2.0 (2026-11-25)
 
 A breaking release for Rust apps: what changes is under "Migrating from 0.1.10", each with what to write instead. No 0.1.10 example or template that loaded on 0.1.10 fails to load on it (21 examples and 10 template apps; the other five examples need a host of their own). What a Luau script may notice is listed there too.
 
