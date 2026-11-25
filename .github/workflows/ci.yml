@@ -1060,8 +1060,6 @@ jobs:
             exit 0
           fi
           start=$SECONDS
-          choco install ffmpeg -y --no-progress > "$RUNNER_TEMP/ffmpeg-install.log" || { cat "$RUNNER_TEMP/ffmpeg-install.log"; exit 1; }
-          echo "### Video: ffmpeg installed in $(( SECONDS - start )) s" >> "$GITHUB_STEP_SUMMARY"
           # choco's shims aren't always on this step's PATH once it's done
           # (ffmpeg not found, exit 127, on some runs): the folder of the
           # binaries it unpacked goes first, so the tests find ffmpeg.exe
@@ -1073,20 +1071,38 @@ jobs:
           # substitution of it ended the step with no output (#2352, #2416,
           # #2435), before the fallback and the messages below could run.
           choco_root=$(cygpath -u "${ChocolateyInstall:-C:\ProgramData\chocolatey}")
-          roots=("$choco_root"/lib/ffmpeg*)
-          dir=
-          while IFS= read -r exe; do
-            if [ -f "$(dirname "$exe")/ffprobe.exe" ]; then dir=$(dirname "$exe"); break; fi
-          done < <(find "${roots[@]}" -iname ffmpeg.exe 2>/dev/null || true)
-          if [ -z "$dir" ] && [ -f "$choco_root/bin/ffmpeg.exe" ] && [ -f "$choco_root/bin/ffprobe.exe" ]; then dir="$choco_root/bin"; fi
+          find_ffmpeg() {
+            roots=("$choco_root"/lib/ffmpeg*)
+            dir=
+            while IFS= read -r exe; do
+              if [ -f "$(dirname "$exe")/ffprobe.exe" ]; then dir=$(dirname "$exe"); break; fi
+            done < <(find "${roots[@]}" -iname ffmpeg.exe 2>/dev/null || true)
+            if [ -z "$dir" ] && [ -f "$choco_root/bin/ffmpeg.exe" ] && [ -f "$choco_root/bin/ffprobe.exe" ]; then dir="$choco_root/bin"; fi
+          }
+          # choco exits 0 having installed nothing when its feed fails (a 504
+          # from community.chocolatey.org: "Chocolatey installed 0/0
+          # packages"), so what it unpacked is what says it worked. Tried
+          # again after a pause, each attempt's log kept.
+          for attempt in 1 2 3 4; do
+            # (Again with --force: a first attempt cut off halfway is
+            # "already installed" to a plain one.)
+            force=; [ "$attempt" = 1 ] || force=--force
+            choco install ffmpeg -y --no-progress $force > "$RUNNER_TEMP/ffmpeg-install.log" 2>&1 || true
+            find_ffmpeg
+            [ -n "$dir" ] && break
+            echo "::warning::choco install ffmpeg, attempt $attempt, left no ffmpeg.exe with ffprobe.exe: $(grep -m1 -iE 'failed|unable|error' "$RUNNER_TEMP/ffmpeg-install.log" || tail -n 1 "$RUNNER_TEMP/ffmpeg-install.log")"
+            cat "$RUNNER_TEMP/ffmpeg-install.log" >> "$RUNNER_TEMP/ffmpeg-install-all.log"
+            [ "$attempt" = 4 ] || sleep $(( attempt * 30 ))
+          done
+          echo "### Video: choco install ffmpeg, $(( SECONDS - start )) s over $attempt attempt(s)" >> "$GITHUB_STEP_SUMMARY"
           if [ -z "$dir" ]; then
             echo "::error::choco installed ffmpeg, but no ffmpeg.exe with ffprobe.exe beside it is under ${roots[*]} or $choco_root/bin: the video tests would skip what ffmpeg encodes"
             echo "--- under ${roots[*]}:"
             find "${roots[@]}" -maxdepth 5 2>&1 | head -n 60 || true
             echo "--- ffmpeg and ffprobe in $choco_root/bin:"
             ls -la "$choco_root"/bin/ff*.exe 2>&1 || true
-            echo "--- choco install's log:"
-            cat "$RUNNER_TEMP/ffmpeg-install.log" || true
+            echo "--- choco install's logs, every attempt:"
+            cat "$RUNNER_TEMP/ffmpeg-install-all.log" || true
             exit 1
           fi
           export PATH="$dir:$PATH"
