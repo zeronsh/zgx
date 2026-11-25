@@ -1992,8 +1992,9 @@ pub(crate) fn truncated(
             .unwrap_or(0)
     };
     let clip_end = grapheme_end((offset + row.2).min(rich.text().len()));
-    // One line's ellipsis may cut inside the word that overflows, as CSS's text-overflow does; a clamp of
-    // several lines ends at a word, as -webkit-line-clamp's does.
+    // One line's ellipsis may cut inside the word that overflows, as CSS's
+    // text-overflow does; a clamp of several lines cuts the text of its own
+    // last row, as -webkit-line-clamp does, and takes none of the next.
     let end = match rows.get(limit) {
         Some(next) if next.0 == row.0 && limit == 1 => {
             grapheme_end((offset + next.2).min(rich.text().len()))
@@ -2531,7 +2532,9 @@ mod rich_tests {
     fn a_clamp_of_several_lines_ends_its_ellipsis_at_a_word() {
         use zgx::text_layout::{TextOptions, TextOverflow};
         let mut db = cosmic_text::fontdb::Database::new();
-        db.load_font_data(include_bytes!("../tests/fonts/Geist-500-subset.ttf").to_vec());
+        db.load_font_data(
+            include_bytes!("../../zgx-gpu/tests/fonts/Geist-500-subset.ttf").to_vec(),
+        );
         let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
         let text = "aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp qq rr ss tt";
         let rich = RichText::new(
