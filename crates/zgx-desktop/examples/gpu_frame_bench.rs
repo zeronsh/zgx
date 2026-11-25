@@ -29,6 +29,11 @@
 //! a band overlaps: faded item by item either way). It reports the main thread's
 //! instructions a frame too (macOS): update, layout, damage and the
 //! renderer's encoding, not the wait for the GPU.
+//!
+//! `ZGX_MODE=card`: a page's rounded, clipping card (880×640, 16 px corners)
+//! whose full-size background, reaching into its corners, changes colour
+//! every tick, over rows of content: the whole card repaints each frame, as
+//! a settings page's does.
 use std::hash::{Hash, Hasher};
 use zgx::widgets::Ui;
 use zgx_gpu::GpuRenderer;
@@ -58,7 +63,8 @@ fn main() {
     let scale: f32 = env("SCALE", 2.);
     let animate = zgx::env::var("ZGX_MODE").as_deref() == Ok("animate");
     let fade = zgx::env::var("ZGX_MODE").as_deref() == Ok("fade");
-    let (width, height) = if animate || fade {
+    let card = zgx::env::var("ZGX_MODE").as_deref() == Ok("card");
+    let (width, height) = if animate || fade || card {
         (960., 720.)
     } else {
         (heavy::WIDTH, heavy::HEIGHT)
@@ -88,6 +94,8 @@ fn main() {
     // 120 Hz refresh on (as `animation_headless`).
     let (name, mut advance): (String, Advance) = if fade {
         faded_cards(&ui, env("CARDS", 20), env("ROWS", 0) != 0, scale)
+    } else if card {
+        rounded_card(&ui)
     } else if animate {
         let clock = ui.signal(0_f32);
         ui.mount(animation_view::animation(clock.clone()));
@@ -341,4 +349,68 @@ fn faded_cards(ui: &Ui, cards: usize, rows: bool, scale: f32) -> (String, Advanc
     };
     let what = if rows { "rows" } else { "cards" };
     (format!("Fade {cards} {what}"), Box::new(advance))
+}
+
+/// `ZGX_MODE=card`'s scene (see the top): its tick changes the card's
+/// background.
+fn rounded_card(ui: &Ui) -> (String, Advance) {
+    use zgx::scene::{Color, Layout, NodeKind, QuadStyle, Style, Transform};
+    let mut scene = ui.scene.borrow_mut();
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    let card = scene.append(
+        root,
+        NodeKind::Panel {
+            layout: Layout::Overlay,
+            quad: QuadStyle {
+                fill: Color(250, 250, 250, 255),
+                radius: 16.,
+                ..Default::default()
+            },
+        },
+        Style {
+            width: Some(880.),
+            height: Some(640.),
+            clip: true,
+            ..Default::default()
+        },
+    );
+    scene.set_transform(card, Transform { x: 40., y: 40. });
+    let background = scene.append(
+        card,
+        NodeKind::Rect(Color(244, 244, 246, 255)),
+        Style {
+            width: Some(880.),
+            height: Some(640.),
+            ..Default::default()
+        },
+    );
+    let rows = scene.append(
+        card,
+        NodeKind::Container(Layout::Column),
+        Style {
+            padding: 24.,
+            gap: 12.,
+            ..Default::default()
+        },
+    );
+    for i in 0..10 {
+        let shade = (i * 23 % 60) as u8;
+        scene.append(
+            rows,
+            NodeKind::Rect(Color(200 + shade / 2, 205, 215, 255)),
+            Style {
+                width: Some(832.),
+                height: Some(46.),
+                ..Default::default()
+            },
+        );
+    }
+    let advance = move |ui: &Ui, tick: usize| {
+        let grey = if tick.is_multiple_of(2) { 244 } else { 238 };
+        ui.scene
+            .borrow_mut()
+            .set_kind(background, NodeKind::Rect(Color(grey, grey, grey + 2, 255)));
+    };
+    ("Card".into(), Box::new(advance))
 }

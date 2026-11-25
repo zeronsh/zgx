@@ -6094,6 +6094,209 @@ fn split_shading_matches_the_full_shader() {
     assert_eq!(worst, 0, "split shading differs by up to {worst}");
 }
 
+/// A flat fill reaching past where its clip region changes nothing (a
+/// page's background into its rounded card's corners, a list's under its
+/// fade) draws its middle without the region, in the lighter shader, and
+/// the bands around it in it: the same bytes as one quad in the region, on
+/// any edges and at any scale.
+#[test]
+fn a_flat_fill_past_its_regions_interior_draws_its_middle_without_it() {
+    let _gpu_fixture = gpu_fixture();
+    let scene = |scale: f32| {
+        let mut scene = Scene::new(240., 180.);
+        scene.set_pixel_scale(scale);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        scene.append(
+            root,
+            NodeKind::Rect(Color(250, 250, 250, 255)),
+            fixed(240., 180.),
+        );
+        // A clear card clipping to its corners, on no whole pixel.
+        let card = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: QuadStyle {
+                    fill: Color(0, 0, 0, 0),
+                    radius: 13.3,
+                    ..Default::default()
+                },
+            },
+            Style {
+                clip: true,
+                ..fixed(150.3, 100.7)
+            },
+        );
+        scene.set_transform(card, Transform { x: 10.5, y: 10.25 });
+        // Into its corners: translucent, and opaque square panels, whose
+        // interior goes flat (`push_panel`).
+        scene.append(
+            card,
+            NodeKind::Rect(Color(40, 90, 200, 180)),
+            fixed(150.3, 60.),
+        );
+        let panel = scene.append(
+            card,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: QuadStyle {
+                    fill: Color(200, 80, 40, 255),
+                    ..Default::default()
+                },
+            },
+            fixed(150.3, 50.2),
+        );
+        scene.set_transform(panel, Transform { x: 0., y: 50.5 });
+        // Under a fade: its bands change pixels, its middle none.
+        let faded = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            Style {
+                clip: true,
+                fade_edges: [12., 12.],
+                ..fixed(60.6, 150.)
+            },
+        );
+        scene.set_transform(faded, Transform { x: 170.25, y: 15. });
+        scene.append(
+            faded,
+            NodeKind::Rect(Color(30, 160, 90, 255)),
+            fixed(60.6, 150.),
+        );
+        scene.flush();
+        scene
+    };
+    for scale in [1., 1.5, 2.] {
+        let render = |split: bool| {
+            let size = ((240. * scale) as u32, (180. * scale) as u32);
+            let mut gpu = GpuRenderer::new(size.0, size.1).unwrap();
+            gpu.set_scale_factor(scale);
+            gpu.debug_split_shading(split);
+            let scene = scene(scale);
+            let stats = gpu
+                .render(&scene, &[Rect::new(0., 0., 240., 180.)])
+                .unwrap();
+            (gpu.readback().unwrap(), stats.instances)
+        };
+        let ((full, whole), (split, pieces)) = (render(false), render(true));
+        assert_eq!(full, split, "a fill in pieces differs at scale {scale}");
+        // The translucent fill in five pieces, and the panel's interior
+        // after `push_panel`'s four bands (the fade draws as one through its
+        // bands' texture, bands.rs, its fill untouched).
+        assert!(
+            pieces >= whole + 3 * 4,
+            "{pieces} quads in pieces, {whole} whole, at scale {scale}"
+        );
+    }
+}
+
+/// The same for every corner a rounded clip takes: radii of their own at
+/// each corner (one square), a pill's (each half its height) and a
+/// feathered clip's (`clip_feather`, its interior inside the feather): the
+/// fill's pieces draw the same bytes as the fill whole in its region.
+#[test]
+fn a_flat_fill_in_pieces_matches_under_every_corner() {
+    let _gpu_fixture = gpu_fixture();
+    let card = |scene: &mut Scene,
+                root: NodeId,
+                decoration: zgx::decoration::Decoration,
+                radius: f32,
+                at: (f32, f32),
+                size: (f32, f32)| {
+        let card = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: QuadStyle {
+                    fill: Color(0, 0, 0, 0),
+                    radius,
+                    decoration: Some(std::sync::Arc::new(decoration)),
+                    ..Default::default()
+                },
+            },
+            Style {
+                clip: true,
+                ..fixed(size.0, size.1)
+            },
+        );
+        scene.set_transform(card, Transform { x: at.0, y: at.1 });
+        scene.append(
+            card,
+            NodeKind::Rect(Color(40, 90, 200, 210)),
+            fixed(size.0, size.1),
+        );
+    };
+    let scene = |scale: f32| {
+        let mut scene = Scene::new(240., 200.);
+        scene.set_pixel_scale(scale);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        scene.append(
+            root,
+            NodeKind::Rect(Color(250, 250, 250, 255)),
+            fixed(240., 200.),
+        );
+        let corners = zgx::decoration::Corners {
+            top_left: 24.,
+            top_right: 4.,
+            bottom_right: 13.3,
+            bottom_left: 0.,
+        };
+        card(
+            &mut scene,
+            root,
+            zgx::decoration::Decoration {
+                corners: Some(corners),
+                ..Default::default()
+            },
+            0.,
+            (8.5, 8.25),
+            (110.3, 90.7),
+        );
+        card(
+            &mut scene,
+            root,
+            Default::default(),
+            20.35,
+            (128.25, 10.5),
+            (100.6, 40.7),
+        );
+        card(
+            &mut scene,
+            root,
+            zgx::decoration::Decoration {
+                clip_feather: 3.,
+                ..Default::default()
+            },
+            12.,
+            (20.75, 110.5),
+            (200.3, 80.2),
+        );
+        scene.flush();
+        scene
+    };
+    for scale in [1., 1.5, 2.] {
+        let render = |split: bool| {
+            let size = ((240. * scale) as u32, (200. * scale) as u32);
+            let mut gpu = GpuRenderer::new(size.0, size.1).unwrap();
+            gpu.set_scale_factor(scale);
+            gpu.debug_split_shading(split);
+            let scene = scene(scale);
+            let stats = gpu
+                .render(&scene, &[Rect::new(0., 0., 240., 200.)])
+                .unwrap();
+            (gpu.readback().unwrap(), stats.instances)
+        };
+        let ((full, whole), (split, pieces)) = (render(false), render(true));
+        assert_eq!(full, split, "a fill in pieces differs at scale {scale}");
+        assert!(
+            pieces > whole,
+            "{pieces} quads in pieces, {whole} whole, at scale {scale}"
+        );
+    }
+}
+
 /// A square box on whole pixels draws the same bytes through either
 /// shader, its corners included wherever they fall: a frame batches it
 /// with whatever shares its region, so otherwise its pixels would hang on
