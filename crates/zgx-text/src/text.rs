@@ -1982,24 +1982,24 @@ pub(crate) fn truncated(
         .unwrap_or((0, 0, 0, 0.));
     let offset = starts.get(row.0).copied().unwrap_or(0);
     let start = (offset + row.1).min(rich.text().len());
-    let grapheme_end = |raw: usize| {
+    let text_len = rich.text().len();
+    // One line's ellipsis may cut inside the word that overflows, as CSS's
+    // text-overflow does: up to where the next row (the rest of its line)
+    // ends. A clip, and a clamp of several lines, cut the text of their own
+    // last row, as -webkit-line-clamp does, and take none of the next.
+    let raw_end = match rows.get(limit) {
+        Some(next) if limit == 1 && next.0 == row.0 && options.overflow != TextOverflow::Clip => {
+            (offset + next.2).min(text_len)
+        }
+        _ => (offset + row.2).min(text_len),
+    };
+    // Every grapheme boundary up to the cut, in order: the cut is the last.
+    let scan = || {
         rich.text()
             .grapheme_indices(true)
             .map(|(i, _)| i)
-            .chain(std::iter::once(rich.text().len()))
-            .take_while(|i| *i <= raw)
-            .last()
-            .unwrap_or(0)
-    };
-    let clip_end = grapheme_end((offset + row.2).min(rich.text().len()));
-    // One line's ellipsis may cut inside the word that overflows, as CSS's
-    // text-overflow does; a clamp of several lines cuts the text of its own
-    // last row, as -webkit-line-clamp does, and takes none of the next.
-    let end = match rows.get(limit) {
-        Some(next) if next.0 == row.0 && limit == 1 => {
-            grapheme_end((offset + next.2).min(rich.text().len()))
-        }
-        _ => clip_end,
+            .chain(std::iter::once(text_len))
+            .take_while(move |i| *i <= raw_end)
     };
     let make = |fonts: &mut FontSystem, cut: usize, ellipsis: bool| {
         let mut content = rich.text()[..cut].to_owned();
@@ -2047,16 +2047,20 @@ pub(crate) fn truncated(
         rich_buffer_raw(fonts, &truncated, width, None, ellipsis)
     };
     if options.overflow == TextOverflow::Clip {
-        return Some(make(fonts, clip_end, false));
+        return Some(make(fonts, scan().last().unwrap_or(0), false));
     }
-    let mut boundaries: Vec<_> = rich
-        .text()
-        .grapheme_indices(true)
-        .map(|(i, _)| i)
-        .take_while(|i| *i < end)
-        .filter(|i| *i >= start)
-        .collect();
-    boundaries.push(end);
+    // The row's boundaries and the cut, in one pass over the text: those
+    // from where the row starts, the cut last; just the cut when it falls
+    // before the row (none of the row kept).
+    let mut boundaries: Vec<_> = scan().filter(|i| *i >= start).collect();
+    let end = match boundaries.last() {
+        Some(&end) => end,
+        None => {
+            let end = scan().last().unwrap_or(0);
+            boundaries.push(end);
+            end
+        }
+    };
     let fits = |probe: &Buffer| {
         probe.layout_runs().count() <= limit
             && width.is_none_or(|w| probe.layout_runs().all(|r| r.line_w <= w + 0.001))
