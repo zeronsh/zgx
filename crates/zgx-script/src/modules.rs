@@ -346,8 +346,9 @@ unsafe extern "C" fn register_highlighter(
         }
     };
     loading.highlighters.borrow_mut().push((
-        name,
+        name.clone(),
         crate::native_highlight::Native {
+            name,
             kinds,
             line: Box::new(line),
         },

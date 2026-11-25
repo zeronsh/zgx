@@ -7053,11 +7053,20 @@ fn code_editor(
     }
     if let Some(native) = &code.native_highlight {
         // The textarea's states are the highlighter's plus one; its first
-        // line's (0) is the highlighter's `start`.
-        let (native, color_of, theme) = (native.clone(), color_of.clone(), theme.clone());
+        // line's (0) is the highlighter's `start`. Failed, it is off for this
+        // textarea, said once as a script's error is.
+        let (native, color_of, theme, vm) =
+            (native.clone(), color_of.clone(), theme.clone(), vm.clone());
         let colors: std::cell::RefCell<(u64, Vec<Option<zgx::scene::Color>>)> =
             std::cell::RefCell::new((u64::MAX, Vec::new()));
+        let (spans, off) = (
+            std::cell::RefCell::new(Vec::new()),
+            std::cell::Cell::new(false),
+        );
         view = view.span_highlighter(move |line, state| {
+            if off.get() {
+                return (Vec::new(), 0);
+            }
             let mut kept = colors.borrow_mut();
             if kept.0 != theme.revision() {
                 *kept = (
@@ -7074,18 +7083,33 @@ fn code_editor(
             } else {
                 state - 1
             };
-            let mut out = Vec::new();
-            let next = (native.native.line)(line.as_bytes(), from, &mut |a, b, kind| {
-                if let Some(Some(color)) = kept.1.get(kind as usize)
-                    && a >= 1
-                    && b >= a
-                {
-                    let mut style = zgx::widgets::SpanStyle::default();
-                    style.color = Some(*color);
-                    out.push((a as usize - 1..b as usize, style));
+            let mut spans = spans.borrow_mut();
+            let next = match native.native.spans(line.as_bytes(), from, &mut spans) {
+                Ok(next) => next,
+                Err(why) => {
+                    off.set(true);
+                    vm.report(mlua::Error::runtime(why));
+                    return (Vec::new(), 0);
                 }
-            });
-            (out, next.saturating_add(1))
+            };
+            let out = spans
+                .iter()
+                .filter_map(|(range, kind)| {
+                    let color = (*kept.1.get(*kind)?)?;
+                    // (Within the line's characters: a span's ends are bytes.)
+                    let (mut start, mut end) = (range.start, range.end);
+                    while !line.is_char_boundary(start) {
+                        start -= 1;
+                    }
+                    while !line.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    let mut style = zgx::widgets::SpanStyle::default();
+                    style.color = Some(color);
+                    Some((start..end, style))
+                })
+                .collect();
+            (out, next + 1)
         });
     } else if let Some(highlight) = &code.highlight {
         let (highlight, vm, states) = (highlight.clone(), vm.clone(), states.clone());

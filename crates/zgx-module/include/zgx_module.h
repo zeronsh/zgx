@@ -109,6 +109,10 @@ typedef void (*zgx_push)(void *sink, uint32_t from, uint32_t to, uint32_t kind);
  * open); returns what this line leaves. */
 typedef uint32_t (*zgx_highlight)(void *user, const uint8_t *line, size_t len, uint32_t state,
                                   void *sink, zgx_push push);
+/* What a highlighter returns when it failed: the runtime turns it off for
+ * that textarea and says so. Every state is below ZGX_HIGHLIGHT_STATES. */
+#define ZGX_HIGHLIGHT_FAILED 0xFFFFFFFFu
+#define ZGX_HIGHLIGHT_STATES 0x7FFFFFFFu
 /* A shared state's observer (zgx_api.shared_observe): `value` is what it
  * holds now, lent; `host` the state's host handle, lent. */
 typedef void (*zgx_observe)(void *user, void *host, const zgx_value *value);

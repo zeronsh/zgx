@@ -454,6 +454,13 @@ pub type Highlight = unsafe extern "C" fn(
 ) -> u32;
 /// Where a highlighter hands each span.
 pub type Push = unsafe extern "C" fn(sink: *mut c_void, from: u32, to: u32, kind: u32);
+/// What a highlighter returns when it failed (a Rust one, as it panicked):
+/// the runtime turns it off for that textarea and says so. A line's state is
+/// below [`HIGHLIGHT_STATES`].
+pub const HIGHLIGHT_FAILED: u32 = u32::MAX;
+/// Every state a highlighter leaves is below this (the runtime keeps a
+/// textarea's states one up, below 2^31); one at or past it is a failure.
+pub const HIGHLIGHT_STATES: u32 = (1 << 31) - 1;
 
 /// A module's entry, exported as [`ENTRY`]: called once per host it is
 /// loaded into. Returns 0, or a reason it can't load.
