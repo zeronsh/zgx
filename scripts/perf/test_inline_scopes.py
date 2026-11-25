@@ -3,6 +3,8 @@ and sizes it finds, and which changes fail (the counts of #1740 and #1824).
 
     python3 scripts/perf/test_inline_scopes.py -v
 """
+import contextlib
+import io
 import os
 import pathlib
 import subprocess
@@ -114,6 +116,78 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(len(seen), 1)
             self.assertGreater(seen[0], 1_000_000)
             self.assertEqual(untracked.stat().st_mtime, 1_000_000)
+
+
+class BaseTests(unittest.TestCase):
+    HOT = "scene::<impl in crates/zgx/src/scene.rs>::walk"
+
+    def commit(self, root, callees):
+        """A commit of `root` whose `walk` inlines `callees` (cargo's
+        stand-in reads them back); its sha."""
+        lib = root / "crates/zgx/src/lib.rs"
+        lib.parent.mkdir(parents=True, exist_ok=True)
+        lib.write_text("".join(f"{name}\n" for name in callees))
+        git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t"]
+        if not (root / ".git").exists():
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "x"], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    def said(self, target):
+        """What the check prints, run as CI runs it: from the tree, with
+        `--target` and `--base`, on two commits that inline differently.
+        Cargo's stand-in writes the MIR of the tree it runs in under
+        CARGO_TARGET_DIR, from that tree if it is relative."""
+        real = subprocess.run
+
+        def run(command, *args, **options):
+            if command[0] != "cargo":
+                return real(command, *args, **options)
+            tree = pathlib.Path(options["cwd"]).resolve()
+            out = tree / options["env"]["CARGO_TARGET_DIR"] / "release/build/zgx/0123/out"
+            out.mkdir(parents=True, exist_ok=True)
+            names = (tree / "crates/zgx/src/lib.rs").read_text().split("\n")[:-1]
+            scopes = "".join(f"    scope {i} (inlined {name}) {{\n" for i, name in enumerate(names, 1))
+            (out / "zgx-0123.mir").write_text(
+                "fn scene::<impl at crates/zgx/src/scene.rs:1:1: 1:2>::walk(_1: &S) -> () {\n" + scopes + "}\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp).resolve() / "head"
+            closure = "Option::<u8>::map::<u8, {closure@crates/zgx/src/scene.rs:%d:3: %d:9}>"
+            base = self.commit(root, ["kept", closure % (10, 10), "lost", "lost", "lost", "lost"])
+            self.commit(root, ["kept", closure % (12, 12), "gained"])
+            record = root.parent / "list.txt"
+            record.write_text(f"# rustc 1.0\nzgx\t6\t7\t{self.HOT}\n")
+            printed, here = io.StringIO(), os.getcwd()
+            argv = ["inline_scopes.py", "--root", str(root), "--list", str(record),
+                    "--target", str(target), "--base", base]
+            with mock.patch.object(inline_scopes.subprocess, "run", run), \
+                    mock.patch.object(inline_scopes, "rustc", lambda _: "rustc 1.0"), \
+                    mock.patch.object(sys, "argv", argv), \
+                    contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+                os.chdir(root)
+                try:
+                    with self.assertRaises(SystemExit):
+                        inline_scopes.main()
+                finally:
+                    os.chdir(here)
+            return printed.getvalue()
+
+    def named(self, target):
+        said = self.said(target)
+        self.assertIn("inlines 3 scopes, 6 recorded", said)
+        # The closure, moved two lines, is no change.
+        self.assertIn("inlines now gained; no longer lost x4\n", said)
+
+    def test_a_relative_target_reads_the_base_from_its_own_build(self):
+        # CI's `--target target/perf-gate`: cargo, run in the base's tree,
+        # built under it, and the head's MIR was read in its place.
+        self.named(pathlib.Path("target/perf-gate"))
+
+    def test_an_absolute_target_reads_the_base_from_its_own_build(self):
+        with tempfile.TemporaryDirectory() as target:
+            self.named(pathlib.Path(target).resolve() / "perf-gate")
 
 
 if __name__ == "__main__":

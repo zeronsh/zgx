@@ -71,8 +71,9 @@ def mir(root, crate, target):
 
 def normal(name):
     """A function's name as MIR prints it, without where its `impl` block
-    starts: an edit above a function doesn't rename it."""
-    return re.sub(r"<impl at ([^>:]+):\d+:\d+: \d+:\d+>", r"<impl in \1>", name)
+    or closure starts: an edit above a function doesn't rename it."""
+    name = re.sub(r"<impl at ([^>:]+):\d+:\d+: \d+:\d+>", r"<impl in \1>", name)
+    return re.sub(r"\{closure@([^}:]+):\d+:\d+: \d+:\d+\}", r"{closure in \1}", name)
 
 
 def scopes(text):
@@ -204,7 +205,10 @@ def main():
     if args.list:
         LIST = args.list
     TRIPLE = args.triple
-    target = args.target or args.root / "target"
+    # From here, not from the tree cargo runs in: a relative CARGO_TARGET_DIR
+    # sent the base's build under its own tree, and this one's MIR was read
+    # for it (#2485: no callee named, of four that went).
+    target = (args.target or args.root / "target").resolve()
     rows = listed()
     got = measure(args.root, target, rows)
     missing = [key for key, callees in got.items() if callees is None]
