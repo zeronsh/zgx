@@ -77,10 +77,10 @@ vulkan = ["zgx-gpu/vulkan"]
 inspect = ["zgx/trace", "dep:png"]
 
 [dependencies]
-zgx = { path = "../zgx", version = "0.1.10", default-features = false }
-zgx-components = { path = "../zgx-components", version = "0.1.10", optional = true }
-zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
-zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
+zgx = { path = "../zgx", version = "0.2.0", default-features = false }
+zgx-components = { path = "../zgx-components", version = "0.2.0", optional = true }
+zgx-3d = { path = "../zgx-3d", version = "0.2.0", optional = true }
+zgx-audio = { path = "../zgx-audio", version = "0.2.0", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 mlua = { package = "zgx-mlua", version = "0.12.10", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
@@ -118,10 +118,10 @@ icu_locale_core = { version = "~2.4", default-features = false }
 web-time = "1.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
+zgx-gpu = { path = "../zgx-gpu", version = "0.2.0", default-features = false }
 # Native modules' interface: their manifests are read for `zgx types` in
 # every build but the browser's, which loads no library (nothing but std).
-zgx-module = { path = "../zgx-module", version = "0.1.10", default-features = false }
+zgx-module = { path = "../zgx-module", version = "0.2.0", default-features = false }
 
 # SHA-256 by the CPU's own instructions on ARM (sha2 uses them there only
 # through `asm`; on x86 it always does): a bundle's files are hashed as

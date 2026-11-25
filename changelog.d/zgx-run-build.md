@@ -1,4 +1,0 @@
----
-section: added
----
-- **`zgx run` builds an app's native modules only when they change, and `zgx build` writes a bundle** (zgx-script, zgx-run): zgx-run loads the modules an app's `zgx.json` names (`"modules": { "words": "modules/words" }`) before its scripts. `zgx run my-app` builds each one whose sources changed (keyed by a hash of them and the compiler, cached for every app on the machine), and as one changes builds it again and restarts the app, saying so in its banner. `zgx build my-app` writes `dist/<app_id>/`: the scripts compiled to bytecode, each module's library for each `--target` (from the cache unless its sources changed) and a manifest of each file's hash, which `zgx-run dist/my-app` runs, checking each module's library as it opens and each file as it is read. A release where only Luau or a module changed compiles no app. [The guide](docs/modules.md) says how.
