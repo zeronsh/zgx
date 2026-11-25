@@ -226,3 +226,80 @@ fn a_node_mounted_and_gone_while_a_list_stretches_leaves_nothing() {
         }
     }
 }
+
+/// A window with spare time builds rows ahead of the view between frames
+/// (`zgx::spare`), keeps them as it scrolls away, and lets them go after a
+/// rest: every frame's damage still covers what it changes. Rows of natural
+/// heights the estimate doesn't know, held at the list's end as a
+/// transcript is; opened, built ahead, let go of at rest with no frame
+/// after, then scrolled up as a trackpad does, one step a refresh.
+#[test]
+fn rows_built_ahead_of_a_list_at_its_end_leave_nothing() {
+    use std::time::{Duration, Instant};
+    use zgx::input::InputEvent;
+    let _gpu = gpu_fixture();
+    let mut ui = Ui::new(W as f32, H as f32);
+    ui.host_spare_time();
+    let offset = ui.signal(f32::MAX);
+    let heights = VariableHeights::new(&ui.runtime, 400, 40.).anchor_end();
+    ui.mount(
+        measured_virtual_list(
+            offset.clone(),
+            heights,
+            3,
+            |i| i,
+            |_, i, _| {
+                // Short prompts and replies far taller than the estimate.
+                let tall = i % 2 == 1;
+                column().w_full().child(
+                    div()
+                        .h(if tall {
+                            120. + (i % 5) as f32 * 60.
+                        } else {
+                            24.
+                        })
+                        .child(div().w(20. + (i % 5) as f32 * 9.).h(8.).bg(rgb(0x5080c0))),
+                )
+            },
+        )
+        .w_full()
+        .h_full(),
+    );
+    let mut frames = Frames::new();
+    // A refresh: its spare time first, then its frame.
+    let refresh = |ui: &Ui, frames: &mut Frames, what: &str| {
+        ui.run_spare_work(Instant::now(), Duration::from_millis(16))
+            .unwrap();
+        frames.frame(ui, what);
+    };
+    for step in 0..30 {
+        refresh(&ui, &mut frames, &format!("opening {step}"));
+    }
+    let wheel = |ui: &mut Ui, dy: f32| {
+        ui.dispatch(InputEvent::Scroll {
+            x: 100.,
+            y: 100.,
+            delta_x: 0.,
+            delta_y: dy,
+        });
+    };
+    // Up a way and back, building and keeping rows.
+    for step in 0..40 {
+        wheel(&mut ui, -30.);
+        refresh(&ui, &mut frames, &format!("up {step}"));
+    }
+    for step in 0..60 {
+        wheel(&mut ui, 30.);
+        refresh(&ui, &mut frames, &format!("down {step}"));
+    }
+    for step in 0..10 {
+        refresh(&ui, &mut frames, &format!("rest {step}"));
+    }
+    // A while at rest: the window's lists let go of what they kept, with no
+    // frame after (the host draws none until something changes).
+    ui.release_kept_rows().unwrap();
+    for step in 0..60 {
+        wheel(&mut ui, -12.);
+        refresh(&ui, &mut frames, &format!("up after the rest {step}"));
+    }
+}
