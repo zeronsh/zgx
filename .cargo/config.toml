@@ -10,3 +10,14 @@ RUST_MIN_STACK = "8388608"
 # paid for them in release builds (a fifth of a filter over a list). Debug
 # builds keep them (luau0-src defines LUAU_ENABLE_ASSERT there).
 LUAU_CXXFLAGS = "-DNDEBUG"
+
+# mimalloc on Apple's 16 KiB pages: arena slices of one page rather than
+# four (`MI_ARENA_SLICE_SHIFT`, 64 KiB by default), and no large pages. A
+# slice partly in use keeps its whole size; at a page each, what was freed
+# goes back to the system in smaller runs. On the iOS simulator a heavy
+# list rested 29 MB lower after a fling (111 to 82.5 MB), launched 15 MB
+# lower and peaked 29 MB lower; a macOS window rests 5 to 8 MB lower. Other
+# C code built for these targets ignores the two names.
+CFLAGS_aarch64_apple_darwin = "-DMI_ARENA_SLICE_SHIFT=14 -DMI_ENABLE_LARGE_PAGES=0"
+CFLAGS_aarch64_apple_ios = "-DMI_ARENA_SLICE_SHIFT=14 -DMI_ENABLE_LARGE_PAGES=0"
+CFLAGS_aarch64_apple_ios_sim = "-DMI_ARENA_SLICE_SHIFT=14 -DMI_ENABLE_LARGE_PAGES=0"
