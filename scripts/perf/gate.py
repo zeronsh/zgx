@@ -287,7 +287,15 @@ SCENES = [
     ('app-sketch', 'zgx-script', 'list_state_bench', {'APP': 'sketch', 'SHAPES': '50', 'REPS': '3'}),
     # The code editor's search of a letter never searched (the whole text
     # read) on its own: added to app-code, it would count as app-code's
-    # growth against a base without it.
+    # growth against a base without it. The file they open is the bench's
+    # own, made and written uncounted (`gate_marks`) since 0.2.0: before,
+    # it was 4.9% of app-code and 5.4% of app-code-search, and searching its
+    # lines moved app-code 0.07% with their alignment in the binary (a
+    # re-baseline, not a saving). With the bench of then and of now, x86,
+    # millions: v0.1.9 app-code 94.0 and 89.5, search 84.5 and 80.1;
+    # v0.1.10 93.9 and 89.5, 84.5 and 80.0; main before this (ed1f62713)
+    # 90.0 and 85.6, 81.7 and 77.2. The 0.1.10 to 0.2.0 record is to note both
+    # as `redefined`.
     ('app-code', 'zgx-script', 'list_state_bench', {'APP': 'code', 'LINES': '5000', 'REPS': '2',
                                                      'SKIP': 'a new letter'}),
     ('app-code-search', 'zgx-script', 'list_state_bench', {'APP': 'code', 'LINES': '5000', 'REPS': '2',
