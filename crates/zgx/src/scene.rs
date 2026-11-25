@@ -15807,6 +15807,8 @@ impl Scene {
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
     }
+    /// The most layout roots a pass keeps room for.
+    const LAYOUT_ROOTS_KEPT: usize = 256;
     /// How many layout passes it has run: a test's count of them.
     #[cfg(test)]
     pub(crate) fn layout_passes(&self) -> u64 {
@@ -15878,6 +15880,12 @@ impl Scene {
             .collect();
         keyed.sort_unstable_by_key(|(key, _)| *key);
         keyed.dedup_by_key(|(key, _)| *key);
+        // Its room serves the next pass (a frame's changed canvases leave a
+        // root each), unless a mount's or a resize's made it large.
+        roots.clear();
+        if roots.capacity() <= Self::LAYOUT_ROOTS_KEPT {
+            self.layout_roots = roots;
+        }
         let mut relayout_all = false;
         for (_, id) in keyed {
             if !self.contains(id) || self.node(id).dirty & LAYOUT == 0 {
