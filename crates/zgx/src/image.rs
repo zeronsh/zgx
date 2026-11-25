@@ -704,6 +704,20 @@ impl ImageData {
         }
         let mut pending = kept.pending.lock().unwrap_or_else(|p| p.into_inner());
         if pending.is_none_or(|(w, h)| w < size.0 || h < size.1) {
+            // A decode may have ended since `held` was read: it publishes its
+            // pixels (or its failure) before it stops being pending, so what
+            // it made is there now (`decode_at`). Not asked for twice.
+            if kept.failed.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(held) = kept.held.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
+                && held.width >= size.0
+                && held.height >= size.1
+            {
+                kept.used
+                    .store(USES.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+                return Some(held.clone());
+            }
             *pending = Some(size);
             send((Arc::clone(&self.pixels), (self.width, self.height), size));
         }
@@ -737,6 +751,14 @@ impl ImageData {
         drop(held);
         let mut pending = kept.pending.lock().unwrap_or_else(|p| p.into_inner());
         if pending.is_some_and(covers) {
+            return None;
+        }
+        // Read again: a decode that ended since published first (`decode_at`).
+        if kept.failed.load(Ordering::Relaxed)
+            || (kept.held.lock().unwrap_or_else(|p| p.into_inner()))
+                .as_ref()
+                .is_some_and(|held| covers((held.width, held.height)))
+        {
             return None;
         }
         let mut ahead = AHEAD.lock().unwrap_or_else(|p| p.into_inner());
@@ -1106,17 +1128,21 @@ fn decode_at(
             pixels: rgba.map_or(straight, Arc::from),
         }
     });
+    // What came of it is published before it stops being pending: a draw
+    // in between found neither, and asked for the same decode again.
+    match &done {
+        Some(done) => {
+            hold(kept, Some(done.clone()));
+        }
+        None => kept.failed.store(true, Ordering::Relaxed),
+    }
     // (A larger one queued since stays pending: asked for again, it would decode twice.)
     let mut pending = kept.pending.lock().unwrap_or_else(|p| p.into_inner());
     if pending.is_some_and(|(w, h)| w <= size.0 && h <= size.1) {
         *pending = None;
     }
     drop(pending);
-    let Some(done) = done else {
-        kept.failed.store(true, Ordering::Relaxed);
-        return None;
-    };
-    hold(kept, Some(done.clone()));
+    let done = done?;
     kept.used
         .store(USES.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
     DECODES.fetch_add(1, Ordering::Relaxed);
@@ -1508,6 +1534,35 @@ mod kept_tests {
         *image.pixels.kept.as_ref().unwrap().pending.lock().unwrap()
     }
 
+    /// Drawn again and again while its decode ends, a picture is decoded
+    /// once: the decode's pixels are there before it stops being pending, and
+    /// a draw that found neither reads them again (`decode_at`, `pixels_at`).
+    /// Each round asks without waiting between draws, to land in that window.
+    #[test]
+    fn a_picture_drawn_as_its_decode_ends_is_decoded_once() {
+        let _alone = alone();
+        for round in 0..20 {
+            let image = ImageData::kept(300, 300, Arc::from(&b"ahead"[..]), counted_2).unwrap();
+            let before = AHEAD_DECODES[2].load(Ordering::Relaxed);
+            let _ahead = image.decode_ahead((150, 150)).expect("asked ahead");
+            let until = crate::time::Instant::now() + std::time::Duration::from_secs(10);
+            while image.pixels_at((150, 150)).is_none() {
+                assert!(crate::time::Instant::now() < until, "never decoded");
+                std::hint::spin_loop();
+            }
+            // A second decode, had one been asked for, ends by now.
+            let until = crate::time::Instant::now() + std::time::Duration::from_millis(200);
+            while crate::time::Instant::now() < until && pending(&image).is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert_eq!(
+                AHEAD_DECODES[2].load(Ordering::Relaxed) - before,
+                1,
+                "round {round}: decoded once"
+            );
+        }
+    }
     /// A decode asked for ahead of a picture being drawn is made off this
     /// thread, and drawn at that size the picture finds it, decoded once;
     /// held, there's nothing more to ask.
