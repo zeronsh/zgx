@@ -143,6 +143,112 @@ fn the_built_in_themes_answer_to_their_names_from_before_the_rename() {
     assert!(themes.theme("zgui-dark").is_some()); // rename-to-zgx: keep
 }
 
+/// Tokens declared at once are what declaring each in order makes them, in
+/// any theme, and the tokens are evaluated once.
+#[test]
+fn tokens_declared_at_once_are_those_declared_in_order() {
+    use zgx::theme::TokenInput;
+    let name = |name: &str| token(&format!("test.once.{name}"));
+    let parse = |text: &str| TokenInput::parse(text).unwrap();
+    let declared = || {
+        vec![
+            (name("reads.later"), parse("{test.once.later}")),
+            (name("twice"), parse("#111111")),
+            (name("deep.in.names"), TokenInput::from(3.)),
+            (name("twice"), parse("{surface.raised}")),
+            (name("again"), parse("#222222")),
+            (name("again"), parse("#222222")),
+            (name("mixed"), parse("alpha({test.once.twice}, 0.5)")),
+            (name("later"), parse("#abcdef")),
+            (name("loops"), parse("{test.once.looped}")),
+            (name("looped"), parse("{test.once.loops}")),
+            // Themed tokens, declared over.
+            (tok::ACCENT.into(), parse("#010203")),
+        ]
+    };
+    let (in_order, at_once) = (Runtime::new(), Runtime::new());
+    let (one, all) = (Themes::of(&in_order), Themes::of(&at_once));
+    let values = |themes: &Themes| {
+        let names = themes.token_names();
+        names
+            .iter()
+            .map(|name| (name.to_string(), format!("{:?}", themes.get(token(name)))))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(values(&one), values(&all));
+    let (was_one, was_all) = (one.revision(), all.revision());
+    for (id, input) in declared() {
+        one.declare(id, input);
+    }
+    all.declare_inputs(declared());
+    assert_eq!(values(&one), values(&all));
+    assert!(values(&all).iter().any(|(name, value)| {
+        name == "test.once.reads.later" && value.contains("171, 205, 239")
+    }));
+    assert!(one.revision() - was_one > 5, "evaluated at each");
+    assert_eq!(all.revision() - was_all, 1, "evaluated once");
+    // Again, nothing changes; none at all is nothing.
+    all.declare_inputs(declared().into_iter().skip(7).take(1));
+    all.declare_inputs([]);
+    assert_eq!(all.revision() - was_all, 1);
+    // Another theme, one that sets a declared token, and one swapped for
+    // another of its name.
+    for themes in [&one, &all] {
+        themes.set(LIGHT).unwrap();
+    }
+    assert_eq!(values(&one), values(&all), "in the light theme");
+    for accent in ["#123456", "#654321"] {
+        for themes in [&one, &all] {
+            themes.register(
+                Theme::from_json(&format!(
+                    r##"{{ "name": "test-once", "type": "dark", "tokens": {{ "test.once.later": "{accent}" }} }}"##,
+                ))
+                .unwrap(),
+            );
+            themes.set("test-once").unwrap();
+        }
+        assert_eq!(values(&one), values(&all), "{accent}");
+    }
+}
+
+/// What reads tokens runs once for a call that declares several, seeing all
+/// of them declared; declared in order, it ran at each, some not declared yet.
+/// The end is the same.
+#[test]
+fn what_reads_tokens_sees_those_declared_at_once_together() {
+    use std::{cell::RefCell, rc::Rc};
+    use zgx::theme::TokenInput;
+    let parse = |text: &str| TokenInput::parse(text).unwrap();
+    let (a, b) = (token("test.together.a"), token("test.together.b"));
+    let seen = |at_once: bool| {
+        let runtime = Runtime::new();
+        let themes = Themes::of(&runtime);
+        let seen: Rc<RefCell<Vec<(TokenValue, TokenValue)>>> = Rc::default();
+        let (reads, log) = (themes.clone(), seen.clone());
+        let _effect = runtime.effect(move || {
+            log.borrow_mut().push((reads.get(a), reads.get(b)));
+        });
+        let declared = [(a, parse("#0000ff")), (b, parse("{test.together.a}"))];
+        match at_once {
+            true => themes.declare_inputs(declared),
+            false => declared
+                .into_iter()
+                .for_each(|(id, input)| themes.declare(id, input)),
+        }
+        seen.take()
+    };
+    let (unset, blue) = (
+        || TokenValue::Unset,
+        || TokenValue::Color(Color(0, 0, 255, 255)),
+    );
+    assert_eq!(seen(true), [(unset(), unset()), (blue(), blue())]);
+    assert_eq!(
+        seen(false),
+        [(unset(), unset()), (blue(), unset()), (blue(), blue())],
+        "one by one, as it was"
+    );
+}
+
 #[test]
 fn app_tokens_default_to_standard_tokens_and_themes_may_set_them() {
     let mut ui = Ui::new(200., 200.);

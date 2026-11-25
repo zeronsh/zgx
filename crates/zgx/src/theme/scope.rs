@@ -936,6 +936,16 @@ impl Themes {
         let expr = default.into().0;
         self.declare_all([(id, expr)]);
     }
+    /// [`declare`](Self::declare) for each of `tokens`, in order (a token's
+    /// last is its default), the tokens evaluated once for them all.
+    #[doc(hidden)]
+    pub fn declare_inputs(&self, tokens: impl IntoIterator<Item = (TokenId, TokenInput)>) {
+        let tokens: Vec<_> = tokens
+            .into_iter()
+            .map(|(id, input)| (id, input.0))
+            .collect();
+        self.declare_all(tokens);
+    }
     /// Declare an app token from a theme expression.
     pub fn declare_expr(&self, token: impl Into<TokenId>, default: &str) -> Result<(), ThemeError> {
         let id = token.into();
