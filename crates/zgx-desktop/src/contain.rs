@@ -20,6 +20,29 @@ pub(crate) struct Fault {
     at: Instant,
     revision: u64,
     message: String,
+    /// Frames tried in a row that failed so (`run_frame`): each waits twice
+    /// the one before, up to `FRAME_RETRY_MOST`.
+    tries: u32,
+}
+/// The longest a window's frame failing again and again waits before its
+/// next try.
+const FRAME_RETRY_MOST: Duration = Duration::from_secs(30);
+/// How long a frame that failed `tries` times in a row waits: a second,
+/// two, four… to `FRAME_RETRY_MOST`; none once input asks (`hurry`).
+fn frame_wait(tries: u32) -> Duration {
+    match tries {
+        0 => Duration::ZERO,
+        n => RETRY
+            .saturating_mul(1 << (n - 1).min(16))
+            .min(FRAME_RETRY_MOST),
+    }
+}
+/// Input came for the window whose frame `fault` holds back: it is tried
+/// at once, its waits from a second again.
+pub(crate) fn hurry(fault: &mut Option<Fault>) {
+    if let Some(fault) = fault {
+        fault.tries = 0;
+    }
 }
 
 /// Run `piece` (named `what` in the report) unless it panicked at this
@@ -63,6 +86,7 @@ pub(crate) fn run<R>(
                 at: now,
                 revision,
                 message,
+                tries: 0,
             });
             None
         }
@@ -72,7 +96,7 @@ pub(crate) fn run<R>(
 /// When a piece `fault` holds back may be tried again (`run` skips it
 /// until then): `None` for one with no fault.
 pub(crate) fn retry_at(fault: Option<&Fault>) -> Option<Instant> {
-    fault.map(|last| last.at + RETRY)
+    fault.map(|last| last.at + frame_wait(last.tries))
 }
 
 /// `run` for a frame: an error it returns skips it just as a panic does
@@ -88,20 +112,46 @@ pub(crate) fn run_frame<T>(
     mut report: impl FnMut(&str),
     piece: impl FnOnce() -> Result<T, zgx_gpu::GpuError>,
 ) -> Option<Result<T, zgx_gpu::GpuError>> {
-    let said = fault.as_ref().map(|last| last.message.clone());
+    let before = fault
+        .as_ref()
+        .map(|last| (last.message.clone(), last.tries));
+    if let Some(last) = fault {
+        if now.duration_since(last.at) < frame_wait(last.tries) {
+            return None;
+        }
+        // Hurried by input (`hurry`): due now, though `run` waits a second.
+        if let Some(due) = now.checked_sub(RETRY) {
+            last.at = last.at.min(due);
+        }
+    }
     let done = run(fault, revision, now, what, &mut report, piece);
-    match done {
+    let tries = before.as_ref().map_or(0, |(_, tries)| *tries) + 1;
+    let done = match done {
         Some(Err(error)) if !error.is_device_lost() => {
-            *fault = said.map(|message| Fault {
+            *fault = before.map(|(message, tries)| Fault {
                 at: now,
                 revision,
                 message,
+                tries,
             });
             failed(fault, revision, now, what, &error);
             None
         }
         done => done,
+    };
+    // (Only one that failed now: it ran.)
+    if let Some(fault) = fault.as_mut().filter(|fault| fault.at == now) {
+        fault.tries = tries;
+        if frame_wait(tries) == FRAME_RETRY_MOST && frame_wait(tries - 1) < FRAME_RETRY_MOST {
+            eprintln!(
+                "zgx: {what} has failed {tries} times in a row ({}); tried again every {} s, \
+                 at once on input",
+                fault.message,
+                FRAME_RETRY_MOST.as_secs()
+            );
+        }
     }
+    done
 }
 
 /// `error` ended `what`: a degradation (`queue_issue`) unless it is the
@@ -118,10 +168,12 @@ pub(crate) fn failed(
     if news {
         queue_issue(format!("{what} was skipped: {message}"));
     }
+    let tries = fault.as_ref().map_or(0, |last| last.tries);
     *fault = Some(Fault {
         at: now,
         revision,
         message,
+        tries,
     });
     news
 }
@@ -408,15 +460,92 @@ mod tests {
         let retry = retry_at(fault.as_ref()).expect("a retry is owed");
         assert_eq!(retry, start + RETRY);
         assert!(
-            !frame(&mut fault, 2, retry, true),
+            !frame(&mut fault, 2, retry - RETRY / 2, false),
+            "not before"
+        );
+        assert!(
+            !frame(&mut fault, 3, retry, true),
             "tried at its retry, still failing"
         );
-        assert_eq!(retry_at(fault.as_ref()), Some(retry + RETRY));
+        assert_eq!(retry_at(fault.as_ref()), Some(retry + 2 * RETRY));
         assert!(
-            frame(&mut fault, 3, retry + RETRY, false),
+            frame(&mut fault, 4, retry + 2 * RETRY, false),
             "drawn at the next retry"
         );
         assert_eq!(retry_at(fault.as_ref()), None, "drawn: nothing owed");
+    }
+
+    /// A frame failing again and again waits twice as long each time, to 30
+    /// seconds; input has it tried at once, and its waits start over.
+    #[test]
+    fn a_frame_failing_again_and_again_waits_longer_till_input() {
+        let waits: Vec<u64> = (1..=8).map(|n| frame_wait(n).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(frame_wait(u32::MAX), FRAME_RETRY_MOST);
+        let broken = || Err::<(), _>(zgx_gpu::GpuError("canvas raster exceeds 32 MiB".into()));
+        let (mut at, mut fault) = (Instant::now(), None);
+        let mut ran = 0;
+        let mut revision = 0;
+        let mut tried = |fault: &mut Option<Fault>, at: Instant, ran: &mut u32| {
+            revision += 1;
+            run_frame(
+                fault,
+                revision,
+                at,
+                "the window's frame",
+                |_| {},
+                || {
+                    *ran += 1;
+                    broken()
+                },
+            )
+        };
+        tried(&mut fault, at, &mut ran);
+        for wait in [1, 2, 4, 8, 16, 30, 30] {
+            let next = retry_at(fault.as_ref()).unwrap();
+            assert_eq!(next.duration_since(at), Duration::from_secs(wait));
+            at = next;
+            tried(&mut fault, at - Duration::from_millis(1), &mut ran);
+            tried(&mut fault, at, &mut ran);
+        }
+        assert_eq!(ran, 8, "once a wait, never before its end");
+        hurry(&mut fault);
+        tried(&mut fault, at, &mut ran);
+        assert_eq!(ran, 9, "input: at once");
+        assert_eq!(
+            retry_at(fault.as_ref()),
+            Some(at + RETRY),
+            "and from a second again"
+        );
+    }
+
+    /// A retry that fails another way is said, as the first failure was.
+    #[test]
+    fn a_retry_failing_another_way_is_said() {
+        let mut said = Vec::new();
+        let (start, mut fault) = (Instant::now(), None);
+        for (revision, (at, message)) in [(0, "first"), (1, "first"), (3, "another")]
+            .into_iter()
+            .enumerate()
+        {
+            run_frame(
+                &mut fault,
+                revision as u64,
+                start + Duration::from_secs(at),
+                "the window's frame",
+                |said_now| said.push(said_now.to_string()),
+                || -> Result<(), zgx_gpu::GpuError> { panic!("{message}") },
+            );
+        }
+        assert_eq!(
+            said.len(),
+            2,
+            "the first and the other, not the repeat: {said:?}"
+        );
+        assert!(
+            said[0].contains("first") && said[1].contains("another"),
+            "{said:?}"
+        );
     }
 
     /// A popup's issue reaches the runtime's listeners, and only once.
