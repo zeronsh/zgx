@@ -18,6 +18,8 @@
 use crate::bench_limits;
 #[path = "chat_server.rs"]
 mod chat_server;
+#[path = "gate_marks.rs"]
+mod gate_marks;
 use std::time::Instant;
 use zgx::{
     input::{InputEvent, Key, PointerButton},
@@ -368,7 +370,9 @@ fn code(make: MakeDrawing) {
     let dir = std::env::temp_dir().join(format!("zgx-apps-bench-{:010}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bench.rs");
-    std::fs::write(&path, source(lines)).unwrap();
+    // The bench's own file, made uncounted: what making it costs follows
+    // where its lines lie in the binary.
+    gate_marks::outside(|| std::fs::write(&path, source(lines)).unwrap());
     let mut b = Bench::new("code_editor", (1100., 760.), &[], make);
     b.app.desktop.clone().unwrap().pick([&path]);
     assert!(b.app.host.run_command("open"));
