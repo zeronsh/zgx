@@ -764,7 +764,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
-      - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
+      - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --test patched_wgpu_hal --locked
+      # Metal's queue really goes at rest (zgx's wgpu-hal patch).
+      - run: cargo test -p zgx-gpu --lib --locked -- queue_rest_tests
       - run: cargo test -p zgx-fx --locked
       # The mixer offline; its decoders (AAC through AudioToolbox) and the
       # device host, which builds CoreAudio's but opens no output.
@@ -878,7 +880,7 @@ jobs:
       # separator bug), in one run.
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-script --lib --test components --test bundle --locked
       # Text in every script, shaped in the system's own fonts.
-      - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
+      - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --test patched_wgpu_hal --locked
       - run: cargo test -p zgx-fx --locked
       - run: cargo test -p zgx-audio --locked
       - run: cargo test -p zgx-audio --features device,vorbis,mp3,opus,aac,hrtf --locked
