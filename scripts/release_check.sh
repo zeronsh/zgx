@@ -5,7 +5,7 @@
 #     scripts/release_check.sh [--allow-dirty]
 #
 # 1. The forks zgx publishes as its own crates (vendor/harfrust,
-#    cosmic-text, taffy, mlua, vte, alacritty-terminal, zune-jpeg, arboard
+#    swash, cosmic-text, taffy, mlua, vte, alacritty-terminal, zune-jpeg, arboard
 #    as zgx-harfrust, zgx-cosmic-text, zgx-taffy, zgx-mlua, zgx-vte,
 #    zgx-alacritty-terminal, zgx-zune-jpeg, zgx-arboard) are each packaged and built from
 #    their package, against crates.io and the forks they depend on
@@ -55,7 +55,7 @@ cd "$(git rev-parse --show-toplevel)"
 # `--allow-dirty`: check uncommitted changes too (a release itself is clean).
 dirty=""
 if [ "${1:-}" = --allow-dirty ]; then dirty=--allow-dirty; fi
-forks="harfrust cosmic-text taffy mlua vte alacritty-terminal zune-jpeg arboard"
+forks="harfrust swash cosmic-text taffy mlua vte alacritty-terminal zune-jpeg arboard"
 # Where packages are unpacked, the forks' beside the workspace's (3 reads
 # them there).
 target="${CARGO_TARGET_DIR:-target}"
@@ -72,14 +72,14 @@ for fork in $forks; do
     # is written into its own lockfile (`[[patch.unused]]`, harfrust's and
     # taffy's are committed), which leaves the checkout dirty.
     deps=""
-    if [ "$fork" = cosmic-text ]; then
-        deps='patch.crates-io.zgx-harfrust.path="vendor/harfrust"'
-    fi
-    if [ "$fork" = alacritty-terminal ]; then
-        deps='patch.crates-io.zgx-vte.path="vendor/vte"'
-    fi
+    if [ "$fork" = cosmic-text ]; then deps="harfrust swash"; fi
+    if [ "$fork" = alacritty-terminal ]; then deps="vte"; fi
+    given=""
+    for dep in $deps; do
+        given="$given --config patch.crates-io.zgx-$dep.path=\"vendor/$dep\""
+    done
     cargo package --manifest-path "vendor/$fork/Cargo.toml" $features $dirty \
-        --target-dir "$target" ${deps:+--config "$deps"}
+        --target-dir "$target" $given
 done
 # The first Python that runs: Windows' runners name it python, and a
 # Windows without Python has a python3 that only opens the Store (it is
@@ -95,6 +95,8 @@ if [ -z "$python" ]; then
     echo "no Python runs (python3 or python): the checks below need one" >&2
     exit 1
 fi
+echo "== this check's lists"
+"$python" scripts/check_release_lists.py
 echo "== the changelog's entries"
 "$python" scripts/changelog.py check --release "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 echo "== the forks against crates.io"
@@ -114,7 +116,7 @@ mkdir -p "$app/src"
     printf '[package]\nname = "zgx-fresh-app"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n\n'
     # A workspace of its own, not a member of zgx's when under its target/.
     printf '[workspace]\n\n[dependencies]\nzgx-script = "=%s"\n\n[patch.crates-io]\n' "$zgx"
-    for crate in zgx zgx-components zgx-text zgx-gpu zgx-desktop zgx-script zgx-run zgx-terminal zgx-ghostty-sys; do
+    for crate in zgx zgx-components zgx-text zgx-gpu zgx-3d zgx-audio zgx-module zgx-module-macros zgx-desktop zgx-script zgx-run zgx-terminal zgx-ghostty-sys; do
         printf '%s = { path = "../package/%s-%s" }\n' "$crate" "$crate" "$zgx"
     done
     for fork in $forks; do
@@ -170,7 +172,7 @@ ONLY = {
 metadata = json.loads(subprocess.check_output(
     ["cargo", "metadata", "--format-version", "1", "--no-deps", "--locked"]))
 published = [p for p in metadata["packages"] if p["publish"] is None and p["name"].startswith("zgx")
-             and p["manifest_path"].replace("\\", "/").split("/")[-3] == "crates"]
+             and "/crates/" in p["manifest_path"].replace("\\", "/")]
 print('[package]\nname = "zgx-features-app"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n')
 print("[workspace]\n\n[dependencies]")
 for package in sorted(published, key=lambda p: p["name"]):
@@ -221,7 +223,7 @@ metadata = json.loads(subprocess.check_output(
 for package in sorted(metadata["packages"], key=lambda p: p["name"]):
     name = package["name"]
     if package["publish"] is not None or not name.startswith("zgx") \
-            or package["manifest_path"].replace("\\", "/").split("/")[-3] != "crates":
+            or "/crates/" not in package["manifest_path"].replace("\\", "/"):
         continue
     path = {1: "1/", 2: "2/", 3: f"3/{name[0]}/"}.get(len(name), f"{name[:2]}/{name[2:4]}/") + name
     request = urllib.request.Request(f"https://index.crates.io/{path}", headers={"User-Agent": "zgx-release-check"})
@@ -242,6 +244,20 @@ if ! cut -d' ' -f2 "$target/previous.txt" | grep -qv '^-$'; then
     echo "no earlier release on crates.io"
     exit 0
 fi
+# At a breaking version (0.1.x to 0.2.0) the previous crates ask for
+# versions Cargo won't give them from this release: it would build them
+# against crates.io's own and prove nothing. It isn't checked, and says so;
+# the previous release's Luau apps run on this one in its place.
+breaking=$("$python" -c 'import sys
+old, new = (v.split("-")[0].split(".") for v in sys.argv[1:3])
+print("no" if (old[:2] == new[:2] if new[0] == "0" else old[0] == new[0]) else "yes")' \
+    "$(awk '$1 == "zgx" { print $2 }' "$target/previous.txt")" "$zgx")
+if [ "$breaking" = yes ]; then
+    echo "NOT CHECKED: $zgx breaks the previous release's API, so its crates can't be built against this one's"
+    echo "== the previous release's Luau apps on this release"
+    "$python" scripts/previous_scripts.py --target "$target" \
+        --previous "$(awk '$1 == "zgx" { print $2 }' "$target/previous.txt")"
+else
 # Each, as crates.io has it, with every other zgx crate this release's
 # package: an app on it that runs `cargo update` gets them, and it calls
 # them in places a doc(hidden), return-type or literal change breaks
@@ -268,6 +284,7 @@ while read -r crate previous _; do
     cargo check --manifest-path "$compat/Cargo.toml" --target-dir "$target" < /dev/null
     echo "$crate $previous builds against this release's crates"
 done < "$target/previous.txt"
+fi
 echo "== semver: only what this release accepts (cargo semver-checks)"
 if ! cargo semver-checks --version >/dev/null 2>&1; then
     echo "cargo-semver-checks is needed: cargo install cargo-semver-checks --locked" >&2
