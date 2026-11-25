@@ -3100,3 +3100,77 @@ fn a_panic_dropping_a_modules_state_is_caught_as_its_thread_ends() {
     .join();
     assert!(ended.is_ok(), "the thread ended, its state's panic caught");
 }
+
+thread_local! {
+    /// How many of `tables`' functions were dropped.
+    static TABLES_DROPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A module whose function counts its drop.
+mod tables {
+    use zgx_module::{Host, Value};
+    struct Counted;
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            super::TABLES_DROPPED.with(|d| d.set(d.get() + 1));
+        }
+    }
+    zgx_module::register!("tables", |host: &Host| {
+        let counted = Counted;
+        host.function("tables.one", move |_| {
+            let _counted = &counted;
+            Value::from(1.0)
+        });
+    });
+}
+
+/// What a module registered goes with its host: its function's drop runs
+/// as the host goes, not at the thread's next load, and a host after it
+/// has none of it.
+#[test]
+fn a_modules_functions_go_with_their_host() {
+    TABLES_DROPPED.with(|d| d.set(0));
+    let make = |runtime: &zgx::reactive::Runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.text { tostring(ui.module("tables").one()), id = "one" }"#,
+        );
+        // SAFETY: The test's own entry.
+        unsafe { host.enter_module(tables::zgx_module_v1, &tables::zgx_module_manifest) }.unwrap();
+        host
+    };
+    let mut app = TestApp::new(make);
+    assert_eq!(app.text("one"), "1");
+    assert_eq!(
+        TABLES_DROPPED.with(std::cell::Cell::get),
+        0,
+        "held while its host is"
+    );
+    drop(app);
+    assert_eq!(
+        TABLES_DROPPED.with(std::cell::Cell::get),
+        1,
+        "dropped as its host went"
+    );
+    // A host made right after, in the same turn, that loads none: none of
+    // the last one's is its own, wherever its functions were allocated.
+    let mut fresh = TestApp::new(|runtime| {
+        ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local ok, why = pcall(ui.module, "tables")
+            return ui.text { tostring(ok) .. " " .. tostring(why), id = "said" }"#,
+        )
+    });
+    let said = fresh.text("said");
+    assert!(
+        said.starts_with("false") && said.contains("the app loaded none"),
+        "{said}"
+    );
+    drop(fresh);
+    let mut again = TestApp::new(make);
+    assert_eq!(again.text("one"), "1", "loaded again into another host");
+    drop(again);
+    assert_eq!(TABLES_DROPPED.with(std::cell::Cell::get), 2);
+}

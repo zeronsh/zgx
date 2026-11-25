@@ -498,6 +498,26 @@ thread_local! {
     static REFUSED: RefCell<Vec<(Weak<FunctionsOf>, String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Lets go of what this thread keeps of the host of `functions`, as it goes:
+/// its modules' tables, and so (once its scripts' VMs are closed too) what
+/// they registered, whose drops run then rather than at the thread's next
+/// load. (Matched by address alone: the host's functions may outlive it in
+/// a VM closing after it; the table holds a `Weak` of them, which keeps
+/// their allocation, so no other host's can be at that address meanwhile.)
+pub(crate) fn forget_host(functions: &crate::Functions) {
+    let of = |host: &Weak<FunctionsOf>| std::ptr::eq(host.as_ptr(), Rc::as_ptr(functions));
+    // (Taken out first: a module's drop may load another.)
+    let gone: Vec<_> = LOADED.with_borrow_mut(|all| {
+        let (gone, kept) = std::mem::take(all)
+            .into_iter()
+            .partition(|(host, _)| of(host));
+        *all = kept;
+        gone
+    });
+    REFUSED.with_borrow_mut(|all| all.retain(|(host, ..)| !of(host)));
+    drop(gone);
+}
+
 /// Why the module `name` didn't load into this host, if it was refused.
 fn refused(functions: &crate::Functions, name: &str) -> Option<String> {
     REFUSED.with_borrow(|all| {
