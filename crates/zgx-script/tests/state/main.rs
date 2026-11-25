@@ -67,6 +67,8 @@ mod plugins;
 mod reload_cache;
 #[path = "../reload_shadow.rs"]
 mod reload_shadow;
+#[path = "../require_repeats.rs"]
+mod require_repeats;
 #[path = "../retarget.rs"]
 mod retarget;
 #[path = "../router.rs"]

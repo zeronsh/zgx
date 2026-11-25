@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A module asked for again while the app loads is answered from what loaded** (zgx-script): most of a load's requires name a module that has loaded already, and each walked its path again, to see whether it is a folder and that it isn't through a link out of the script's folder. A name asked again from the same folder, as written, is now answered from the module it led to: in the app's scripts (a plugin's requires, and `@app/…`, are looked at each time), to the end of the load. *What to know:* a file or folder changed on the disk after its module loaded, in the same load (a link out of the folder put in its place, refused before; an `x.luau` become `x/init.luau`), is seen by a name not asked yet, and by the next load, but not by a name that was already asked: it answers what loaded. So it is with the packages the app uses.

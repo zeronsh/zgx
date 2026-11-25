@@ -156,6 +156,7 @@ mod persist;
 mod real_paths;
 mod reloads;
 mod reorder;
+mod repeats;
 mod router;
 mod routes;
 mod rules;
@@ -1685,6 +1686,7 @@ struct Require {
     files: Files,
     plugin_name: Option<String>,
     all_packages: Vec<String>,
+    repeats: repeats::Repeats,
 }
 
 /// `require(name)` from a VM: a plugin's when `LENDING` (packages lent to
@@ -1706,6 +1708,7 @@ fn require_module<const LENDING: bool>(
         files,
         plugin_name,
         all_packages,
+        repeats,
     } = state;
     let files = files.clone();
     let plugin = LENDING;
@@ -1717,10 +1720,21 @@ fn require_module<const LENDING: bool>(
     };
     let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
     // The requiring file, from its chunk name (its path in the root).
-    let caller = lua
+    let chunk = lua
         .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
-        .flatten()
-        .and_then(|s| s.strip_prefix('@').map(|rel| root.join(rel)));
+        .flatten();
+    let chunk = chunk.as_deref().and_then(|s| s.strip_prefix('@'));
+    // What its load asked by this name already, and has loaded.
+    let asked = match LENDING {
+        true => None,
+        false => repeats.key(chunk, &name),
+    };
+    if let Some(asked) = &asked
+        && let Some(value) = repeats.path(asked, |path| loaded_again(host, &modules.borrow(), path))
+    {
+        return Ok(value);
+    }
+    let caller = chunk.map(|rel| root.join(rel));
     let here = caller
         .as_deref()
         .and_then(std::path::Path::parent)
@@ -1872,8 +1886,15 @@ fn require_module<const LENDING: bool>(
     if let Some(tracker) = &tracker {
         tracker.required(&path);
     }
+    // (Not a replacement's modules: what replaces what changes.)
+    let asked = asked.filter(|_| in_plugin.is_none());
     match modules.borrow().get(&path) {
-        Some(Some(value)) => return Ok(value.clone()),
+        Some(Some(value)) => {
+            if let Some(asked) = asked {
+                repeats.keep(asked, &path);
+            }
+            return Ok(value.clone());
+        }
         Some(None) => return Err(fail("a require cycle".into())),
         None => {}
     }
@@ -1972,8 +1993,28 @@ fn require_module<const LENDING: bool>(
             return Err(e);
         }
     };
+    if let Some(asked) = asked {
+        repeats.keep(asked, &path);
+    }
     modules.borrow_mut().insert(path, Some(value.clone()));
     Ok(value)
+}
+
+/// What the module at `path` returned, if it has loaded, asked for again:
+/// told to the host's record of who requires what, as any require is.
+fn loaded_again(
+    host: &std::rc::Weak<Inner>,
+    modules: &HashMap<PathBuf, Option<mlua::Value>>,
+    path: &std::path::Path,
+) -> Option<mlua::Value> {
+    let value = modules.get(path)?.clone()?;
+    if reloads::recording()
+        && let Some(host) = host.upgrade()
+        && let Some(tracker) = tracking(&host)
+    {
+        tracker.required(path);
+    }
+    Some(value)
 }
 
 /// `path` as `require` keys the modules it ran: canonical (a temporary
@@ -4964,6 +5005,8 @@ impl ScriptHost {
         let _ahead = sources::ReleaseAhead;
         // Where its folders really are, asked once for the files in each.
         let _real = real_paths::Load::begin();
+        // What its requires led to, for those asked again.
+        let _repeats = repeats::Load::begin();
         let _read = checked_files::ReleaseRead(match &*self.0.files.borrow() {
             Files::Folder(checked, _) => Some(checked.clone()),
             _ => None,
@@ -5281,6 +5324,10 @@ impl ScriptHost {
             files,
             plugin_name,
             all_packages,
+            repeats: match plugin {
+                true => Default::default(),
+                false => repeats::Repeats::of_the_app(),
+            },
         };
         // Chosen once per VM: the app's resolver has none of lending's
         // checks compiled in.
