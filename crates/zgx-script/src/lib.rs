@@ -501,6 +501,18 @@ pub fn last_budget_stop() -> Option<interrupt::BudgetStop> {
 }
 #[doc(hidden)]
 pub use interrupt::BudgetStop;
+/// In the browser, how the time checks looked for the last call stopped for
+/// its time: the gap and safepoints between the look that stopped it and the
+/// one before, and how many safepoints in its first look was. What a test
+/// bounds the stop by where wall time also counts what the machine took.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub fn last_budget_looks() -> Option<interrupt::WasmStopLooks> {
+    interrupt::last_looks()
+}
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub use interrupt::WasmStopLooks;
 /// CPU time the calling thread has used, as script budgets count it: what
 /// a test bounds a stopped script by, where wall time also counts what the
 /// machine gave others.
