@@ -282,3 +282,152 @@ fn a_highlighter_stays_on_its_thread() {
     .join()
     .unwrap();
 }
+
+mod failing {
+    use zgx_module::Host;
+    // Panics on a line saying "boom"; leaves a state past its own on one
+    // saying "past".
+    zgx_module::register!("failing", |host: &Host| {
+        host.highlighter("failing.lines", &["word"], |line, state, push| {
+            if line == b"boom" {
+                panic!("a highlighter that panics");
+            }
+            if line == b"past" {
+                return 1 << 31;
+            }
+            push(1, line.len() as u32, 0);
+            state
+        });
+    });
+}
+
+fn failing(script: &str) -> Harness {
+    let script = script.to_owned();
+    Harness::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", &script);
+        // SAFETY: The test's own `register!` entry.
+        unsafe { host.enter_module(failing::zgx_module_v1, &failing::zgx_module_manifest) }
+            .unwrap();
+        host
+    })
+}
+
+/// A highlighter that panics is caught at the boundary: the textarea turns
+/// it off and the app is told, as of a script's error; so is one leaving a
+/// state past its own. Asked from a script, either raises.
+#[test]
+fn a_highlighter_that_fails_is_turned_off_and_said() {
+    for (text, said) in [
+        (r"ok\nboom\nlater", "its module panicked"),
+        (r"ok\npast\nlater", "a state past"),
+    ] {
+        let mut h = failing(&format!(
+            r##"return ui.textarea {{ id = "code", value = ui.state("text", "{text}"), w = 300, h = 100,
+            highlight = ui.highlighter("failing.lines", {{ word = "#ff0000" }}) }}"##
+        ));
+        h.frames(2);
+        let error = h.error().unwrap_or_default();
+        assert!(
+            error.contains("failing.lines")
+                && error.contains(said)
+                && error.contains("off for this textarea"),
+            "{error}"
+        );
+        assert!(
+            runs(&mut h, "code")
+                .iter()
+                .all(|(_, color)| *color != RED || true)
+        );
+        h.frames(2);
+    }
+    let h = failing(
+        r##"local h = ui.highlighter("failing.lines", { word = "#ff0000" })
+        for _, line in { "boom", "past" } do
+            for _, ask in { function() return h:after(line, 0) end, function() return h:lex(line, 0) end,
+                function() return h:states("ok\n" .. line, 1) end } do
+                local ok, why = pcall(ask)
+                assert(not ok and string.find(tostring(why), "failing.lines", 1, true), tostring(why))
+            end
+        end
+        return ui.text { "done", id = "done" }"##,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+}
+
+/// A C module's highlighter pushing what no runtime should trust: spans from
+/// 0, ending before they start, past the line, of kinds it hasn't, out of
+/// order, overlapping, cutting a character, a million of them. Each is let
+/// go or held to the line, and nothing panics.
+#[cfg(unix)]
+#[test]
+fn a_highlighters_spans_are_not_trusted() {
+    use zgx_module::abi;
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("c-module-hostile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = r#"{"zgx_module":1,"abi":1,"name":"hostile","version":"1.0.0"}"#;
+    let bytes: Vec<String> = abi::manifest_bytes(json)
+        .iter()
+        .map(|b| b.to_string())
+        .collect();
+    std::fs::write(
+        dir.join("manifest.h"),
+        format!("ZGX_MODULE_MANIFEST(hostile) = {{{}}};\n", bytes.join(",")),
+    )
+    .unwrap();
+    let library = dir.join(format!(
+        "{}hostile{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ));
+    let built = std::process::Command::new("cc")
+        .args([
+            "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC", "-I",
+        ])
+        .arg(here.join("../zgx-module/include"))
+        .arg("-I")
+        .arg(&dir)
+        .arg(here.join("tests/c_module/hostile.c"))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("a C compiler (`cc`) runs");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r##"local h = ui.highlighter("hostile.spans", { one = "#ff0000", two = "#00ff00" })
+            local spans, after = h:lex("abcdef", 0)
+            -- The span over the two before it, and the first of the million.
+            assert(after == 0 and #spans == 2, `{#spans} spans`)
+            assert(spans[1][1] == 1 and spans[1][2] == 3 and spans[1][3] == "two")
+            assert(spans[2][1] == 6 and spans[2][2] == 6 and spans[2][3] == "one")
+            local past = h:lex("xyz", 0)
+            assert(#past == 1 and past[1][1] == 2 and past[1][2] == 3 and past[1][3] == "two", "held to the line")
+            local cut = h:lex("aé b", 0)
+            assert(#cut == 1 and cut[1][1] == 2 and cut[1][2] == 2, "as pushed: a script reads bytes")
+            return ui.textarea { id = "code", value = ui.state("text", "abcdef\naé b\nxyz"), w = 300, h = 100,
+                highlight = h }"##,
+        );
+        // SAFETY: The C module this test just built.
+        unsafe { host.load_module(&library) }.unwrap();
+        host
+    });
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    assert_eq!(color_of(&mut h, "abc"), GREEN, "the spans left");
+    assert_eq!(color_of(&mut h, "f"), RED);
+    assert_eq!(color_of(&mut h, "é"), RED, "held to the character it cut");
+    assert_eq!(color_of(&mut h, "yz"), GREEN, "held to the line");
+    std::fs::remove_dir_all(dir).unwrap();
+}

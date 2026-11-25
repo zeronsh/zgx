@@ -923,7 +923,7 @@ fn the_c_header_is_the_rust_interface() {
     }
     // Every line the probe prints is held to something here: a field added
     // to the header is added to this test.
-    assert_eq!(c.len(), expected.len() + 3, "{printed}");
+    assert_eq!(c.len(), expected.len() + 4, "{printed}");
     let kinds = [
         abi::NIL,
         abi::BOOL,
@@ -940,6 +940,10 @@ fn the_c_header_is_the_rust_interface() {
     assert_eq!(
         c["statuses"],
         format!("{} {} {}", abi::DONE, abi::FAILED, abi::REFUSED_ABI)
+    );
+    assert_eq!(
+        c["highlight"],
+        format!("{} {}", abi::HIGHLIGHT_FAILED, abi::HIGHLIGHT_STATES)
     );
     assert_eq!(
         c["posted"],

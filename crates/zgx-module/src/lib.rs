@@ -1073,8 +1073,11 @@ impl Host<'_> {
     /// colours): given a line and what the line before left (0: nothing
     /// open), it hands each span to `push` (bytes from 1, both ends in, and
     /// its kind's number in `kinds`) and returns what this line leaves.
-    /// Called on the interface's thread alone, as long as the host or a
-    /// textarea or script of it holds it, then dropped once. False where the
+    /// Its states are below 2^31 - 1 (`abi::HIGHLIGHT_STATES`). A panic in
+    /// it is caught (and printed, as any): the runtime turns it off for that
+    /// textarea and shows why, as it does a module's error. Called on the
+    /// interface's thread alone, as long as the host or a textarea or script
+    /// of it holds it, then dropped once. False where the
     /// runtime is older than highlighters: the module loads without one.
     /// Unstable: its shape may change in any release.
     #[doc(hidden)]
@@ -1096,18 +1099,24 @@ impl Host<'_> {
             sink: *mut c_void,
             push: abi::Push,
         ) -> u32 {
-            // SAFETY: `user` is the `G` boxed below; `line` lent for the
-            // call; `sink` the runtime's, for `push`.
-            unsafe {
-                let line = if len == 0 {
-                    &[][..]
-                } else {
-                    std::slice::from_raw_parts(line, len)
-                };
-                (*(user as *const G))(line, state, &mut |from, to, kind| {
-                    push(sink, from, to, kind)
-                })
-            }
+            let line = if len == 0 {
+                &[][..]
+            } else {
+                // SAFETY: Lent by the runtime for the call.
+                unsafe { std::slice::from_raw_parts(line, len) }
+            };
+            // A panic can't cross into the runtime: it is the highlighter
+            // failing, which turns it off (`abi::HIGHLIGHT_FAILED`).
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // SAFETY: `user` is the `G` boxed below; `sink` the
+                // runtime's, for `push`, both for the call.
+                unsafe {
+                    (*(user as *const G))(line, state, &mut |from, to, kind| {
+                        push(sink, from, to, kind)
+                    })
+                }
+            }))
+            .unwrap_or(abi::HIGHLIGHT_FAILED)
         }
         let names: Vec<abi::Bytes> = kinds
             .iter()

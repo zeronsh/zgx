@@ -23,6 +23,8 @@ use std::{
 /// line's spans to `push`, bytes from 1 with both ends in, and what the line
 /// leaves).
 pub(crate) struct Native {
+    /// What scripts and errors call it.
+    pub(crate) name: String,
     pub(crate) kinds: Vec<String>,
     pub(crate) line: Box<Line>,
 }
@@ -30,6 +32,69 @@ pub(crate) struct Native {
 /// A highlighter's call: a line and what the line before left, each span
 /// handed to the `FnMut`, what the line leaves returned.
 pub(crate) type Line = dyn Fn(&[u8], u32, &mut dyn FnMut(u32, u32, u32)) -> u32;
+
+/// What a highlighter returns when it failed, and the states it may leave
+/// (`zgx_module::abi`'s `HIGHLIGHT_FAILED` and `HIGHLIGHT_STATES`).
+const FAILED: u32 = u32::MAX;
+const STATES: u32 = (1 << 31) - 1;
+
+/// A span as the runtime takes it from a highlighter: bytes of its line
+/// (from 0, the end out), and its kind's number.
+pub(crate) type Span = (std::ops::Range<usize>, usize);
+
+impl Native {
+    /// What `line` leaves, from `state`, and its spans in `out`, none of
+    /// them trusted: each kept only within the line, of a kind it has, in
+    /// order and not overlapping (a later one over an earlier is let go),
+    /// and no more of them than the line has bytes. Err where it failed
+    /// (a panic, or a state past its own), saying so.
+    pub(crate) fn spans(
+        &self,
+        line: &[u8],
+        state: u32,
+        out: &mut Vec<Span>,
+    ) -> Result<u32, String> {
+        out.clear();
+        let (n, kinds) = (line.len(), self.kinds.len());
+        let mut ordered = true;
+        let next = (self.line)(line, state, &mut |from, to, kind| {
+            let (from, to, kind) = (from as usize, to as usize, kind as usize);
+            if out.len() >= n || from == 0 || from > n || to < from || kind >= kinds {
+                return;
+            }
+            let range = from - 1..to.min(n);
+            ordered &= out.last().is_none_or(|(last, _)| range.start >= last.end);
+            out.push((range, kind));
+        });
+        let next = self.checked(next)?;
+        if !ordered {
+            out.sort_by_key(|(range, _)| range.start);
+            let mut end = 0;
+            out.retain(|(range, _)| {
+                let keep = range.start >= end;
+                if keep {
+                    end = range.end;
+                }
+                keep
+            });
+        }
+        Ok(next)
+    }
+    /// What a line left, or why it is a failure.
+    fn checked(&self, next: u32) -> Result<u32, String> {
+        match next {
+            FAILED => Err(format!(
+                "the highlighter `{}` failed (its module panicked): it is off for this textarea",
+                self.name
+            )),
+            next if next >= STATES => Err(format!(
+                "the highlighter `{}` left a state past 2^31 - 2 ({next}): it is off for this textarea",
+                self.name
+            )),
+            next => Ok(next),
+        }
+    }
+}
 
 type FunctionsOf = <crate::Functions as std::ops::Deref>::Target;
 /// A host's highlighter as found: its host, its name, and it.
@@ -77,8 +142,10 @@ pub(crate) struct Highlighter {
 
 impl Highlighter {
     /// What `line` leaves, its spans not asked for.
-    fn after(&self, line: &[u8], state: u32) -> u32 {
-        (self.native.line)(line, state, &mut |_, _, _| {})
+    fn after(&self, line: &[u8], state: u32) -> mlua::Result<u32> {
+        self.native
+            .checked((self.native.line)(line, state, &mut |_, _, _| {}))
+            .map_err(mlua::Error::runtime)
     }
 }
 
@@ -99,7 +166,7 @@ impl UserData for HighlighterUd {
                 let step = step.max(1);
                 let mut state = 0;
                 for (k, line) in text.as_bytes().split(|&b| b == b'\n').enumerate() {
-                    state = h.0.after(line, state);
+                    state = h.0.after(line, state)?;
                     if (k + 1) % step == 0 {
                         out.raw_set(k + 1, state)?;
                     }
@@ -109,26 +176,22 @@ impl UserData for HighlighterUd {
         );
         // What `line` leaves, from `state`.
         m.add_method("after", |_, h, (line, state): (mlua::LuaString, u32)| {
-            Ok(h.0.after(&line.as_bytes(), state))
+            h.0.after(&line.as_bytes(), state)
         });
         // `line`'s spans, `{ from, to, kind }` with the kind by name, and what
         // it leaves: for holding a highlighter to another.
         m.add_method("lex", |lua, h, (line, state): (mlua::LuaString, u32)| {
             let mut spans = Vec::new();
-            let next = (h.0.native.line)(&line.as_bytes(), state, &mut |from, to, kind| {
-                spans.push((from, to, kind))
-            });
+            let next =
+                h.0.native
+                    .spans(&line.as_bytes(), state, &mut spans)
+                    .map_err(mlua::Error::runtime)?;
             let list = lua.create_table_with_capacity(spans.len(), 0)?;
-            for (from, to, kind) in spans {
-                let kind =
-                    h.0.native
-                        .kinds
-                        .get(kind as usize)
-                        .map_or("", String::as_str);
+            for (range, kind) in spans {
                 list.raw_push(lua.create_sequence_from([
-                    mlua::Value::Number(from.into()),
-                    mlua::Value::Number(to.into()),
-                    mlua::Value::String(lua.create_string(kind)?),
+                    mlua::Value::Number((range.start + 1) as f64),
+                    mlua::Value::Number(range.end as f64),
+                    mlua::Value::String(lua.create_string(&h.0.native.kinds[kind])?),
                 ])?)?;
             }
             Ok((list, next))
