@@ -459,3 +459,81 @@ fn a_guard_set_later_holds_and_a_reserved_prefix_alone_does_not() {
     run(&mut h, "press_given");
     assert_eq!(h.text("out"), "refused");
 }
+
+/// A script's press is not a person's: what it presses can't take the
+/// pointer, even just after a person pressed (their activation still live),
+/// while a person's own press of the same control does.
+#[test]
+fn a_scripted_press_takes_no_pointer_lock() {
+    let mut h = Harness::new(|runtime| {
+        let host = zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r##"
+local out, locked = ui.state("out", ""), ui.state("locked", false)
+local play = ui.ref()
+ui.command { id = "press_play", run = function()
+    for _, c in ui.controls() do
+        if c.name == "Play" then out:set(tostring(ui.press(c.handle))) end
+    end
+end }
+return ui.column { w = 300, h = 200,
+    ui.button { id = "play", ref = play, "Play",
+        on_click = function() play:get():lock_pointer() end,
+        on_pointer_lock = function(on) locked:set(on) end },
+    ui.text { id = "out", function() return `{out:get()} {locked:get()}` end },
+}"##,
+        );
+        host.guard(|_, _| Ok(()));
+        host
+    });
+    h.frames(3);
+    // A person's press or key a moment ago: their activation is live.
+    h.ui.input.note_gesture();
+    run(&mut h, "press_play");
+    assert_eq!(h.text("out"), "true false", "pressed, and no lock");
+    assert_eq!(h.ui.input.pointer_lock(&h.ui.scene.borrow()), None);
+    // A person's press of the same button, as a host hands it on (noted,
+    // then dispatched).
+    h.ui.input.note_gesture();
+    h.click("play");
+    h.frames(2);
+    assert_eq!(h.text("out"), "true true", "a person's press locks it");
+}
+
+/// A guarded script given a control of another host's window, active, presses
+/// nothing there.
+#[test]
+fn a_guarded_press_reaches_no_other_hosts_window() {
+    use zgx::compose::prelude::*;
+    let (mut h, _) = guarded(true);
+    h.frames(3);
+    let pressed = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut consent = zgx::widgets::Ui::with_runtime(h.ui.runtime.clone(), 300., 200.);
+    let counted = pressed.clone();
+    consent.mount(
+        button()
+            .on_click(move || counted.set(counted.get() + 1))
+            .child(text("Allow")),
+    );
+    consent.prepare_frame();
+    let other =
+        zgx_script::ScriptHost::inline(&h.ui.runtime, "consent", "return ui.text { \"x\" }");
+    other.window_controls(&consent);
+    // The other window has the keys.
+    h.ui.set_window_active(false);
+    consent.set_window_active(true);
+    let handle = zgx_script::driver::controls(&consent, None)
+        .into_iter()
+        .find(|c| c.name == "Allow")
+        .expect("Allow")
+        .handle as f64;
+    h.host
+        .set_state("given", zgx_script::Value::Num(handle))
+        .unwrap();
+    h.frames(2);
+    run(&mut h, "press_given");
+    consent.prepare_frame();
+    assert_eq!(pressed.get(), 0, "nothing in the other window was pressed");
+    assert_ne!(h.text("out"), "true");
+}

@@ -183,11 +183,12 @@ fn press(lua: &Lua, handle: f64) -> mlua::Result<bool> {
         return Ok(false);
     };
     let own = Own::of(lua, &ui);
-    Ok(crate::driver::press_control_where(
-        &mut ui,
-        handle as u64,
-        |scene, hit| own.as_ref().is_none_or(|own| own.holds(&at, scene, hit)),
-    ))
+    // A script's press, not a person's: it takes no pointer lock.
+    Ok(zgx::input::untrusted(|| {
+        crate::driver::press_control_where(&mut ui, handle as u64, |scene, hit| {
+            own.as_ref().is_none_or(|own| own.holds(&at, scene, hit))
+        })
+    }))
 }
 
 /// `ui.text_of(handle, cap?)`: the text a control (`ui.controls`' `handle`)
