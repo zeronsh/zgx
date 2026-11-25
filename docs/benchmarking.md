@@ -272,6 +272,12 @@ bundled font. It guards what a growing paragraph's chunks cost the text cache
 (about 290 M instructions, 1.4% of the gate), and asserts the cache shaped
 them, so it can't pass by measuring nothing.
 
+**A note's lines, by their state.** `note-letters` and `note-fence`
+(`note_bench`) edit a 300-line Luau note with a code block, its lines' room
+and marks given by their highlighter's state: letters typed and scrolls, with
+no fence changed, and a fence typed at its top and undone, which puts every
+line below in a block and back. Nothing is drawn.
+
 **The floor under a frame with the GPU encode.** Most of zgx's `RENDER=1`
 frame is what any Metal frame costs. `crates/zgx-gpu/examples/mtl_floor.rs`
 times a bare one (a command buffer, one empty render pass into a 2048 × 1536
