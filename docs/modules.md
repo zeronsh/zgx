@@ -42,7 +42,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-zgx-module = "0.1"
+zgx-module = "0.2"
 
 [profile.release]
 lto = "thin"

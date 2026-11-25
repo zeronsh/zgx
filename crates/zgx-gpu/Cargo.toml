@@ -40,10 +40,10 @@ vulkan = ["wgpu/vulkan"]
 d3d11 = ["wgpu/noop", "windows/Win32_Graphics_Direct3D", "windows/Win32_Graphics_Direct3D11", "windows/Win32_Security"]
 
 [dependencies]
-zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+zgx = { path = "../zgx", version = "0.2.0", default-features = false }
 # Text shaping and measuring (text.rs, prepared.rs, the font cache), apart
 # so a host with no renderer can link them alone.
-zgx-text = { path = "../zgx-text", version = "0.1.10" }
+zgx-text = { path = "../zgx-text", version = "0.2.0" }
 # wgpu's defaults less WebGPU (the browser's), and Vulkan and GL, which only
 # Linux and its kind always build (below).
 wgpu = { version = "29.0.4", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "wgsl"] }
