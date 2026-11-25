@@ -602,3 +602,53 @@ fn lint_findings_never_cover_the_interface() {
     assert!(h.find("lint-findings").is_some(), "the strip");
     assert!(h.find("script-error").is_none(), "still no error card");
 }
+
+/// The host's handle on the catalog scripts read: `None` before one is
+/// loaded, the same messages as `ui.t`, following the same locale either
+/// way round.
+#[test]
+fn the_host_reads_the_catalog_its_scripts_do() {
+    let code = r#"
+ui.i18n { dir = "locales", source = "en" }
+local name = ui.state("name", "Ada")
+return ui.column {
+    ui.text { ui.t("greeting", { name = name }), id = "greeting" },
+    ui.text { ui.t("search"), id = "search" },
+    ui.button { "fr", id = "fr", on_click = function() ui.locale:set("fr") end },
+}
+"#;
+    let path = app("host-catalog", code, &[("en", EN), ("fr", FR), ("ar", AR)]);
+    // No script has run and no directory was given: nothing to read.
+    let runtime = zgx::reactive::Runtime::new();
+    let empty = ScriptHost::new(&runtime, path.clone());
+    assert!(empty.i18n_catalog().is_none(), "none before any load");
+
+    // One the host loads itself, with no script at all.
+    let dir = path.parent().unwrap().join("locales");
+    let alone = ScriptHost::new(&runtime, path.clone()).i18n(dir, "en");
+    let own = alone.i18n_catalog().expect("loaded by the host");
+    assert_eq!(own.t("search").get(), "Search");
+
+    // One the app's script loads.
+    let mut h = harness(&path);
+    let catalog = h.host.i18n_catalog().expect("the script's catalog");
+    let greeting = || catalog.t("greeting").arg("name", "Ada").get();
+    assert_eq!(h.text("greeting"), "Hello, Ada");
+    assert_eq!(greeting(), h.text("greeting"));
+    assert_eq!(catalog.t("search").get(), h.text("search"));
+
+    // The host's `set_locale` is the scripts' locale, and a script's
+    // `ui.locale` is the host's.
+    catalog.set_locale(Some("fr"));
+    h.settle();
+    assert_eq!(greeting(), "Bonjour, Ada");
+    assert_eq!(h.text("greeting"), "Bonjour, Ada");
+    catalog.set_locale(Some("en"));
+    h.settle();
+    assert_eq!(h.text("greeting"), "Hello, Ada");
+    h.click("fr");
+    h.settle();
+    assert_eq!(h.text("search"), "Rechercher");
+    assert_eq!(catalog.t("search").get(), h.text("search"));
+    assert_eq!(h.host.i18n_catalog().unwrap().current(), catalog.current());
+}
