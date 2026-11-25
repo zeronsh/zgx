@@ -927,6 +927,8 @@ pub fn run_hosting(
         );
         // `ui.window.zoom`: the window's zoom, as its keys or the script set it.
         host.window_zoom(&cx.ui);
+        // `ui.window.hold_frames`: the frame held while what it changes to comes.
+        host.window_hold(&cx.ui);
         // `ui.window.active` and `ui.window.shown`.
         host.window_state(&cx.ui);
         // `ui.window.size`.
