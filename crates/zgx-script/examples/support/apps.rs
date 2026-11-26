@@ -95,6 +95,11 @@ struct Bench {
     /// The area the frames so far damaged, in points squared, where a scene
     /// asks (`stream`): none for the others, whose counts it would change.
     damaged: Option<f64>,
+    /// Where the pointer rests, once a scene puts it there (`stream`): each
+    /// frame then asks for the cursor under it, as a desktop window does
+    /// after drawing (`sync_cursor`: again whenever the point or geometry
+    /// moved), and what it last asked at.
+    cursor: Option<((f32, f32), Option<u64>)>,
 }
 impl Bench {
     fn new(script: &str, size: (f32, f32), args: &[String], make: MakeDrawing) -> Self {
@@ -139,6 +144,7 @@ impl Bench {
             drawing,
             reps,
             damaged: None,
+            cursor: None,
         };
         bench.frames(3);
         assert_eq!(bench.app.error(), None, "{script} loads");
@@ -160,6 +166,14 @@ impl Bench {
         }
         if let Some(drawing) = &mut self.drawing {
             drawing.draw(&self.app.ui.scene.borrow(), &report.damage);
+        }
+        if let Some(((x, y), asked)) = &mut self.cursor {
+            let scene = self.app.ui.scene.borrow();
+            let revision = scene.interaction_revision();
+            if *asked != Some(revision) {
+                *asked = Some(revision);
+                std::hint::black_box(self.app.ui.input.cursor_at(&scene, *x, *y));
+            }
         }
         zgx::profile::frame();
     }
@@ -555,11 +569,16 @@ fn stream(make: MakeDrawing) {
         // (`POINTER=0` leaves it outside the window): what hovering costs
         // while the rows under it move.
         if pointer {
-            b.app.ui.dispatch(InputEvent::PointerMove { x: 640., y: 450. });
+            b.app
+                .ui
+                .dispatch(InputEvent::PointerMove { x: 640., y: 450. });
+            b.cursor = Some(((640., 450.), None));
             b.frames(2);
-            assert!(b.app.ui.input.hovered().is_some(), "the pointer is over nothing");
+            assert!(
+                b.app.ui.input.hovered().is_some(),
+                "the pointer is over nothing"
+            );
         }
-
     });
     assert_eq!(b.app.error(), None);
     b.damaged = Some(0.);
