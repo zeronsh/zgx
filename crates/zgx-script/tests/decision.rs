@@ -23,6 +23,7 @@ fn with(app: &'static str, code: &str, grants: Vec<Capability>) -> Harness {
             name: "p".into(),
             entry,
             grants,
+            app_root: None,
         }]);
         host
     })

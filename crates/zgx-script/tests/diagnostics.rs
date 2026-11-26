@@ -326,6 +326,49 @@ fn a_watching_host_reloads_when_a_file_is_saved() {
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
+/// A module first required after the load (a page built when it opens) is
+/// watched from then on: saving it reloads, as saving one the load
+/// required does.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_watching_host_reloads_when_a_module_required_after_the_load_is_saved() {
+    use zgx_script::testing::TestApp;
+    let path = temp_script(
+        "watch-lazy",
+        "local open = ui.state(\"open\", false)\n\
+         return ui.column {\n\
+             ui.show(open, function()\n\
+                 return require(\"./page\")()\n\
+             end),\n\
+         }\n",
+    );
+    let page = path.with_file_name("page.luau");
+    let shows = |word: &str| {
+        format!("return function()\n    return ui.text {{ id = \"page\", \"{word}\" }}\nend\n")
+    };
+    std::fs::write(&page, shows("first")).unwrap();
+    let mut h = Harness::new(|runtime| ScriptHost::new(runtime, &path));
+    // No type checks polling: only a file event reloads in time.
+    h.host.check_on_reload(false);
+    let watching = h.host.watch(Duration::from_secs(600));
+    h.executor.borrow_mut().spawn(watching);
+    h.settle();
+    assert_eq!(h.find("page"), None, "not open, not required");
+    h.host
+        .set_state("open", zgx_script::Value::Bool(true))
+        .unwrap();
+    let showing = |h: &mut TestApp, word: &str| h.find("page").is_some() && h.text("page") == word;
+    assert!(h.wait_until(|h| showing(h, "first")));
+    rewrite(&page, &shows("second"));
+    assert!(
+        h.wait_until(|h| showing(h, "second")),
+        "{:?}",
+        h.find("page").map(|_| h.text("page"))
+    );
+    assert_eq!(h.host.error().get(), None);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn a_debug_build_lints_its_scripts_after_each_load() {
     let dir = common::temp_dir("lint-on-load");

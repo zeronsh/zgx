@@ -882,6 +882,7 @@ fn plugin_scene(name: &str, grants: Vec<zgx_script::Capability>) -> Harness {
             name: "cad".into(),
             entry,
             grants,
+            app_root: None,
         }]);
         host
     });
@@ -980,6 +981,7 @@ result:set(`{thrown} {held} {short} {again}`)
             name: "cad".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });

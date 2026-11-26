@@ -46,6 +46,7 @@ fn with(name: &str, code: &str) -> Harness {
             name,
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     })
@@ -134,6 +135,7 @@ ui.contribute("panel", ui.button { id = "write", w = 60, h = 24, on_click = func
             name: "writer2".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });

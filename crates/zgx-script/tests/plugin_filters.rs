@@ -29,6 +29,7 @@ fn with(app: &'static str, name: &str, code: &str, grants: Vec<Capability>) -> H
             name,
             entry,
             grants,
+            app_root: None,
         }]);
         host
     })
@@ -356,6 +357,7 @@ ui.filter {
             name: "flipper".into(),
             entry,
             grants: any(),
+            app_root: None,
         }]);
         host
     });

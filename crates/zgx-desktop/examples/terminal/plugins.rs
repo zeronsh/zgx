@@ -301,6 +301,7 @@ pub fn enabled(found: &[Found]) -> Vec<Plugin> {
                     .iter()
                     .flat_map(|p| capabilities(p))
                     .collect(),
+                app_root: None,
             })
         })
         .collect()

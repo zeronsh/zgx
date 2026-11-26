@@ -17,6 +17,7 @@ fn with(test: &str, app: &'static str, code: &str) -> Harness {
             name: "reader".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     })

@@ -261,6 +261,7 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                 name: name.clone(),
                 entry,
                 grants,
+                app_root: None,
             });
         }
     }

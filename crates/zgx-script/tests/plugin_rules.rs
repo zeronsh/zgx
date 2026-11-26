@@ -26,6 +26,7 @@ fn inline(app: &'static str, name: &str, code: &str, grants: Vec<Capability>) ->
             name,
             entry,
             grants,
+            app_root: None,
         }]);
         host
     })
@@ -112,6 +113,7 @@ fn replaced_with(name: &str, grants: Vec<Capability>) -> (bool, String) {
             name,
             entry,
             grants,
+            app_root: None,
         }]);
         host
     });
@@ -180,6 +182,7 @@ fn a_reserved_prefix_is_the_apps_alone() {
             name: "zeron.x".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -197,6 +200,7 @@ fn a_reserved_prefix_is_the_apps_alone() {
             name: "adds".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -219,6 +223,7 @@ fn a_reserved_prefix_holds_past_the_hosts_later_configuring() {
             name: "later".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -465,6 +470,7 @@ fn a_plugin_reaches_what_its_grants_say_unasked() {
             name: "granted".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });

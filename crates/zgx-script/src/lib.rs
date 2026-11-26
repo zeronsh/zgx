@@ -1447,6 +1447,15 @@ pub struct Plugin {
     pub entry: PathBuf,
     /// What it may do beyond its sandbox.
     pub grants: Vec<Capability>,
+    /// A directory of its own laid out as the app's root: the modules the
+    /// app runs from it (a replacement, `ui.override`, and the files that
+    /// requires) are named by their path in it, as the app's are in the
+    /// app's root (`ds/map.luau`), and so are their states (`ui.state`,
+    /// `ui.persist`: `ds/map.luau::open`). An app moving its modules into
+    /// a plugin keeps their saved state so, and its errors name no folder
+    /// of the machine's. A name one of the app's own files has stays that
+    /// file's: the plugin's keeps its full path. None: its full path.
+    pub app_root: Option<PathBuf>,
 }
 
 /// What a script may do beyond its sandbox: everything (the application's
@@ -1631,6 +1640,13 @@ impl Files {
     fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
         String::from_utf8(self.read(path)?).map_err(std::io::Error::other)
     }
+    fn is_file(&self, path: &std::path::Path) -> bool {
+        match self {
+            Files::Disk => path.is_file(),
+            Files::Bundle(bundle, _) => bundle.get(path).is_some(),
+            Files::Memory(files, _) => files.get(path).is_some(),
+        }
+    }
     fn is_dir(&self, path: &std::path::Path) -> bool {
         match self {
             Files::Disk | Files::Folder(..) => path.is_dir(),
@@ -1700,6 +1716,10 @@ struct Require {
     files: Files,
     plugin_name: Option<String>,
     all_packages: Vec<String>,
+    /// The real files of the modules named otherwise than by their path in
+    /// the root (`Plugin::app_root`), by name: what their own requires
+    /// resolve from.
+    named: RefCell<HashMap<String, PathBuf>>,
 }
 
 /// `require(name)` from a VM: a plugin's when `LENDING` (packages lent to
@@ -1721,6 +1741,7 @@ fn require_module<const LENDING: bool>(
         files,
         plugin_name,
         all_packages,
+        named,
     } = state;
     let files = files.clone();
     let plugin = LENDING;
@@ -1731,11 +1752,18 @@ fn require_module<const LENDING: bool>(
         ));
     };
     let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
-    // The requiring file, from its chunk name (its path in the root).
+    // The requiring file, from its chunk name (its path in the root, or
+    // in a plugin's `app_root`).
     let caller = lua
         .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
         .flatten()
-        .and_then(|s| s.strip_prefix('@').map(|rel| root.join(rel)));
+        .and_then(|s| {
+            let rel = s.strip_prefix('@')?;
+            Some(match named.borrow().get(rel) {
+                Some(file) => file.clone(),
+                None => root.join(rel),
+            })
+        });
     let here = caller
         .as_deref()
         .and_then(std::path::Path::parent)
@@ -1858,6 +1886,17 @@ fn require_module<const LENDING: bool>(
                 .into(),
         ));
     }
+    // A replacement and what it requires, in the app's VM, named by their
+    // path in their plugin's `app_root`, if it has one: unless one of the
+    // app's own files (or another plugin's module) has that name.
+    let as_app = in_plugin
+        .filter(|_| !LENDING)
+        .and_then(|r| host.upgrade()?.app_roots.borrow().get(&*r.owner).cloned())
+        .and_then(|dir| Some(path.strip_prefix(&dir).ok()?.to_string_lossy().into_owned()))
+        .filter(|rel| {
+            !files.is_file(&root.join(rel))
+                && named.borrow().get(rel).is_none_or(|file| *file == path)
+        });
     // A plugin's files are on the disk, whatever the app's are.
     let files = if in_plugin.is_some() && !within(root, &path) {
         Files::Disk
@@ -1897,6 +1936,12 @@ fn require_module<const LENDING: bool>(
         .map_err(|e| fail(format!("{}: {e}", path.display())))?;
     if let Some(host) = host.upgrade() {
         host.required.borrow_mut().push(path.clone());
+        // Watched from now on, though no load required it: a module
+        // required later (a `require` in a build or a handler) reloads
+        // when edited too. A load's many sends come to one look (`latest`).
+        if let Some(rewatch) = &*host.rewatch.borrow() {
+            rewatch.send(());
+        }
         // One more module of a package lent to this plugin.
         if let Some(plugin) = &plugin_name
             && let Some((package, _)) = packages.iter().find(|(_, dir)| within(dir, &path))
@@ -1911,13 +1956,20 @@ fn require_module<const LENDING: bool>(
         }
     }
     modules.borrow_mut().insert(path.clone(), None);
-    // Named by its path in the root: errors show it, and its own
-    // requires resolve from it.
-    let chunk = path
-        .strip_prefix(root)
-        .unwrap_or(&path)
-        .to_string_lossy()
-        .into_owned();
+    // Named by its path in the root (or its plugin's `app_root`): errors
+    // show it, its states start with it, and its own requires resolve
+    // from it.
+    let chunk = match as_app {
+        Some(rel) => {
+            named.borrow_mut().insert(rel.clone(), path.clone());
+            rel
+        }
+        None => path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned(),
+    };
     // A lent package's module: compiled once for all the plugins
     // requiring it, hot-reloading or not (its source is the same in each
     // VM). The app's resolver compiles none of this in (`LENDING`).
@@ -2201,6 +2253,9 @@ struct Inner {
     /// Each plugin's heap where the app set its own (`plugin_memory`), by
     /// name; the rest have `Limits::plugin_memory`.
     plugin_memory: RefCell<HashMap<String, usize>>,
+    /// Each plugin's directory laid out as the app's root
+    /// (`Plugin::app_root`), canonical, by name.
+    app_roots: RefCell<HashMap<String, PathBuf>>,
     /// What every plugin may do (`grant_all_plugins`), those loaded later
     /// too.
     all_plugins: RefCell<Vec<Capability>>,
@@ -2212,7 +2267,8 @@ struct Inner {
     /// Of `exposed_shared`, the keys plugins only read.
     read_only_shared: ReadOnly,
     exposed_hooks: Exposed,
-    /// Tells `watch` to look at what it watches again (after a reload).
+    /// Tells `watch` to look at what it watches again (after a reload, or
+    /// a module first required since).
     rewatch: RefCell<Option<zgx::task::LatestSender<()>>>,
     /// The window's clipboard and dialogs, once the view mounts in one.
     platform: io::SharedPlatform,
@@ -2442,6 +2498,7 @@ impl ScriptHost {
             fetch_policy: Rc::default(),
             grants: RefCell::default(),
             plugin_memory: RefCell::default(),
+            app_roots: RefCell::default(),
             all_plugins: RefCell::default(),
             managed: RefCell::default(),
             exposed_actions: Rc::default(),
@@ -3426,14 +3483,20 @@ impl ScriptHost {
     pub fn set_plugins(&self, plugins: Vec<Plugin>) {
         let mut grants = self.0.grants.borrow_mut();
         let mut managed = self.0.managed.borrow_mut();
+        let mut app_roots = self.0.app_roots.borrow_mut();
         for old in managed.drain(..) {
             if let Script::Plugin { name, .. } = old {
                 grants.remove(&name);
+                app_roots.remove(&name);
                 self.0.plugin_memory.borrow_mut().remove(&name);
             }
         }
         for plugin in plugins {
             grants.insert(plugin.name.clone(), plugin.grants);
+            if let Some(dir) = plugin.app_root {
+                let dir = dir.canonicalize().unwrap_or(dir);
+                app_roots.insert(plugin.name.clone(), dir);
+            }
             managed.push(Script::Plugin {
                 name: plugin.name,
                 path: plugin.entry,
@@ -4664,7 +4727,8 @@ impl ScriptHost {
             // The kernel says when a file changes; nothing runs meanwhile.
             #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
             if let Some(mut events) = file_events::FileEvents::new() {
-                // A reload (new plugins) has the watched files looked at again.
+                // A reload (new plugins), or a module required after it, has
+                // the watched files looked at again.
                 let (rewatch, mut rewatched) = zgx::task::latest::<()>();
                 *host.0.rewatch.borrow_mut() = Some(rewatch);
                 let mut heard = false;
@@ -5352,6 +5416,7 @@ impl ScriptHost {
             files,
             plugin_name,
             all_packages,
+            named: RefCell::default(),
         };
         // Chosen once per VM: the app's resolver has none of lending's
         // checks compiled in.

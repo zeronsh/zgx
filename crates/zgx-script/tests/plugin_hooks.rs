@@ -29,6 +29,7 @@ fn with(app: &'static str, name: &str, code: &str, grants: Vec<Capability>) -> H
             name,
             entry,
             grants,
+            app_root: None,
         }]);
         host
     })
@@ -185,6 +186,7 @@ fn the_host_can_ask_a_capability_to_add_at_a_target() {
             name: "guarded".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -306,6 +308,7 @@ ui.contribute { target = "#open", after = ui.text { "By open" } }
                 name: "locked".into(),
                 entry,
                 grants,
+                app_root: None,
             }]);
             host
         })

@@ -16,6 +16,7 @@ fn with(test: &str, app: &'static str, code: &str) -> Harness {
             name: "marks".into(),
             entry,
             grants: vec![Capability::Override("*".into())],
+            app_root: None,
         }]);
         host
     })

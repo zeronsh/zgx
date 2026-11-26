@@ -50,6 +50,7 @@ fn plugin(dir: &Path, name: &str, code: &str) -> Plugin {
         name: name.into(),
         entry,
         grants: Vec::new(),
+        app_root: None,
     }
 }
 

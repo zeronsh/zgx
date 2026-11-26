@@ -20,6 +20,7 @@ fn with(plugins: &[(&'static str, &str)]) -> Harness {
             name: (*name).into(),
             entry: entry(name, code),
             grants: vec![Capability::Override("*".into())],
+            app_root: None,
         })
         .collect();
     Harness::new(move |runtime| {
@@ -184,6 +185,7 @@ ui.contribute("plugin_page", ui.column {
             name: "mine".into(),
             entry,
             grants: Vec::new(),
+            app_root: None,
         }]);
         host
     });
@@ -225,6 +227,7 @@ fn over(plugin: &str, app: &str) -> Harness {
         name: "mine".into(),
         entry: entry("mine", &plugin),
         grants: vec![Capability::Override("*".into())],
+        app_root: None,
     }];
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", &app);

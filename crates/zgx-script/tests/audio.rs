@@ -541,6 +541,7 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
             name: "sfx".into(),
             entry,
             grants: vec![zgx_script::Capability::Audio],
+            app_root: None,
         }]);
         host
     });
@@ -586,6 +587,7 @@ fn a_plugin_not_granted_audio_is_refused() {
             name: "sfx".into(),
             entry,
             grants: vec![],
+            app_root: None,
         }]);
         host
     });
@@ -809,6 +811,7 @@ fn with_plugin(dir: &std::path::Path, code: &str) -> Sounding {
             name: "sfx".into(),
             entry,
             grants: vec![zgx_script::Capability::Audio],
+            app_root: None,
         }]);
         host
     })
@@ -965,6 +968,7 @@ fn a_plugins_sounds_count_against_its_memory() {
             name: "sfx".into(),
             entry,
             grants: vec![zgx_script::Capability::Audio],
+            app_root: None,
         }]);
         host
     });
@@ -1299,6 +1303,7 @@ fn a_plugins_effects_count_against_its_memory() {
             name: "sfx".into(),
             entry,
             grants: vec![zgx_script::Capability::Audio],
+            app_root: None,
         }]);
         host
     });

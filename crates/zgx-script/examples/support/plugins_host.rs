@@ -104,6 +104,7 @@ pub fn host(runtime: &Runtime) -> ScriptHost {
             name: "focus".into(),
             entry: plugins.join("focus/init.luau"),
             grants: vec![Capability::Override("#tasks".into())],
+            app_root: None,
         },
         // Replaces the empty state and, trusted with it, the row module.
         Plugin {
@@ -113,6 +114,7 @@ pub fn host(runtime: &Runtime) -> ScriptHost {
                 Capability::Override("#empty".into()),
                 Capability::Override("@app/components/task_row".into()),
             ],
+            app_root: None,
         },
     ]);
     host

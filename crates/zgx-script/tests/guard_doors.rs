@@ -363,6 +363,7 @@ fn a_plugins_web_view_is_not_asked_of() {
             name: "browser".into(),
             entry,
             grants: vec![Capability::Web],
+            app_root: None,
         }]);
         host
     });
