@@ -10,7 +10,7 @@
 //! `list_state_bench` (no new binary to link), small and undrawn but for
 //! their canvases' CPU work.
 //!
-//! `APP=mail` (`dashboard`, `sketch`, `code`, `chat`) runs one app; `REPS` sets the
+//! `APP=mail` (`dashboard`, `sketch`, `code`, `chat`, `stream`) runs one app; `REPS` sets the
 //! interactions measured (20); `ROWS` the dashboard's rows (100,000),
 //! `SHAPES` Sketch's shapes (500), `LINES` the code editor's file (100,000).
 //! `ONLY=name` measures the interactions whose names hold it, `SKIP=name`
@@ -20,7 +20,10 @@ use crate::bench_limits;
 mod chat_server;
 #[path = "gate_marks.rs"]
 mod gate_marks;
-use std::time::Instant;
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use zgx::{
     input::{InputEvent, Key, PointerButton},
     profile::Phase,
@@ -89,6 +92,9 @@ struct Bench {
     app: TestApp,
     drawing: Option<Box<dyn Drawing>>,
     reps: usize,
+    /// The area the frames so far damaged, in points squared, where a scene
+    /// asks (`stream`): none for the others, whose counts it would change.
+    damaged: Option<f64>,
 }
 impl Bench {
     fn new(script: &str, size: (f32, f32), args: &[String], make: MakeDrawing) -> Self {
@@ -128,7 +134,12 @@ impl Bench {
         setup(&mut app);
         let drawing = make(&mut app.ui.scene.borrow_mut(), size);
         let reps = self::size("REPS", 20);
-        let mut bench = Self { app, drawing, reps };
+        let mut bench = Self {
+            app,
+            drawing,
+            reps,
+            damaged: None,
+        };
         bench.frames(3);
         assert_eq!(bench.app.error(), None, "{script} loads");
         bench
@@ -137,6 +148,13 @@ impl Bench {
     fn frame(&mut self) {
         self.app.frame();
         let report = self.app.ui.scene.borrow_mut().flush();
+        if let Some(damaged) = &mut self.damaged {
+            *damaged += report
+                .damage
+                .iter()
+                .map(|r| f64::from(r.width * r.height))
+                .sum::<f64>();
+        }
         if zgx_fingerprint::on() {
             zgx_fingerprint::frame(&self.app.ui.scene.borrow(), &report);
         }
@@ -470,6 +488,108 @@ fn chat(make: MakeDrawing) {
     });
 }
 
+/// A reply streaming into a chat's transcript as an app draws one
+/// (`stream_fade/app.luau`): a measured list following its end, the reply
+/// under way parsed by `ui.markdown` and drawn by a `ui.each`, a chunk of
+/// `CHUNK` tokens (4) every third frame, as a model's server sends some four
+/// tokens each 50 ms, its newest words fading in. `FADE` is how: `bindings`
+/// (a colour function per fading chunk and a tick state animated every
+/// frame, an app doing it in script), `native` (`fade_in`, drawn in Rust) or
+/// `none`. `PRIMED` chunks are written first (200), uncounted (and with
+/// `OFF=1` the transcript scrolled up off the reply); then `REPS`
+/// rounds of a chunk's frame and two frames between chunks, and `COUNT`
+/// says which the gate counts: `chunk`, `between` or `all` (the rest go
+/// uncounted, `gate_marks::outside`).
+fn stream(make: MakeDrawing) {
+    let fade = std::env::var("FADE").unwrap_or_else(|_| "bindings".into());
+    let count = std::env::var("COUNT").unwrap_or_else(|_| "all".into());
+    let (primed, chunk) = (size("PRIMED", 200), size("CHUNK", 4));
+    let all = (0..3)
+        .map(chat_server::ChatServer::reply)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let tokens: Vec<String> = chat_server::ChatServer::tokens(&all)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let next = Rc::new(std::cell::Cell::new(0usize));
+    let mode = fade.clone();
+    let boost = std::env::var("BOOST").map_or(true, |b| b != "0");
+    let mut b = Bench::hosted(
+        "stream_fade",
+        (800., 760.),
+        &[],
+        make,
+        |host| {
+            host.function("stream.mode", move |_| {
+                zgx_script::Value::from(mode.as_str())
+            });
+            host.function("stream.boost", move |_| zgx_script::Value::Bool(boost));
+            let next = next.clone();
+            host.function("stream.chunk", move |_| {
+                let at = next.get();
+                next.set(at + chunk);
+                let text: String = (at..at + chunk)
+                    .map(|k| tokens[k % tokens.len()].as_str())
+                    .collect();
+                zgx_script::Value::from(text.as_str())
+            });
+        },
+        |_| {},
+    );
+    // `OFF=1`: the transcript scrolled up, off the reply, before the chunks
+    // counted: what they cost while it isn't shown (a reply scrolled away
+    // from, or behind another chat).
+    let off = std::env::var("OFF").is_ok_and(|o| o == "1");
+    gate_marks::outside(|| {
+        for _ in 0..primed {
+            assert!(b.app.host.run_command("chunk"));
+            b.frames(3);
+        }
+        if off {
+            b.app.scroll("transcript", -1e6);
+            b.frames(30);
+        }
+    });
+    assert_eq!(b.app.error(), None);
+    b.damaged = Some(0.);
+    let counted = |what: &str| count == "all" || count == what;
+    let (mut chunk_time, mut between_time) = (Duration::ZERO, Duration::ZERO);
+    let mut between_damage = 0.;
+    for _ in 0..b.reps {
+        let started = Instant::now();
+        let chunk_frame = |b: &mut Bench| {
+            assert!(b.app.host.run_command("chunk"));
+            b.frame();
+        };
+        if counted("chunk") {
+            chunk_frame(&mut b)
+        } else {
+            gate_marks::outside(|| chunk_frame(&mut b))
+        }
+        chunk_time += started.elapsed();
+        let (started, damaged) = (Instant::now(), b.damaged.unwrap_or(0.));
+        if counted("between") {
+            b.frames(2)
+        } else {
+            gate_marks::outside(|| b.frames(2))
+        }
+        between_time += started.elapsed();
+        between_damage += b.damaged.unwrap_or(0.) - damaged;
+    }
+    if let Some(drawing) = &mut b.drawing {
+        drawing.finish();
+    }
+    let reps = b.reps as f64;
+    println!(
+        "stream ({fade}, boost {boost}{}): a chunk's frame {:.3} ms, a frame between {:.3} ms, damaging {:.0} pt²",
+        if off { ", off screen" } else { "" },
+        chunk_time.as_secs_f64() * 1e3 / reps,
+        between_time.as_secs_f64() * 1e3 / reps / 2.,
+        between_damage / reps / 2.
+    );
+}
+
 /// The apps `APP` names (all of them if none), drawn by what `make` makes.
 pub fn run(make: MakeDrawing) {
     let only = std::env::var("APP").ok();
@@ -479,6 +599,7 @@ pub fn run(make: MakeDrawing) {
         ("sketch", sketch),
         ("code", code),
         ("chat", chat),
+        ("stream", stream),
     ] {
         if only.as_deref().is_none_or(|only| only == name) {
             run(make);

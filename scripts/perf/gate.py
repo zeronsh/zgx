@@ -304,6 +304,14 @@ SCENES = [
     ('startup', 'zgx-script', 'startup_bench', {'N': '1000'}),
     # A reply's token streamed in, a composer keystroke, a switch.
     ('app-chat', 'zgx-script', 'list_state_bench', {'APP': 'chat', 'REPS': '4'}),
+    # A reply streaming into a chat's transcript (md-stream-fade): a measured
+    # list following its end, the reply parsed by `ui.markdown` and drawn by a
+    # `ui.each`, four tokens every third frame, its newest words fading in
+    # with `fade_in` (drawn in Rust). The frames a chunk comes in, and the two
+    # between chunks, where the fade alone runs, counted apart.
+    ('md-stream-fade', 'zgx-script', 'list_state_bench', {'APP': 'stream', 'FADE': 'native', 'COUNT': 'chunk', 'REPS': '40'}),
+    ('md-stream-fade-between', 'zgx-script', 'list_state_bench', {'APP': 'stream', 'FADE': 'native', 'COUNT': 'between',
+                                                                   'REPS': '40'}),
     # A sort with no order kept (the honest whole sort) on its own, as the
     # code editor's new-letter search is.
     ('app-dashboard', 'zgx-script', 'list_state_bench', {'APP': 'dashboard', 'ROWS': '2000', 'REPS': '2',
