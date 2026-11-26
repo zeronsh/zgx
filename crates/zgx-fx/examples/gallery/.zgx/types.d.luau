@@ -1708,6 +1708,9 @@ export type WebOptions = {
 	-- Linux: false paints pages on the CPU, uploading only what changed
 	-- (no backdrop-filter, no 3D perspective). macOS and Windows ignore it.
 	accelerated: boolean?,
+	-- "platform" (the default) or "ladybird" where the host was built with
+	-- it; a page whose engine is missing shows a placeholder.
+	engine: ("platform" | "ladybird")?,
 	[number]: never,
 }
 export type WebEvent = { kind: "started" | "committed" | "finished" | "failed" | "changed", url: string }
@@ -21616,6 +21619,9 @@ export type WebViewProps = {
 	-- Linux: false paints pages on the CPU, uploading only what changed
 	-- (no backdrop-filter, no 3D perspective). macOS and Windows ignore it.
 	accelerated: boolean?,
+	-- "platform" (the default) or "ladybird" where the host was built with
+	-- it; a page whose engine is missing shows a placeholder.
+	engine: ("platform" | "ladybird")?,
 	[number]: never,
 	-- A `ui.web()` controller, so the page outlives the node; the options
 	-- above make one otherwise.
