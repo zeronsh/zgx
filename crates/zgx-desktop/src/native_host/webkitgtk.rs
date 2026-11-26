@@ -427,6 +427,8 @@ struct Page {
     surface_size: Cell<(i32, i32)>,
     damage: Cell<Damage>,
     draw_queued: Cell<bool>,
+    /// The link last reported under the pointer (`on_mouse_target`).
+    hovered: RefCell<Option<String>>,
     html: RefCell<Option<(String, Option<String>)>>,
     /// The app's zoom of the page, and device pixels a point.
     zoom: Cell<(f64, f64)>,
@@ -683,6 +685,7 @@ impl Gtk {
                 surface: Cell::new(null_mut()),
                 surface_size: Cell::new((0, 0)),
                 damage: Cell::new(Damage::default()),
+                hovered: RefCell::new(None),
                 draw_queued: Cell::new(false),
                 html: RefCell::new(None),
                 zoom: Cell::new((1., 1.)),
@@ -735,6 +738,24 @@ impl Gtk {
                 data,
                 false,
             );
+            connect(
+                api,
+                view,
+                "mouse-target-changed",
+                handler(on_mouse_target as *const ()),
+                data,
+                false,
+            );
+            if api.webkit_web_view_get_theme_color.is_some() {
+                connect(
+                    api,
+                    view,
+                    "notify::theme-color",
+                    handler(on_theme_color as *const ()),
+                    data,
+                    false,
+                );
+            }
             for property in ["title", "uri", "estimated-load-progress", "is-loading"] {
                 connect(
                     api,
@@ -2617,6 +2638,47 @@ unsafe extern "C" fn on_load_failed(
 unsafe extern "C" fn on_notify(_: Ptr, _: Ptr, data: Ptr) {
     // SAFETY: GTK passes this handler's page.
     unsafe { page(data) }.report(false);
+}
+/// The pointer moved over something else: a link's address is the page's
+/// hovered link, anything else none.
+unsafe extern "C" fn on_mouse_target(_: Ptr, hit: Ptr, _modifiers: c_uint, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the hit test result (valid for the call) and this
+    // handler's page; the link's address is copied now.
+    let (page, link) = unsafe {
+        let link = (api.webkit_hit_test_result_get_link_uri)(hit);
+        (page(data), (!link.is_null()).then(|| string(link)))
+    };
+    let link = link.filter(|link| !link.is_empty());
+    if page.hovered.replace(link.clone()) != link {
+        page.post(move |web| web.update_state(|state| state.hovered_link = link));
+    }
+}
+/// The page's theme colour changed (WebKitGTK 2.38's `theme-color`).
+unsafe extern "C" fn on_theme_color(view: Ptr, _: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    let Some(get) = api.webkit_web_view_get_theme_color else {
+        return;
+    };
+    let mut rgba = gtk::GdkRGBA {
+        red: 0.,
+        green: 0.,
+        blue: 0.,
+        alpha: 0.,
+    };
+    // SAFETY: the view GTK passes, and an RGBA for it to fill; it says
+    // whether the page has a theme colour.
+    let (page, has) = unsafe { (page(data), get(view, &mut rgba) != 0) };
+    let channel = |value: f64| (value.clamp(0., 1.) * 255.).round() as u8;
+    let color = has.then(|| {
+        zgx::scene::Color(
+            channel(rgba.red),
+            channel(rgba.green),
+            channel(rgba.blue),
+            channel(rgba.alpha),
+        )
+    });
+    page.post(move |web| web.update_state(|state| state.theme_color = color));
 }
 unsafe extern "C" fn on_history(_: Ptr, _: Ptr, _: Ptr, data: Ptr) {
     // SAFETY: GTK passes this handler's page.

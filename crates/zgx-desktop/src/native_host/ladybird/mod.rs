@@ -84,7 +84,9 @@ fn take(message: FromHost) {
         | FromHost::Cursor { view, .. }
         | FromHost::NewWindow { view, .. }
         | FromHost::Crashed { view }
-        | FromHost::Editing { view, .. } => *view,
+        | FromHost::Editing { view, .. }
+        | FromHost::LinkHovered { view, .. }
+        | FromHost::ThemeColor { view, .. } => *view,
         FromHost::Ready | FromHost::Store { .. } | FromHost::Present { .. } => return,
     };
     let Some(page) = page(view) else { return };
@@ -130,6 +132,12 @@ fn take(message: FromHost) {
         FromHost::NewWindow { url, .. } => web.emit(WebViewEvent::NewWindowRequested { url }),
         FromHost::Crashed { .. } => web.emit(WebViewEvent::ProcessTerminated),
         FromHost::Editing { editing, .. } => page.editing.set(editing),
+        FromHost::LinkHovered { url, .. } => {
+            web.update_state(|state| state.hovered_link = (!url.is_empty()).then_some(url));
+        }
+        FromHost::ThemeColor { color, .. } => web.update_state(|state| {
+            state.theme_color = color.map(|(r, g, b, a)| zgx::scene::Color(r, g, b, a));
+        }),
         FromHost::Ready | FromHost::Store { .. } | FromHost::Present { .. } => {}
     }
 }
@@ -846,6 +854,8 @@ mod tests {
             | FromHost::NewWindow { view, .. }
             | FromHost::Crashed { view }
             | FromHost::Editing { view, .. }
+            | FromHost::LinkHovered { view, .. }
+            | FromHost::ThemeColor { view, .. }
             | FromHost::Store { view, .. }
             | FromHost::Present { view, .. } => Some(*view),
             FromHost::Ready => None,
@@ -992,6 +1002,66 @@ mod tests {
         );
         host.send(Message::new(ToHost::ImeCommit, view).str("é"));
         assert!(wait_for(view, title_is("hié")), "an input method's text");
+    }
+
+    #[test]
+    fn the_hovered_link_and_theme_colour_reach_the_app() {
+        let Some((host, _serial)) = host_or_skip("the_hovered_link_and_theme_colour_reach_the_app")
+        else {
+            return;
+        };
+        let view = 1_000_004;
+        host.send(
+            Message::new(ToHost::CreateView, view)
+                .u32(320)
+                .u32(200)
+                .f64(1.),
+        );
+        host.send(Message::new(ToHost::LoadHtml, view).str(
+            "<title>t</title><meta name=theme-color content='#336699'>\
+             <body style='margin:0'><a href='https://example.com/x' style='display:block;width:100px;height:50px'>x</a>",
+        ));
+        let (mut themed, mut titled) = (false, false);
+        let ready = wait_for(view, |d| {
+            titled |= matches!(d, Delivery::Message(FromHost::Title { title, .. }) if title == "t");
+            themed |= matches!(
+                d,
+                Delivery::Message(FromHost::ThemeColor {
+                    color: Some((0x33, 0x66, 0x99, 255)),
+                    ..
+                })
+            );
+            titled && themed
+        });
+        assert!(ready, "the page's theme colour arrives");
+        let mouse_move = |x: f64, y: f64| {
+            host.send(
+                Message::new(ToHost::Mouse, view)
+                    .u8(MOUSE_MOVE)
+                    .f64(x)
+                    .f64(y)
+                    .u8(0)
+                    .u8(0)
+                    .u8(0)
+                    .u8(0),
+            );
+        };
+        mouse_move(20., 20.);
+        assert!(
+            wait_for(view, |d| matches!(
+                d,
+                Delivery::Message(FromHost::LinkHovered { url, .. }) if url == "https://example.com/x"
+            )),
+            "the link under the pointer"
+        );
+        mouse_move(200., 150.);
+        assert!(
+            wait_for(view, |d| matches!(
+                d,
+                Delivery::Message(FromHost::LinkHovered { url, .. }) if url.is_empty()
+            )),
+            "off the link, none"
+        );
     }
 
     #[test]

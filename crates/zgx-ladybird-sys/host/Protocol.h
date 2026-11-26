@@ -53,6 +53,8 @@ enum class ToZgx : u8 {
     NewWindow = 110,
     Crashed = 111,
     Editing = 112,
+    LinkHovered = 113,
+    ThemeColor = 114,
 };
 
 class Writer {

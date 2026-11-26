@@ -133,6 +133,16 @@ pub(super) enum FromHost {
         view: u64,
         editing: bool,
     },
+    /// The link under the pointer; empty off links.
+    LinkHovered {
+        view: u64,
+        url: String,
+    },
+    /// The page's theme colour, or none.
+    ThemeColor {
+        view: u64,
+        color: Option<(u8, u8, u8, u8)>,
+    },
 }
 
 struct Fields<'a>(&'a [u8]);
@@ -229,6 +239,18 @@ pub(super) fn parse(kind: u8, fields: &[u8]) -> Option<FromHost> {
             view,
             editing: f.u8()? != 0,
         },
+        113 => FromHost::LinkHovered {
+            view,
+            url: f.str()?,
+        },
+        114 => {
+            let has = f.u8()? != 0;
+            let color = (f.u8()?, f.u8()?, f.u8()?, f.u8()?);
+            FromHost::ThemeColor {
+                view,
+                color: has.then_some(color),
+            }
+        }
         _ => return None,
     })
 }

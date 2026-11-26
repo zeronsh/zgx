@@ -155,6 +155,27 @@ fn full_screen_key(view: &WKWebView) -> Option<&'static &'static str> {
     let has: bool = unsafe { msg_send![view, respondsToSelector: sel!(fullscreenState)] };
     has.then_some(&"fullscreenState")
 }
+/// `themeColor` where WebKit has it (macOS 12), to observe.
+fn theme_color_key(view: &WKWebView) -> Option<&'static &'static str> {
+    // SAFETY: `respondsToSelector:` on the main thread.
+    let has: bool = unsafe { msg_send![view, respondsToSelector: sel!(themeColor)] };
+    has.then_some(&"themeColor")
+}
+/// The page's theme colour (`<meta name="theme-color">`), in sRGB.
+fn theme_color(view: &WKWebView) -> Option<zgx::scene::Color> {
+    theme_color_key(view)?;
+    // SAFETY: WKWebView's `themeColor` (an NSColor or nil) where it has it,
+    // converted on the main thread.
+    let color: Option<Retained<NSColor>> = unsafe { msg_send![view, themeColor] };
+    let srgb = color?.colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace())?;
+    let channel = |value: f64| (value.clamp(0., 1.) * 255.).round() as u8;
+    Some(zgx::scene::Color(
+        channel(srgb.redComponent()),
+        channel(srgb.greenComponent()),
+        channel(srgb.blueComponent()),
+        channel(srgb.alphaComponent()),
+    ))
+}
 /// An element of the page is full screen, or going to be.
 fn full_screen(view: &WKWebView) -> bool {
     if full_screen_key(view).is_none() {
@@ -785,6 +806,7 @@ impl Observer {
         };
         let lists = history.then(|| self::history(&view));
         let full_screen = full_screen(&view);
+        let theme_color = theme_color(&view);
         self.post(move |web| {
             let (old_url, old_title) = web
                 .state()
@@ -799,6 +821,7 @@ impl Observer {
                 state.can_go_back = back;
                 state.can_go_forward = forward;
                 state.full_screen = full_screen;
+                state.theme_color = theme_color;
                 if let Some((back_list, forward_list)) = lists {
                     state.back_list = back_list;
                     state.forward_list = forward_list;
@@ -1120,7 +1143,11 @@ impl MacWebView {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*observer)));
             view.setUIDelegate(Some(ProtocolObject::from_ref(&*observer)));
             view.setAllowsBackForwardNavigationGestures(true);
-            for key in OBSERVED.iter().chain(full_screen_key(&view)) {
+            for key in OBSERVED
+                .iter()
+                .chain(full_screen_key(&view))
+                .chain(theme_color_key(&view))
+            {
                 view.addObserver_forKeyPath_options_context(
                     &observer,
                     &NSString::from_str(key),
@@ -1442,7 +1469,11 @@ impl Drop for MacWebView {
                         .map(|view| -> &objc2_app_kit::NSResponder { view }),
                 );
             }
-            for key in OBSERVED.iter().chain(full_screen_key(&self.view)) {
+            for key in OBSERVED
+                .iter()
+                .chain(full_screen_key(&self.view))
+                .chain(theme_color_key(&self.view))
+            {
                 self.view
                     .removeObserver_forKeyPath(&self.observer, &NSString::from_str(key));
             }

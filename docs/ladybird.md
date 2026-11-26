@@ -24,7 +24,8 @@ Without a host (the `ladybird` feature on but no `ZGX_LADYBIRD_DIR` or built ins
 | | Ladybird pages |
 | --- | --- |
 | Load a URL or HTML, reload, stop, back and forward, history steps | yes |
-| Title, URL, loading, history state and events | yes |
+| Title, URL, loading, history state and events, visits | yes |
+| The hovered link and the page's theme colour | yes |
 | Pointer, wheel, keys, input methods, focus, cursor | yes |
 | Resize and the display's scale | yes |
 | Zoom (`set_zoom`) | yes |

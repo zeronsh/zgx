@@ -1165,6 +1165,28 @@ impl Page {
                 })),
                 &mut token,
             );
+            // The status bar's text (hidden above) is the link under the
+            // pointer: the page's hovered link.
+            if let Ok(view) = view.cast::<ICoreWebView2_12>() {
+                let page = on.clone();
+                let _ = view.add_StatusBarTextChanged(
+                    &StatusBarTextChangedEventHandler::create(Box::new(move |sender, _| {
+                        let text = sender
+                            .and_then(|sender| sender.cast::<ICoreWebView2_12>().ok())
+                            .map(|view| take(|v| view.StatusBarText(v)))
+                            .unwrap_or_default();
+                        let link = (!text.is_empty()).then_some(text);
+                        page(&|page| {
+                            let link = link.clone();
+                            page.post(move |web| {
+                                web.update_state(|state| state.hovered_link = link)
+                            });
+                        });
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+            }
             // A download is the app's (`WebView::download`): saved where
             // it says, or cancelled, as with no handler. WebView2's own
             // download bar stays hidden.
