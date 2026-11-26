@@ -336,6 +336,25 @@ class ReadsTests(unittest.TestCase):
             bench.write_text('')
             self.assertTrue(gate.runs_scene(checkout, {'LINES': '1000'}, 'zgx-terminal', 'terminal_bench'))
 
+    def test_an_app_scene_naming_a_setting_runs_only_where_apps_reads_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            checkout = pathlib.Path(root)
+            examples = checkout / 'crates' / 'zgx-script' / 'examples'
+            (examples / 'support').mkdir(parents=True)
+            (examples / 'list_state_bench.rs').write_text('apps::run()')
+            apps = examples / 'support' / 'apps.rs'
+            env = {'APP': 'stream', 'CLOCK': 'frames', 'READS': 'CLOCK'}
+            apps.write_text('("stream", stream)')
+            self.assertFalse(gate.runs_scene(checkout, env, 'zgx-script', 'list_state_bench'))
+            apps.write_text('("stream", stream) std::env::var("CLOCK")')
+            self.assertTrue(gate.runs_scene(checkout, env, 'zgx-script', 'list_state_bench'))
+
+    def test_the_streaming_cells_are_new_to_a_bench_without_its_clock(self):
+        for cell in ('md-stream-fade', 'md-stream-fade-between'):
+            name, package, example, env = next(s for s in gate.SCENES if s[0] == cell)
+            self.assertEqual((env['CLOCK'], env['READS']), ('frames', 'CLOCK'))
+            self.assertTrue(gate.runs_scene(gate.ROOT, env, package, example))
+
     def test_the_trickling_terminal_is_new_to_a_bench_without_per_frame(self):
         name, package, example, env = next(s for s in gate.SCENES if s[0] == 'terminal-slow')
         self.assertEqual(env['READS'], 'PER_FRAME')

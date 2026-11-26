@@ -100,6 +100,13 @@ struct Bench {
     /// after drawing (`sync_cursor`: again whenever the point or geometry
     /// moved), and what it last asked at.
     cursor: Option<((f32, f32), Option<u64>)>,
+    /// The time a scene's script and fades read (`ui.now()`, `fade_in`),
+    /// where a scene asks (`stream`): moved a frame's 1/60 s each frame,
+    /// whatever the wall clock says, so what the time decides (a fade's step,
+    /// a boost) falls on the same frame in every run, as fast or slow as it
+    /// runs (under cachegrind, some fifty times slower). With the frames
+    /// moved so far.
+    clock: Option<(zgx::clock::VirtualClock, u32)>,
 }
 impl Bench {
     fn new(script: &str, size: (f32, f32), args: &[String], make: MakeDrawing) -> Self {
@@ -145,6 +152,7 @@ impl Bench {
             reps,
             damaged: None,
             cursor: None,
+            clock: None,
         };
         bench.frames(3);
         assert_eq!(bench.app.error(), None, "{script} loads");
@@ -152,6 +160,16 @@ impl Bench {
     }
     /// A frame: what the app changed, laid out, its damage drawn.
     fn frame(&mut self) {
+        if let Self {
+            clock: Some((clock, frames)),
+            app,
+            ..
+        } = self
+        {
+            *frames += 1;
+            let elapsed = Duration::from_secs_f64(f64::from(*frames) / 60.);
+            clock.advance(elapsed, || app.settle());
+        }
         self.app.frame();
         let report = self.app.ui.scene.borrow_mut().flush();
         if let Some(damaged) = &mut self.damaged {
@@ -529,6 +547,12 @@ fn stream(make: MakeDrawing) {
     let next = Rc::new(std::cell::Cell::new(0usize));
     let mode = fade.clone();
     let boost = std::env::var("BOOST").map_or(true, |b| b != "0");
+    // Its time a frame's at a time (`Bench::clock`), installed before it
+    // loads: the time a chunk starts fading is the clock's too. `CLOCK=real`
+    // leaves it on the wall clock (as the gate counted it before; a base
+    // whose bench doesn't read `CLOCK` counted that, `READS`).
+    let fixed = std::env::var("CLOCK").map_or(true, |c| c != "real");
+    let clock = fixed.then(zgx::clock::VirtualClock::new);
     let mut b = Bench::hosted(
         "stream_fade",
         (1400., 900.),
@@ -551,6 +575,7 @@ fn stream(make: MakeDrawing) {
         },
         |_| {},
     );
+    b.clock = clock.map(|clock| (clock, 0));
     // `OFF=1`: the transcript scrolled up, off the reply, before the chunks
     // counted: what they cost while it isn't shown (a reply scrolled away
     // from, or behind another chat).
