@@ -1223,6 +1223,10 @@ pub(crate) struct ListRare {
     /// `key = "id"` (with `data`): the field of an item that is its key, read
     /// in Rust, so keying a list makes none of its items a table.
     pub(crate) key_field: Option<Rc<str>>,
+    /// `animate`, as `ui.each`'s: rows the list places elsewhere (a row
+    /// growing above them, one coming in between) slide from where they
+    /// showed. Off unless set: only then are rows wrapped to move.
+    pub(crate) moves: Option<Rc<crate::motion::Timing>>,
 }
 
 /// `ui.list`'s `on_end`, called as its end comes within `distance` points.
@@ -6618,6 +6622,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let inset = table.get::<Option<f32>>("sticky_top")?;
             let sticky_top = inset.filter(|t| t.is_finite()).unwrap_or(0.).max(0.);
+            // `animate`, as `ui.each`'s: rows the list places elsewhere slide.
+            let moves = crate::motion::timing_of(table.get("animate")?)?;
             let ancestor = match table.get::<Option<String>>("virtualize")?.as_deref() {
                 None => false,
                 Some("ancestor") => {
@@ -6663,7 +6669,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 || row_text.is_some()
                 || end.is_some()
                 || ancestor
-                || key_field.is_some())
+                || key_field.is_some()
+                || moves.is_some())
             .then(|| {
                 Box::new(ListRare {
                     sticky,
@@ -6673,6 +6680,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     end,
                     ancestor,
                     key_field,
+                    moves: moves.map(Rc::new),
                     ..ListRare::default()
                 })
                 });

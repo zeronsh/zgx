@@ -76,7 +76,7 @@ fn ease_of(value: mlua::Value, what: &str) -> mlua::Result<Option<Ease>> {
 
 /// `animate = true | "outQuint" | anime.spring {...} | { duration, ease } |
 /// { bounce, duration } | { spring = anime.spring {...} }`.
-fn timing_of(value: mlua::Value) -> mlua::Result<Option<Timing>> {
+pub(crate) fn timing_of(value: mlua::Value) -> mlua::Result<Option<Timing>> {
     Ok(match value {
         mlua::Value::Nil | mlua::Value::Boolean(false) => None,
         mlua::Value::Boolean(true) => Some(Timing::default()),
@@ -141,7 +141,23 @@ fn engine_of(vm: &Vm) -> Option<Rc<Engine>> {
 /// Starts the moves `writes` describe, from their values now: each holds
 /// its node where it was, then eases to where it belongs.
 fn start(engine: &Rc<Engine>, vm: Weak<Vm>, writes: Vec<(Target, Key, f64, f64)>, timing: &Timing) {
+    start_then(engine, vm, writes, timing, None);
+}
+/// `start`, calling `done` once the moves end (at once, with none to make).
+fn start_then(
+    engine: &Rc<Engine>,
+    vm: Weak<Vm>,
+    writes: Vec<(Target, Key, f64, f64)>,
+    timing: &Timing,
+    done: Option<Function>,
+) {
     if writes.is_empty() {
+        if let Some(done) = done
+            && let Err(e) = done.call::<()>(())
+            && let Some(vm) = vm.upgrade()
+        {
+            vm.report(e);
+        }
         return;
     }
     let from = writes
@@ -154,7 +170,11 @@ fn start(engine: &Rc<Engine>, vm: Weak<Vm>, writes: Vec<(Target, Key, f64, f64)>
         .collect();
     engine.set_now(from);
     let (ease, duration) = timing.resolve();
-    engine.tween(vm, to, duration, ease, Default::default());
+    let callbacks = crate::anime::engine::Callbacks {
+        complete: done,
+        ..Default::default()
+    };
+    engine.tween(vm, to, duration, ease, callbacks);
 }
 
 /// Moves `element` holds its node by: from where it was laid out (`dx`,
@@ -565,6 +585,124 @@ fn slide_rows(rows: &RefCell<Rows>, region: &NodeHandle, motion: &EachMotion, vm
         }
     }
     start(&engine, Rc::downgrade(vm), writes, timing);
+}
+
+// `ui.list`'s `animate` ------------------------------------------------------
+
+/// A virtual list whose rows slide when it places them elsewhere (`animate`):
+/// the list reports each move (`View::on_row_moves`), and the row's element
+/// holds it where it showed and eases to its place, as `ui.each`'s rows do.
+/// It knows the rows mounted now alone, by the node the list places.
+pub(crate) struct ListMotion {
+    timing: Rc<Timing>,
+    runtime: zgx::reactive::Runtime,
+    vm: Weak<Vm>,
+    rows: RefCell<HashMap<zgx::scene::NodeId, Rc<Element>, rustc_hash::FxBuildHasher>>,
+}
+/// Drops a row's entry as the row is released.
+struct ListRowGuard(Weak<ListMotion>, Rc<Cell<Option<zgx::scene::NodeId>>>);
+impl Drop for ListRowGuard {
+    fn drop(&mut self) {
+        if let (Some(motion), Some(node)) = (self.0.upgrade(), self.1.get()) {
+            motion.rows.borrow_mut().remove(&node);
+        }
+    }
+}
+impl ListMotion {
+    pub(crate) fn new(timing: Rc<Timing>, vm: &Rc<Vm>, low: &Lowering) -> Rc<Self> {
+        Rc::new(Self {
+            timing,
+            runtime: low.runtime.clone(),
+            vm: Rc::downgrade(vm),
+            rows: RefCell::default(),
+        })
+    }
+    /// A row's view, made to move: a box around its content that carries
+    /// the slide, in the row node the list makes and places (a node's
+    /// translation is its own style's, so the one the list places can't
+    /// carry it). Known by that row node, its parent. `fills`: the row has
+    /// the list's height for it (`height`, `heights`), else its content's.
+    pub(crate) fn row(
+        self: &Rc<Self>,
+        content: View,
+        fills: bool,
+        cx: &mut Context,
+        low: &Lowering,
+    ) -> View {
+        let element = Element::new(&low.runtime, None, Rc::new([]), "list-row");
+        let boxed = div().w_full().child(content);
+        let boxed = if fills { boxed.h_full() } else { boxed };
+        let placed = Rc::new(Cell::new(None));
+        cx.retain(ListRowGuard(Rc::downgrade(self), placed.clone()));
+        let (motion, own) = (Rc::downgrade(self), element.clone());
+        motion_view(boxed, element, move |handle| {
+            let row = handle
+                .scene()
+                .and_then(|scene| scene.borrow().parent(handle.node()));
+            if let (Some(row), Some(motion)) = (row, motion.upgrade()) {
+                placed.set(Some(row));
+                motion.rows.borrow_mut().insert(row, own);
+            }
+        })
+    }
+    /// The list placed `moves`' rows elsewhere: each holds where it showed
+    /// and slides to its place; one moved out of view takes no input and
+    /// slides on as the rows near it do, then `release` lets it go.
+    /// Reduced motion: they're placed, and released, at once.
+    pub(crate) fn moved(
+        &self,
+        moves: &[zgx::compose::RowMove],
+        release: &Rc<dyn Fn(zgx::scene::NodeId)>,
+    ) {
+        let leaving = || moves.iter().filter(|m| m.leaving).map(|m| m.node);
+        let still = zgx::theme::Themes::of(&self.runtime)
+            .system_preferences()
+            .reduced_motion;
+        let (Some(vm), false) = (self.vm.upgrade(), still) else {
+            leaving().for_each(|node| release(node));
+            return;
+        };
+        let Some(engine) = engine_of(&vm) else {
+            leaving().for_each(|node| release(node));
+            return;
+        };
+        let mut writes = Vec::new();
+        {
+            let rows = self.rows.borrow();
+            for m in moves {
+                let Some(element) = rows.get(&m.node) else {
+                    continue;
+                };
+                if m.leaving {
+                    // From where it shows now to where it goes, then gone.
+                    element.leave();
+                    let (ox, oy) = element.offset();
+                    let target = Target::Element(element.clone());
+                    writes.push((target.clone(), Key::OffsetX, ox as f64, ox as f64));
+                    writes.push((target, Key::OffsetY, oy as f64, (oy + m.to - m.from) as f64));
+                } else {
+                    writes.extend(hold(element, 0., m.from - m.to));
+                }
+            }
+        }
+        let out: Vec<zgx::scene::NodeId> = leaving().collect();
+        let done = (!out.is_empty())
+            .then(|| {
+                let release = release.clone();
+                vm.lua.create_function(move |_, _: mlua::MultiValue| {
+                    out.iter().for_each(|node| release(*node));
+                    Ok(())
+                })
+            })
+            .transpose();
+        match done {
+            Ok(done) => start_then(&engine, self.vm.clone(), writes, &self.timing, done),
+            Err(e) => {
+                vm.report(e);
+                leaving().for_each(|node| release(node));
+            }
+        }
+    }
 }
 
 // `layout = "position"` and `layout_id` --------------------------------------
