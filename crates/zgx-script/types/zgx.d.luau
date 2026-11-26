@@ -1664,6 +1664,12 @@ declare extern type Web with
 	-- The pointer over the page, in points from its top left; nil outside.
 	-- (Over a page zgx hears no pointer moves: its nodes had their leave.)
 	pointer: { x: number, y: number }?
+	-- The link under the pointer, as a status bar shows it; nil off links,
+	-- and on macOS (WKWebView doesn't say).
+	hovered_link: string?
+	-- The page's theme colour (`<meta name="theme-color">`) as "#rrggbbaa";
+	-- nil without one, and on Windows (WebView2 doesn't say).
+	theme_color: string?
 	function load(self, url: string): ()
 	function html(self, html: string, base_url: string?): ()
 	function back(self): ()
@@ -21634,6 +21640,8 @@ export type WebViewProps = {
 	on_message: ((value: any, origin: string, main_frame: boolean) -> ...unknown)?,
 	on_error: ((url: string, err: string) -> ...unknown)?,
 	on_new_window: ((url: string) -> ...unknown)?,
+	-- A page was visited (a navigation finished), with its title then.
+	on_visit: ((url: string, title: string) -> ...unknown)?,
 	-- A download the page started: save it (`d:save_to`, `d:ask`) or
 	-- not. Without this, none is saved.
 	on_download: ((d: Download) -> ...unknown)?,

@@ -179,6 +179,23 @@ private:
             s_connection->send(writer);
             send_history();
         };
+        on_link_hover = [this](URL::URL const& url) {
+            auto text = url.serialize();
+            Writer writer { ToZgx::LinkHovered };
+            writer.u64_(m_id).str(text.bytes_as_string_view());
+            s_connection->send(writer);
+        };
+        on_link_unhover = [this] {
+            Writer writer { ToZgx::LinkHovered };
+            writer.u64_(m_id).str(""sv);
+            s_connection->send(writer);
+        };
+        // A page without a theme colour reports a transparent one.
+        on_theme_color_change = [this](Gfx::Color color) {
+            Writer writer { ToZgx::ThemeColor };
+            writer.u64_(m_id).u8_(color.alpha() > 0 ? 1 : 0).u8_(color.red()).u8_(color.green()).u8_(color.blue()).u8_(color.alpha());
+            s_connection->send(writer);
+        };
         on_cursor_change = [this](Gfx::Cursor const& cursor) {
             u8 standard = 0;
             if (auto const* named = cursor.get_pointer<Gfx::StandardCursor>())

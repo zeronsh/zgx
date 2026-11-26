@@ -2932,13 +2932,14 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
         spec.on_message.clone(),
         spec.on_error.clone(),
         spec.on_new_window.clone(),
+        spec.on_visit.clone(),
     ];
     if handlers.iter().all(Option::is_none) {
         return view;
     }
     let (vm, _low) = (vm.clone(), low.clone());
     view.on_mount(move |handle| {
-        let [navigate, load, title, message, error, new_window] = handlers;
+        let [navigate, load, title, message, error, new_window, visit] = handlers;
         let vm = Rc::downgrade(&vm);
         let subscription = web.on_event(move |event| {
             let Some(vm) = vm.upgrade() else { return };
@@ -2980,6 +2981,7 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
                 WebViewEvent::TitleChanged { title: t } => call(&title, pack(&[t])),
                 WebViewEvent::NavigationFailed { url, error: e } => call(&error, pack(&[url, e])),
                 WebViewEvent::NewWindowRequested { url } => call(&new_window, pack(&[url])),
+                WebViewEvent::Visited { url, title: t } => call(&visit, pack(&[url, t])),
                 WebViewEvent::ProcessTerminated => {
                     call(&error, pack(&["", "the page's process ended"]))
                 }

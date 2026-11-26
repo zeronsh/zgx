@@ -46,6 +46,9 @@ macro_rules! api {
             pub atk_bridge_adaptor_init:
                 Option<unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char) -> c_int>,
             pub atk_bridge_adaptor_cleanup: Option<unsafe extern "C" fn()>,
+            /// `webkit_web_view_get_theme_color(view, rgba)`: WebKitGTK 2.38.
+            pub webkit_web_view_get_theme_color:
+                Option<unsafe extern "C" fn(Ptr, *mut GdkRGBA) -> gboolean>,
             _libraries: Vec<Library>,
         }
         impl Api {
@@ -77,6 +80,7 @@ macro_rules! api {
                     .ok(),
                     atk_bridge_adaptor_init: find(&libraries, "atk_bridge_adaptor_init").ok(),
                     atk_bridge_adaptor_cleanup: find(&libraries, "atk_bridge_adaptor_cleanup").ok(),
+                    webkit_web_view_get_theme_color: find(&libraries, "webkit_web_view_get_theme_color").ok(),
                     _libraries: libraries,
                 })
             }

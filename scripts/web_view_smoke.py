@@ -652,6 +652,16 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.wait(lambda: session.lines("FULL_SCREEN ")[-1:] == ["false"], "the page never left full screen")
     session.wait(lambda: near(session.grab()(*COLOURS["page"][0]), COLOURS["page"][1]), "the page never came back from full screen")
     checks["full screen"] = True
+    # The page's theme colour (its <meta name="theme-color">) and the link
+    # under the pointer reach the app's state.
+    session.wait(lambda: "#336699ff" in session.lines("THEME "), "the page's theme colour never reached its state")
+    checks["theme colour"] = True
+    session.xdo("mousemove", "--window", session.window, 80, 292)
+    session.wait(lambda: session.lines("HOVERED ")[-1:] == ["https://example.com/dragged"],
+                 "the link under the pointer never reached the page's state")
+    session.xdo("mousemove", "--window", session.window, 705, 130)
+    session.wait(lambda: session.lines("HOVERED ")[-1:] == ["-"], "the hovered link stayed after the pointer left it")
+    checks["hovered link"] = True
     if not session.wayland:
         checks["file input"] = file_checks(session)
     # After the damage check: a dialog closing activates the window again,

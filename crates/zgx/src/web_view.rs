@@ -412,6 +412,16 @@ pub struct WebViewState {
     /// over the screen; on Windows and Linux it fills the page's box, which
     /// an app grows (or makes its window full screen) to show it so.
     pub full_screen: bool,
+    /// The link under the pointer, as a browser's status bar shows it, while
+    /// the pointer is over one. `None` where the engine doesn't say
+    /// (WKWebView has no public way to).
+    #[doc(hidden)]
+    pub hovered_link: Option<String>,
+    /// The page's theme colour (`<meta name="theme-color">`), which a
+    /// browser tints its tab or toolbar with. `None` without one, or where
+    /// the engine doesn't say (WebView2).
+    #[doc(hidden)]
+    pub theme_color: Option<crate::scene::Color>,
 }
 
 /// What happened in a page, as the platform reports it (see
@@ -471,6 +481,17 @@ pub enum WebViewEvent {
     },
     /// The page's process ended (crashed or was killed); reload to recover.
     ProcessTerminated,
+    /// A page was visited: a navigation finished, with the title the page
+    /// had then, on every engine alike (sent by the controller after each
+    /// `NavigationFinished`). What a browser's history records; a title the
+    /// page sets later comes as `TitleChanged`.
+    #[doc(hidden)]
+    Visited {
+        /// The page's URL.
+        url: String,
+        /// Its title when it finished loading.
+        title: String,
+    },
 }
 
 /// A JavaScript evaluation's result: the value as JSON, or the error.
@@ -825,6 +846,18 @@ impl WebView {
     pub fn can_go_forward(&self) -> bool {
         self.0.state.with(|state| state.can_go_forward)
     }
+    /// The link under the pointer (see [`WebViewState::hovered_link`])
+    /// (reactive).
+    #[doc(hidden)]
+    pub fn hovered_link(&self) -> Option<String> {
+        self.0.state.with(|state| state.hovered_link.clone())
+    }
+    /// The page's theme colour (see [`WebViewState::theme_color`])
+    /// (reactive).
+    #[doc(hidden)]
+    pub fn theme_color(&self) -> Option<crate::scene::Color> {
+        self.0.state.with(|state| state.theme_color)
+    }
     /// Whether the page has keyboard focus (reactive).
     pub fn focused(&self) -> bool {
         self.0.state.with(|state| state.focused)
@@ -1104,10 +1137,15 @@ impl WebView {
             .iter()
             .map(|(_, listener)| listener.clone())
             .collect();
-        for listener in listeners {
+        for listener in &listeners {
             if let Ok(mut listener) = listener.try_borrow_mut() {
                 listener(&event);
             }
+        }
+        // Each finished navigation is a visit, whichever engine reported it.
+        if let WebViewEvent::NavigationFinished { url } = event {
+            let title = self.0.state.with_untracked(|state| state.title.clone());
+            self.emit(WebViewEvent::Visited { url, title });
         }
     }
 }
@@ -1339,6 +1377,40 @@ mod tests {
         for malformed in ["", "MyApp", "2app", "my app", "my:app", "app/x"] {
             assert!(!is_app_scheme(malformed), "{malformed:?}");
         }
+    }
+
+    #[test]
+    fn a_finished_navigation_is_a_visit_with_the_title_then() {
+        let runtime = crate::reactive::Runtime::new();
+        let web = WebView::new(&runtime, WebViewOptions::default());
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let log = heard.clone();
+        let _subscription = web.on_event(move |event| log.borrow_mut().push(event.clone()));
+        web.update_state(|state| state.title = "Home".into());
+        web.emit(WebViewEvent::NavigationFinished {
+            url: "https://a.test/".into(),
+        });
+        web.emit(WebViewEvent::NavigationFailed {
+            url: "https://b.test/".into(),
+            error: "no".into(),
+        });
+        assert_eq!(
+            *heard.borrow(),
+            [
+                WebViewEvent::NavigationFinished {
+                    url: "https://a.test/".into()
+                },
+                WebViewEvent::Visited {
+                    url: "https://a.test/".into(),
+                    title: "Home".into()
+                },
+                WebViewEvent::NavigationFailed {
+                    url: "https://b.test/".into(),
+                    error: "no".into()
+                },
+            ],
+            "a failure visits nothing"
+        );
     }
 
     #[test]

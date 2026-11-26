@@ -45,7 +45,7 @@ use zgx::{
 };
 use zgx_desktop::{Application, MenuAction, WindowOptions};
 
-const PAGE: &str = r#"<!doctype html><html><head><title>probe page</title><style>
+const PAGE: &str = r#"<!doctype html><html><head><title>probe page</title><meta name="theme-color" content="rgb(51,102,153)"><style>
 html, body { margin: 0; background: rgb(0, 0, 255); height: 3000px; }
 #field { position: absolute; left: 20px; top: 20px; width: 300px; height: 40px; font-size: 20px; box-sizing: border-box; }
 #choice { position: absolute; left: 360px; top: 20px; width: 200px; height: 30px; }
@@ -310,8 +310,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 })
             };
+            // `HOVERED <link or ->` and `THEME <#rrggbbaa or ->` as they change.
+            let page_state = {
+                let web = web.clone();
+                let shown = std::cell::RefCell::new((None, None));
+                cx.ui.runtime.effect(move || {
+                    let now = web
+                        .state()
+                        .with(|state| (state.hovered_link.clone(), state.theme_color));
+                    let mut shown = shown.borrow_mut();
+                    if shown.0 != now.0 {
+                        println!("HOVERED {}", now.0.as_deref().unwrap_or("-"));
+                    }
+                    if shown.1 != now.1 {
+                        match now.1 {
+                            Some(zgx::scene::Color(r, g, b, a)) => {
+                                println!("THEME #{r:02x}{g:02x}{b:02x}{a:02x}")
+                            }
+                            None => println!("THEME -"),
+                        }
+                    }
+                    *shown = now;
+                })
+            };
             cx.tasks.spawn(async move {
-                let _keep = (events, keymap, web, full_screen);
+                let _keep = (events, keymap, web, full_screen, page_state);
                 std::future::pending::<()>().await;
             });
         })

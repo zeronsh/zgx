@@ -170,6 +170,7 @@ pub(crate) struct WebSpec {
     pub on_message: Option<Function>,
     pub on_error: Option<Function>,
     pub on_new_window: Option<Function>,
+    pub on_visit: Option<Function>,
     pub on_download: Option<Function>,
 }
 
@@ -291,6 +292,14 @@ impl UserData for WebUd {
         fields.add_field_method_get("can_go_back", |_, w| Ok(w.0.can_go_back()));
         fields.add_field_method_get("can_go_forward", |_, w| Ok(w.0.can_go_forward()));
         fields.add_field_method_get("focused", |_, w| Ok(w.0.focused()));
+        // The link under the pointer, or nil (WKWebView doesn't say).
+        fields.add_field_method_get("hovered_link", |_, w| Ok(w.0.hovered_link()));
+        // The page's theme colour as "#rrggbbaa", or nil.
+        fields.add_field_method_get("theme_color", |_, w| {
+            Ok(w.0
+                .theme_color()
+                .map(|zgx::scene::Color(r, g, b, a)| format!("#{r:02x}{g:02x}{b:02x}{a:02x}")))
+        });
         fields.add_field_method_get("error", |_, w| Ok(w.0.state().get().error));
         fields.add_field_method_get("full_screen", |_, w| {
             Ok(w.0.state().with(|state| state.full_screen))
@@ -7168,6 +7177,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 on_message: handler("on_message")?,
                 on_error: handler("on_error")?,
                 on_new_window: handler("on_new_window")?,
+                on_visit: handler("on_visit")?,
                 on_download: handler("on_download")?,
             };
             // What the constructor read is not a style.
@@ -7190,6 +7200,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 "on_message",
                 "on_error",
                 "on_new_window",
+                "on_visit",
                 "on_download",
             ] {
                 table.raw_set(key, mlua::Value::Nil)?;
