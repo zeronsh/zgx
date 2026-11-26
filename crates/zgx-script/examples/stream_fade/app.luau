@@ -46,35 +46,38 @@ local function going(now: number): { Chunk }
 	return kept
 end
 
-ui.command { id = "chunk", run = function()
-	local text: string = ui.call_sync("stream.chunk", nil)
-	local from = #reply:peek() + 1
-	reply:append(text)
-	if MODE == "none" then
-		return
-	end
-	local now = ui.now()
-	local list = going(now)
-	-- More than two fading: they all go faster, keeping how far in they are.
-	local boost = if BOOST then 1 + 0.3 * math.max(#list - 1, 0) else 1
-	for _, c in list do
-		if boost > c.boost then
-			local p = (now - c.started) * c.boost / c.ms
-			c.boost = boost
-			c.started = now - p * c.ms / boost
+ui.command {
+	id = "chunk",
+	run = function()
+		local text: string = ui.call_sync("stream.chunk", nil)
+		local from = #reply:peek() + 1
+		reply:append(text)
+		if MODE == "none" then
+			return
 		end
-	end
-	table.insert(list, { from = from, to = from + #text - 1, started = now, ms = FADE_MS, boost = 1 })
-	fading = list
-	version:set(version:peek() + 1)
-	if MODE == "bindings" then
-		-- A clock every frame until the last fade ends.
-		if ticking then
-			ticking:cancel()
+		local now = ui.now()
+		local list = going(now)
+		-- More than two fading: they all go faster, keeping how far in they are.
+		local boost = if BOOST then 1 + 0.3 * math.max(#list - 1, 0) else 1
+		for _, c in list do
+			if boost > c.boost then
+				local p = (now - c.started) * c.boost / c.ms
+				c.boost = boost
+				c.started = now - p * c.ms / boost
+			end
 		end
-		ticking = anime.animate(tick, { value = tick:peek() + 1000, duration = FADE_MS + 50, ease = "linear" })
-	end
-end }
+		table.insert(list, { from = from, to = from + #text - 1, started = now, ms = FADE_MS, boost = 1 })
+		fading = list
+		version:set(version:peek() + 1)
+		if MODE == "bindings" then
+			-- A clock every frame until the last fade ends.
+			if ticking then
+				ticking:cancel()
+			end
+			ticking = anime.animate(tick, { value = tick:peek() + 1000, duration = FADE_MS + 50, ease = "linear" })
+		end
+	end,
+}
 
 -- A colour fading in from clear, as a binding: re-run each frame by the tick.
 local function veil(c: Chunk): () -> string
@@ -104,11 +107,14 @@ local function paragraph(text: string, at: number): Node
 			end
 			local piece = string.sub(text, s - at + 1, e - at + 1)
 			if MODE == "native" then
-				table.insert(props, ui.span {
-					piece,
-					literal = true,
-					fade_in = { start = c.started, ms = c.ms / c.boost, power = 1.6 },
-				})
+				table.insert(
+					props,
+					ui.span {
+						piece,
+						literal = true,
+						fade_in = { start = c.started, ms = c.ms / c.boost, power = 1.6 },
+					}
+				)
 			else
 				table.insert(props, ui.span { piece, literal = true, color = veil(c) })
 			end
