@@ -10,7 +10,9 @@
 //! then exits (non-zero on failure). `--zoom 1.25` zooms the window first:
 //! the same checks, in zgx's points, with AppKit's frames at the zoom.
 //! `--unaccelerated`: the page painted on the CPU (Linux;
-//! `WebViewOptions::accelerated`). `--control`: commands read a line each
+//! `WebViewOptions::accelerated`). `--ladybird`: the page in Ladybird (the
+//! `ladybird` feature, a host in `ZGX_LADYBIRD_DIR` or built by
+//! `ladybird-build`; `WebViewOptions::engine`). `--control`: commands read a line each
 //! from stdin, so a probe can drive the page with no input sent:
 //! `find <text>` (prints `FIND`), `save-link` (the page's script clicks its
 //! download link), `open-download` (the app opens the same file itself), `reload` and `downloads save` or `downloads cancel` (the app's
@@ -165,6 +167,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let fixture = args.iter().any(|arg| arg == "--fixture");
     let accelerated = !args.iter().any(|arg| arg == "--unaccelerated");
+    let engine = if args.iter().any(|arg| arg == "--ladybird") {
+        zgx::web_view::WebEngine::Ladybird
+    } else {
+        zgx::web_view::WebEngine::Platform
+    };
     let controlled = args.iter().any(|arg| arg == "--control");
     let zoom = args
         .iter()
@@ -189,6 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let options = WebViewOptions {
                 accelerated,
+                engine,
                 ..Default::default()
             };
             let web = WebView::new(&cx.ui.runtime, options);

@@ -1,0 +1,20 @@
+[package]
+name = "zgx-ladybird-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["ladybird", "browser", "web-view", "zgx"]
+categories = ["gui"]
+description = "zgx's Ladybird host (zgx-ladybird-host), built with Ladybird from a pinned release fetched at build time."
+build = "build.rs"
+# The host's source and build glue, not Ladybird's (fetched at build time).
+include = ["build.rs", "src/**", "host/**", "ladybird/**", "README.md"]
+
+[features]
+# Fetch Ladybird at its pinned release and build it with zgx's host (CMake,
+# vcpkg, a C++23 compiler, Rust, Python): an hour or more the first time,
+# cached after (`ZGX_LADYBIRD_CACHE`). Off, the crate builds nothing and
+# names no host: zgx finds one at run time in `ZGX_LADYBIRD_DIR`.
+build = []

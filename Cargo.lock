@@ -5589,6 +5589,7 @@ dependencies = [
  "zgx-fingerprint",
  "zgx-ghostty-sys",
  "zgx-gpu",
+ "zgx-ladybird-sys",
  "zgx-run",
  "zgx-script",
  "zgx-terminal",
@@ -5683,6 +5684,10 @@ dependencies = [
  "read-fonts",
  "smallvec",
 ]
+
+[[package]]
+name = "zgx-ladybird-sys"
+version = "0.1.10"
 
 [[package]]
 name = "zgx-mlua"

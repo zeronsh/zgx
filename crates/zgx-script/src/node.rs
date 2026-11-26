@@ -457,7 +457,17 @@ fn web_options(table: &Table) -> mlua::Result<zgx::web_view::WebViewOptions> {
         Some("ephemeral") => WebProfile::Ephemeral,
         Some(name) => WebProfile::Named(name.to_owned()),
     };
+    let engine = match table.get::<Option<String>>("engine")?.as_deref() {
+        None | Some("platform") => zgx::web_view::WebEngine::Platform,
+        Some("ladybird") => zgx::web_view::WebEngine::Ladybird,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "web view engine `{other}`: \"platform\" or \"ladybird\""
+            )));
+        }
+    };
     Ok(WebViewOptions {
+        engine,
         transparent: table
             .get::<Option<bool>>("transparent")?
             .unwrap_or(defaults.transparent),
@@ -7173,6 +7183,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 "messages",
                 "new_windows",
                 "accelerated",
+                "engine",
                 "on_navigate",
                 "on_load",
                 "on_title",
