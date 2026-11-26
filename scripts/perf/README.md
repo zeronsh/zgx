@@ -64,6 +64,17 @@ change's cost, when all of these hold:
   unattributed frames, moves with the heap as the C library's functions do
   (app-mail's +136,000 on #2193): it is compared by the range and its number
   printed on the row;
+- Luau's compiler (`Luau::Parser`, `Compiler`, `Compile::`, `BytecodeBuilder`,
+  `DenseHash`) is compared by the range too: its maps are keyed by pointers,
+  so where things lie moves it. So are Luau's tables' address-hashed internals
+  (`luaH_getp`, `luaH_get`, `mainposition`, `newkey`, `luaO_rawequalKey`),
+  but only while what calls them did no more: its interpreter
+  (`luau_execute`, `luau_precall`) and the C API (`lua_*`, `luaL_*`, which zgx
+  and mlua call) each grew by 0.02% of the cell or less, as each lookup costs
+  its caller too. One kept block and no other change moved Luau's compiler by
+  -8,800 to +26,800 (video, app-code) and `luaH_getp` by +2,000 to +2,200 in
+  every app cell, its interpreter by 357 at most. The rest of Luau, its
+  interpreter and collector among it, stays the change's at 0.02%;
 - what it asks of the C library is the same: the calls **and** bytes of
   `memcpy`, `memmove`, `memset` and `memcmp` (to 0.02%, and a handful of
   calls as it starts). Equal calls are not enough: a struct that grew copies
