@@ -80,6 +80,10 @@ pub(super) struct Words {
     /// Laid out at this wrap width (`lay_out`), into `lines`.
     laid: Option<Option<f32>>,
     pub lines: Vec<LayoutLine>,
+    /// The scale its `lines`' baselines were worked out at (by its entry,
+    /// `LayoutLine::settle_baseline`; `cosmic_text::baseline_scale_key`'s
+    /// id), 0 once laid out again, till then.
+    pub settled: u16,
     /// What a paragraph long enough to stream into keeps, to be laid out
     /// and measured from where a chunk changes it; none for a short one,
     /// most texts, which carry no more for it.
@@ -333,6 +337,7 @@ impl WordCache {
                     glyphs: 0,
                     laid: None,
                     lines: Vec::new(),
+                    settled: 0,
                     stream: None,
                 })
             })
@@ -818,6 +823,7 @@ impl Words {
             return;
         }
         self.laid = Some(width);
+        self.settled = 0;
         let grown = self.stream.as_mut().and_then(|stream| stream.grown.take());
         let (kept, from) = match grown {
             Some((laid, at)) if laid == width => self.resume_line(at, width),
@@ -867,6 +873,7 @@ impl Words {
                     line_height_opt: None,
                     glyphs: Vec::new(),
                     decorations: Vec::new(),
+                    baseline: 0.,
                 });
             }
             let line = &mut lines[made];
@@ -927,6 +934,7 @@ impl Words {
                     line_height_opt: None,
                     glyphs: Vec::new(),
                     decorations: Vec::new(),
+                    baseline: 0.,
                 });
             }
             let line = &mut lines[0];

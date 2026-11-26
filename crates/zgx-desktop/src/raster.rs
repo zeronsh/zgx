@@ -1368,11 +1368,14 @@ impl Raster {
             let at = (ox + x as i32, oy + y as i32);
             self.shared_glyph(image, at, color, (x0, y0, x1, y1), bounds, effects);
         }
-        // Its underlines in its colour, as the GPU draws them: on whole
-        // pixels.
+        // Its underlines in its colour, as the GPU draws them: on the whole
+        // pixels whose centres the line covers, a top or left edge on a centre
+        // taking that pixel and a bottom or right one not (the GPU's fill
+        // rule: half rounds down).
+        let edge = |v: f32| (v - 0.5).ceil();
         for line in underlines {
-            let (left, top) = ((line.x + ox as f32).round(), (line.y + oy as f32).round());
-            let right = (line.x + ox as f32 + line.width).round();
+            let (left, top) = (edge(line.x + ox as f32), edge(line.y + oy as f32));
+            let right = edge(line.x + ox as f32 + line.width);
             let line = Rect::new(left, top, right - left, line.height.round().max(1.));
             let Some(shown) = intersect(line, clip) else {
                 continue;

@@ -1008,6 +1008,12 @@ impl Entry {
         }
         if let Some(words) = &mut self.words {
             words.lay_out(crate::text::wrap_width(width));
+            // Each line's baseline, as runs of it read it.
+            let (snap, id) = cosmic_text::baseline_scale_key();
+            for line in &mut words.lines {
+                line.settle_baseline(self.metrics.line_height, snap);
+            }
+            words.settled = id;
             self.laid = Some(width);
             return;
         }
@@ -1017,6 +1023,7 @@ impl Entry {
             line.layout(
                 fonts,
                 self.metrics.font_size,
+                self.metrics.line_height,
                 crate::text::wrap_width(width),
                 Wrap::WordOrGlyph,
                 Ellipsize::None,
@@ -1212,7 +1219,8 @@ enum Need {
 pub struct Laid<'a> {
     lines: &'a [BufferLine],
     /// A paragraph laid out from its words, in place of `lines`.
-    words: Option<(&'a str, &'a [cosmic_text::LayoutLine])>,
+    /// The scale its lines' baselines were worked out at (`Words::settled`).
+    words: Option<(&'a str, &'a [cosmic_text::LayoutLine], u16)>,
     line_height: f32,
     key: u64,
 }
@@ -1224,8 +1232,8 @@ impl<'a> Laid<'a> {
     /// Runs from the top, stopping below `height` as a sized buffer would.
     pub fn runs(&self, height: Option<f32>) -> LayoutRunIter<'a> {
         match self.words {
-            Some((text, lines)) => {
-                LayoutRunIter::from_paragraph(text, lines, height, self.line_height)
+            Some((text, lines, settled)) => {
+                LayoutRunIter::from_paragraph(text, lines, settled, height, self.line_height)
             }
             None => LayoutRunIter::from_lines(self.lines, height, self.line_height, 0., 0),
         }
@@ -1794,7 +1802,7 @@ impl TextCache {
             words: entry
                 .words
                 .as_deref()
-                .map(|words| (&*entry.key.text, &words.lines[..])),
+                .map(|words| (&*entry.key.text, &words.lines[..], words.settled)),
             line_height: entry.metrics.line_height,
             key: hash,
         }
@@ -4027,6 +4035,7 @@ mod tests {
                             line.layout(
                                 &mut fonts,
                                 metrics.font_size,
+                                metrics.line_height,
                                 wrap,
                                 Wrap::WordOrGlyph,
                                 Ellipsize::None,
@@ -4164,6 +4173,7 @@ mod tests {
                     line.layout(
                         &mut fonts,
                         metrics.font_size,
+                        metrics.line_height,
                         wrap,
                         Wrap::WordOrGlyph,
                         Ellipsize::None,

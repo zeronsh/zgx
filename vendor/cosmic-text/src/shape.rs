@@ -1582,8 +1582,9 @@ fn build_boxed(
 /// below the baseline (`InlineBox::extents`, from the run font's metrics), or,
 /// for a box at its line's top or bottom, its height and none, and its
 /// `y_offset` how far its top is above the baseline; its `x_offset` holds
-/// what the run font's strut (its ascent and half its leading) adds above
-/// the baseline, its line height the rest (`ShapeLine::inline_line_box`).
+/// what the run font's strut adds above the baseline, rounded as text's is
+/// (`crate::buffer::baseline_below_top`, at the scale baselines snap to as
+/// it's shaped), its line height the rest (`ShapeLine::inline_line_box`).
 #[allow(clippy::too_many_arguments)]
 fn box_glyphs(
     glyphs: &mut Vec<ShapeGlyph>,
@@ -1635,8 +1636,12 @@ fn box_glyphs(
         }
         None => (fontdb::ID::dummy(), 0, 0.8 * size, 0.2 * size, 0.5 * size),
     };
-    let line_height = metrics.line_height;
-    let strut_top = ascent + (line_height - ascent - descent) / 2.0;
+    let strut_top = crate::buffer::baseline_below_top(
+        ascent,
+        descent,
+        metrics.line_height,
+        crate::buffer::baseline_scale(),
+    );
     let mut flags = attrs.cache_key_flags | CacheKeyFlags::INLINE_BOX;
     let (above, below) = match inline.align {
         crate::InlineAlign::Top => {
@@ -3294,6 +3299,15 @@ impl ShapeLine {
             return None;
         }
         let normal = self.metrics_opt.map(|m| m.line_height);
+        // zgx: each glyph's strut as `LayoutRunIter` puts a line's baseline
+        // (Blink's): its ascent and descent rounded to whole pixels, its
+        // half-leading floored, so text whose line takes this box sits where
+        // it would without one.
+        let snap = crate::buffer::baseline_scale();
+        let strut = |a: f32, d: f32, line_height: f32| {
+            let up = crate::buffer::baseline_below_top(a, d, line_height, snap);
+            (up, line_height - up)
+        };
         let (mut above, mut below, mut at_top, mut at_bottom) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         for r in &visual_line.ranges {
             let words = match hyphenation {
@@ -3318,9 +3332,9 @@ impl ShapeLine {
                         .unwrap_or(a + d);
                     if glyph.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX) {
                         // The run font's strut, as the text beside it reaches.
-                        let strut = glyph.x_offset * size;
-                        above = above.max(strut);
-                        below = below.max(line_height - strut);
+                        let top = glyph.x_offset * size;
+                        above = above.max(top);
+                        below = below.max(line_height - top);
                         if glyph.cache_key_flags.contains(CacheKeyFlags::INLINE_LINE_TOP) {
                             at_top = at_top.max(a);
                         } else if glyph.cache_key_flags.contains(CacheKeyFlags::INLINE_LINE_BOTTOM) {
@@ -3330,9 +3344,9 @@ impl ShapeLine {
                             below = below.max(d);
                         }
                     } else {
-                        let half = (line_height - a - d) / 2.0;
-                        above = above.max(a + half);
-                        below = below.max(d + half);
+                        let (up, down) = strut(a, d, line_height);
+                        above = above.max(up);
+                        below = below.max(down);
                     }
                 }
             }
@@ -4434,6 +4448,7 @@ impl ShapeLine {
                         line_height_opt: Some(above + below),
                         glyphs,
                         decorations,
+                        baseline: 0.0,
                     });
                     continue;
                 }
@@ -4462,6 +4477,7 @@ impl ShapeLine {
                 line_height_opt,
                 glyphs,
                 decorations,
+                baseline: 0.0,
             });
         }
 
@@ -4474,6 +4490,7 @@ impl ShapeLine {
                 line_height_opt: self.metrics_opt.map(|x| x.line_height),
                 glyphs: Vec::default(),
                 decorations: Vec::new(),
+                baseline: 0.0,
             });
         }
 
