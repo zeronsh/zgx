@@ -74,6 +74,7 @@ SCENES = [
     ('app-dashboard', 'zgx-script', 'apps_bench', {'APP': 'dashboard', 'REPS': '5'}),
     ('app-sketch', 'zgx-script', 'apps_bench', {'APP': 'sketch'}),
     ('app-code', 'zgx-script', 'apps_bench', {'APP': 'code'}),
+    ('md-stream-fade', 'zgx-script', 'apps_bench', {'APP': 'stream', 'FADE': 'native'}),
 ]
 
 
