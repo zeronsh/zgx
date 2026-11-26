@@ -7225,6 +7225,7 @@ impl GpuRenderer {
         }
         self.image_frame += 1;
         self.images_decoding = 0;
+        self.canvases.set_window(self.width, self.height);
         if self.images_to_share {
             self.share_images();
             self.images_awaiting.clear();
@@ -10680,7 +10681,9 @@ impl GpuRenderer {
                                     CanvasQuad::Fill(quad) => {
                                         push_panel(&mut quads, quad, self.scale, self.split_shading)
                                     }
-                                    CanvasQuad::Ring(quad) => quads.push(quad),
+                                    CanvasQuad::Ring(quad) | CanvasQuad::Shadow(quad) => {
+                                        quads.push(quad)
+                                    }
                                     CanvasQuad::Polyline(quad) => {
                                         polylines = true;
                                         quads.push(quad)
@@ -20049,11 +20052,67 @@ fn outline_quad(
     }
 }
 /// What a canvas draws as quads (`canvas_quads`): fills (pushed as panels),
-/// rings and polyline strokes, in order.
+/// rings, polyline strokes and blurred shadows, in order.
 enum CanvasQuad {
     Fill(Quad),
     Ring(Quad),
     Polyline(Quad),
+    Shadow(Quad),
+}
+/// A canvas shadow (`Draw::Shadow`) of a box whose corners are rounded by
+/// `radius` (a circle's is half its side), already placed as it shows
+/// (`rect`, `offset`, `blur` and `spread` in shown points), as the quad a
+/// panel's box shadow is: the box grown (or shrunk) by `spread` and moved
+/// by `offset`, blurred by a Gaussian of sigma `blur` (draw.wgsl's erf), so
+/// resizing it costs its quad alone. A sharp one is the box filled.
+fn canvas_shadow_quad(
+    rect: Rect,
+    radius: f32,
+    color: Color,
+    offset: zgx::canvas::Point,
+    blur: f32,
+    spread: f32,
+) -> Option<CanvasQuad> {
+    // As the raster's band does: grown by a round join (a square corner
+    // rounds by the spread), shrunk to a square inner corner at worst.
+    let core = rect.expand(spread);
+    if !(core.width > 0. && core.height > 0.) {
+        return None;
+    }
+    let core = Rect::new(
+        core.x + offset.x,
+        core.y + offset.y,
+        core.width,
+        core.height,
+    );
+    let corner = (radius + spread).max(0.);
+    let fade = [core.x, core.y, core.width, core.height];
+    // Under a quarter of a pixel's blur at 1x shades as the fill does.
+    if blur < 0.25 {
+        let r = core.expand(1.);
+        return Some(CanvasQuad::Fill(Quad {
+            rect: [r.x, r.y, r.width, r.height],
+            uv: [0.; 4],
+            color: rgba(color, 1.),
+            fade,
+            options: [0., 0., 0., 1.],
+            shape: [0., 0., 0., 1.],
+            border: [corner; 4],
+            mask: NO_MASK,
+        }));
+    }
+    // Three sigmas out, as a panel's.
+    let outer = core.expand(blur * 3.);
+    Some(CanvasQuad::Shadow(Quad {
+        rect: [outer.x, outer.y, outer.width, outer.height],
+        uv: [0.; 4],
+        color: rgba(color, 1.),
+        fade,
+        options: [0., 0., 0., 1.],
+        shape: [corner, 0., blur, 0.],
+        border: [corner; 4],
+        mask: NO_MASK,
+    }))
 }
 /// How many segments a pixel of a polyline stroke may have in its reach
 /// (`zgx_polyline`'s loop): denser strokes rasterize.
@@ -20532,6 +20591,44 @@ fn canvas_quads_of(
                     }
                     _ => return None,
                 }
+            }
+            // A box's or a circle's shadow, as a panel's box shadow is.
+            Draw::Shadow {
+                path,
+                color,
+                offset,
+                blur,
+                spread,
+            } => {
+                if ![offset.x, offset.y, *blur, *spread]
+                    .iter()
+                    .all(|v| v.is_finite())
+                {
+                    return None;
+                }
+                let (rect, radius) = match path.shape()? {
+                    Shape::Rect { rect, radius } => (positive(rect), radius),
+                    Shape::Ellipse { rect } if rect.width == rect.height => {
+                        (positive(rect), rect.width.abs() / 2.)
+                    }
+                    _ => return None,
+                };
+                if color.3 == 0 {
+                    continue;
+                }
+                let offset = zgx::canvas::Point::new(offset.x * zoom, offset.y * zoom);
+                // (Nothing to cast: nothing drawn, as the raster draws none.)
+                let Some(quad) = canvas_shadow_quad(
+                    at(rect),
+                    radius * zoom,
+                    *color,
+                    offset,
+                    blur.max(0.) * zoom,
+                    spread * zoom,
+                ) else {
+                    continue;
+                };
+                out.push(quad);
             }
             _ => return None,
         }
