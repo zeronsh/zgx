@@ -308,10 +308,14 @@ SCENES = [
     # list following its end, the reply parsed by `ui.markdown` and drawn by a
     # `ui.each`, four tokens every third frame, its newest words fading in
     # with `fade_in` (drawn in Rust). The frames a chunk comes in, and the two
-    # between chunks, where the fade alone runs, counted apart.
-    ('md-stream-fade', 'zgx-script', 'list_state_bench', {'APP': 'stream', 'FADE': 'native', 'COUNT': 'chunk', 'REPS': '40'}),
+    # between chunks, where the fade alone runs, counted apart. On a clock
+    # moved 1/60 s a frame (`CLOCK=frames`), so a fade's steps fall on the
+    # same frames in every run; `READS`: a base whose bench doesn't read it
+    # counted on the wall clock, so shows these as new.
+    ('md-stream-fade', 'zgx-script', 'list_state_bench', {'APP': 'stream', 'FADE': 'native', 'COUNT': 'chunk', 'REPS': '40',
+                                                          'CLOCK': 'frames', 'READS': 'CLOCK'}),
     ('md-stream-fade-between', 'zgx-script', 'list_state_bench', {'APP': 'stream', 'FADE': 'native', 'COUNT': 'between',
-                                                                   'REPS': '40'}),
+                                                                   'REPS': '40', 'CLOCK': 'frames', 'READS': 'CLOCK'}),
     # A sort with no order kept (the honest whole sort) on its own, as the
     # code editor's new-letter search is.
     ('app-dashboard', 'zgx-script', 'list_state_bench', {'APP': 'dashboard', 'ROWS': '2000', 'REPS': '2',
@@ -356,8 +360,10 @@ SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.
 # startup and app-dashboard all but one run in ten). Not every Luau scene:
 # under it list-estimate's runs spread 15,227 instructions (1,319 without)
 # and app-mail's 6,421 (828).
+# md-stream-fade's cells too: on a fixed clock (`Bench::clock`), three runs
+# under it counted alike, and without it a few hundred instructions apart.
 FAIR = ('spans-plain', 'spans-md', 'spans-follow', 'micro-state-luau', 'script-update', 'md-stream', 'md-stream-text',
-        'startup', 'app-dashboard', 'app-dashboard-sort')
+        'startup', 'app-dashboard', 'app-dashboard-sort', 'md-stream-fade', 'md-stream-fade-between')
 # Built apart from the rest, each: see `build`.
 ALONE = ('zgx-3d', 'zgx-video', 'zgx-terminal')
 
@@ -406,11 +412,14 @@ def runs_scene(checkout, env, package=None, example=None):
     measured alone that its `apps.rs` lacks. A scene naming a setting new to
     its bench (`READS`) runs only where the bench's source reads it: an
     older bench would ignore it and count another workload under the name."""
-    if 'READS' in env and package and example:
-        source = checkout / 'crates' / package_in(checkout, package) / 'examples' / f'{example}.rs'
-        if not source.exists() or f'"{env["READS"]}"' not in source.read_text():
-            return False
     apps = checkout / 'crates' / package_in(checkout, 'zgx-script') / 'examples/support/apps.rs'
+    if 'READS' in env and package and example:
+        # An app scene's settings are read by `apps.rs`, its bench's.
+        sources = [checkout / 'crates' / package_in(checkout, package) / 'examples' / f'{example}.rs']
+        if 'APP' in env:
+            sources.append(apps)
+        if not any(s.exists() and f'"{env["READS"]}"' in s.read_text() for s in sources):
+            return False
     if 'APP' not in env:
         return True
     if not apps.exists():
