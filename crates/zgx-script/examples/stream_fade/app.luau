@@ -310,7 +310,7 @@ end
 return ui.row {
 	w = 1400,
 	h = 900,
-	ui.column { w = 260, h_full = true, overflow_y = "scroll", gap = 2, p = 8, table.unpack(chats) },
+	ui.column { w = 260, h_full = true, overflow_y = "clip", gap = 2, p = 8, table.unpack(chats) },
 	ui.column {
 		w = 760,
 		h_full = true,
@@ -324,5 +324,5 @@ return ui.row {
 			ui.button { "Send", on_click = function() end },
 		},
 	},
-	ui.column { w = 380, h_full = true, overflow_y = "scroll", gap = 2, p = 8, table.unpack(files) },
+	ui.column { w = 380, h_full = true, overflow_y = "clip", gap = 2, p = 8, table.unpack(files) },
 }
