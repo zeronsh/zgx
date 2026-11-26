@@ -327,6 +327,24 @@ pub(crate) fn install(
         })?,
     )?;
     theme.set(
+        "scale_with_text",
+        lua.create_function(|lua, names: Value| {
+            let Value::List(names) = &names else {
+                return Err(fail("ui.theme.scale_with_text takes a list of token names"));
+            };
+            let mut tokens = Vec::with_capacity(names.len());
+            for name in names.iter() {
+                let Value::Str(name) = name else {
+                    return Err(fail("ui.theme.scale_with_text takes a list of token names"));
+                };
+                tokens.push(token(name));
+            }
+            let themes = themes(lua)?;
+            off_clock(lua, || themes.scale_with_text(tokens));
+            Ok(())
+        })?,
+    )?;
+    theme.set(
         "get",
         lua.create_function(|lua, name: String| Ok(script_value(themes(lua)?.get(token(&name)))))?,
     )?;

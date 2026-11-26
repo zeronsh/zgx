@@ -8,7 +8,8 @@ use zgx::{
     reactive::Runtime,
     scene::{Color, NodeId, NodeKind},
     theme::{
-        Appearance, DARK, LIGHT, Theme, ThemeKind, ThemeOverride, Themes, TokenValue, tok, token,
+        Appearance, DARK, LIGHT, NumberToken, Theme, ThemeKind, ThemeOverride, Themes, TokenValue,
+        tok, token,
     },
     widgets::Ui,
 };
@@ -758,6 +759,58 @@ fn a_scope_with_fixed_text_sizes_keeps_them_under_the_system_text_size() {
     // A terminal's grid: its own sizes, and its children's.
     assert_eq!(fixed.number_untracked(tok::FONT_SIZE_MD), base);
     assert_eq!(nested.number_untracked(tok::FONT_SIZE_MD), base);
+}
+
+#[test]
+fn the_system_text_size_scales_the_app_tokens_named_to_follow_it() {
+    let ui = Ui::new(200., 200.);
+    let (body, line, gap, derived) = (
+        NumberToken(token("test.prose.body")),
+        NumberToken(token("test.prose.line")),
+        NumberToken(token("test.prose.gap")),
+        NumberToken(token("test.prose.derived")),
+    );
+    ui.theme().declare(body, 15.);
+    ui.theme().declare(line, 24.);
+    ui.theme().declare(gap, 8.);
+    ui.theme()
+        .declare_expr(derived, "{test.prose.body}")
+        .unwrap();
+    let root = ui.theme().root();
+    let fixed = root.child(ThemeOverride::new().fixed_text_size());
+    let scoped = root.child(ThemeOverride::new().with(body, 16.));
+    // Named while the system's size is already set: applied at once.
+    ui.theme().set_system_text_scale(1.2);
+    assert_eq!(
+        root.number_untracked(body),
+        15.,
+        "an app token stays until named"
+    );
+    ui.theme().scale_with_text([body, line]);
+    assert_eq!(root.number_untracked(body), 15. * 1.2);
+    assert_eq!(root.number_untracked(line), 24. * 1.2);
+    assert_eq!(root.number_untracked(gap), 8., "one not named stays");
+    assert_eq!(
+        root.number_untracked(derived),
+        15.,
+        "one derived from a named token is named itself to scale"
+    );
+    // A scope's own value scales; a scope with fixed sizes keeps the theme's.
+    assert_eq!(scoped.number_untracked(body), 16. * 1.2);
+    assert_eq!(fixed.number_untracked(body), 15.);
+    // Named again, and more: added once, never scaled twice.
+    ui.theme().scale_with_text([body, derived]);
+    assert_eq!(root.number_untracked(body), 15. * 1.2);
+    assert_eq!(root.number_untracked(derived), 15. * 1.2);
+    // `font.*` named too: scaled once, as it always is.
+    let md = root.number_untracked(tok::FONT_SIZE_MD);
+    ui.theme()
+        .scale_with_text([tok::FONT_SIZE_MD, tok::FONT_LINE_MD]);
+    assert_eq!(root.number_untracked(tok::FONT_SIZE_MD), md, "never twice");
+    // Back to the system's own size.
+    ui.theme().set_system_text_scale(1.);
+    assert_eq!(root.number_untracked(body), 15.);
+    assert_eq!(root.number_untracked(line), 24.);
 }
 
 #[test]
