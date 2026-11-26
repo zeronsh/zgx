@@ -517,7 +517,7 @@ fn stream(make: MakeDrawing) {
     let boost = std::env::var("BOOST").map_or(true, |b| b != "0");
     let mut b = Bench::hosted(
         "stream_fade",
-        (800., 760.),
+        (1400., 900.),
         &[],
         make,
         |host| {
@@ -541,6 +541,7 @@ fn stream(make: MakeDrawing) {
     // counted: what they cost while it isn't shown (a reply scrolled away
     // from, or behind another chat).
     let off = std::env::var("OFF").is_ok_and(|o| o == "1");
+    let pointer = std::env::var("POINTER").map_or(true, |p| p != "0");
     gate_marks::outside(|| {
         for _ in 0..primed {
             assert!(b.app.host.run_command("chunk"));
@@ -550,6 +551,15 @@ fn stream(make: MakeDrawing) {
             b.app.scroll("transcript", -1e6);
             b.frames(30);
         }
+        // The pointer resting over the transcript, as a reader's does
+        // (`POINTER=0` leaves it outside the window): what hovering costs
+        // while the rows under it move.
+        if pointer {
+            b.app.ui.dispatch(InputEvent::PointerMove { x: 640., y: 450. });
+            b.frames(2);
+            assert!(b.app.ui.input.hovered().is_some(), "the pointer is over nothing");
+        }
+
     });
     assert_eq!(b.app.error(), None);
     b.damaged = Some(0.);
@@ -582,8 +592,9 @@ fn stream(make: MakeDrawing) {
     }
     let reps = b.reps as f64;
     println!(
-        "stream ({fade}, boost {boost}{}): a chunk's frame {:.3} ms, a frame between {:.3} ms, damaging {:.0} pt²",
+        "stream ({fade}, boost {boost}{}{}): a chunk's frame {:.3} ms, a frame between {:.3} ms, damaging {:.0} pt²",
         if off { ", off screen" } else { "" },
+        if pointer { "" } else { ", no pointer" },
         chunk_time.as_secs_f64() * 1e3 / reps,
         between_time.as_secs_f64() * 1e3 / reps / 2.,
         between_damage / reps / 2.
