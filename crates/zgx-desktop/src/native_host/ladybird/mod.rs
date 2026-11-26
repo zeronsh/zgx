@@ -56,6 +56,19 @@ pub(crate) fn deliver() {
                 }
             }
             Delivery::Message(message) => take(message),
+            Delivery::Snapshot {
+                view,
+                request,
+                image,
+            } => {
+                let reply =
+                    page(view).and_then(|page| page.snapshots.borrow_mut().remove(&request));
+                if let Some(reply) = reply {
+                    reply(image.and_then(|(width, height, pixels, premultiplied)| {
+                        image_data(width, height, pixels, premultiplied)
+                    }));
+                }
+            }
             Delivery::Gone => {
                 let pages: Vec<Rc<Page>> =
                     PAGES.with(|pages| pages.borrow().values().filter_map(Weak::upgrade).collect());
@@ -67,6 +80,23 @@ pub(crate) fn deliver() {
             }
         }
     }
+}
+
+/// A snapshot's pixels as an image.
+fn image_data(
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    premultiplied: bool,
+) -> zgx::web_view::SnapshotResult {
+    let image = if premultiplied {
+        zgx::image::ImageData::new_premultiplied(width, height, pixels)
+    } else {
+        zgx::image::ImageData::new(width, height, pixels)
+    };
+    image
+        .map(Arc::new)
+        .map_err(|_| "the snapshot had no pixels".to_owned())
 }
 
 fn page(view: u64) -> Option<Rc<Page>> {
@@ -87,7 +117,10 @@ fn take(message: FromHost) {
         | FromHost::Editing { view, .. }
         | FromHost::LinkHovered { view, .. }
         | FromHost::ThemeColor { view, .. } => *view,
-        FromHost::Ready | FromHost::Store { .. } | FromHost::Present { .. } => return,
+        FromHost::Ready
+        | FromHost::Store { .. }
+        | FromHost::Present { .. }
+        | FromHost::Snapshot { .. } => return,
     };
     let Some(page) = page(view) else { return };
     let Some(web) = page.web.upgrade() else {
@@ -138,7 +171,10 @@ fn take(message: FromHost) {
         FromHost::ThemeColor { color, .. } => web.update_state(|state| {
             state.theme_color = color.map(|(r, g, b, a)| zgx::scene::Color(r, g, b, a));
         }),
-        FromHost::Ready | FromHost::Store { .. } | FromHost::Present { .. } => {}
+        FromHost::Ready
+        | FromHost::Store { .. }
+        | FromHost::Present { .. }
+        | FromHost::Snapshot { .. } => {}
     }
 }
 
@@ -167,6 +203,9 @@ fn cursor_of(standard: u8) -> zgx::cursor::Cursor {
     }
 }
 
+/// What gets a full-page snapshot's answer.
+type SnapshotReply = Box<dyn FnOnce(zgx::web_view::SnapshotResult)>;
+
 /// A press: when, where (window points), its button's bit and its count.
 type Press = (Instant, f32, f32, u8, u8);
 
@@ -188,6 +227,9 @@ struct Page {
     /// The character the last key typed, which zgx's `Text` repeats.
     typed: RefCell<Option<String>>,
     editing: Cell<bool>,
+    /// What gets each full-page snapshot's answer, by request.
+    snapshots: RefCell<HashMap<u64, SnapshotReply>>,
+    next_snapshot: Cell<u64>,
 }
 impl Page {
     fn send(&self, message: Message) {
@@ -431,6 +473,35 @@ impl WebViewBackend for LadybirdWebView {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn snapshot(
+        &self,
+        area: zgx::web_view::SnapshotArea,
+        reply: Box<dyn FnOnce(zgx::web_view::SnapshotResult)>,
+    ) {
+        let page = &self.0;
+        match area {
+            // What the page shows is the front store zgx has mapped already.
+            zgx::web_view::SnapshotArea::Visible => {
+                let front = page.host.frame(page.id).lock().unwrap().front.clone();
+                reply(match front {
+                    Some((_, store)) => image_data(
+                        store.width,
+                        store.height,
+                        client::rgba(&store),
+                        matches!(store.format, 2 | 4),
+                    ),
+                    None => Err("the page hasn't drawn yet".into()),
+                });
+            }
+            // The whole document, which Ladybird's WebContent paints for it.
+            zgx::web_view::SnapshotArea::FullPage => {
+                let request = page.next_snapshot.get() + 1;
+                page.next_snapshot.set(request);
+                page.snapshots.borrow_mut().insert(request, reply);
+                page.send(page.message(ToHost::Snapshot).u64(request));
+            }
+        }
+    }
 }
 
 /// The page for `web`, made (and its view made in the host) on first ask.
@@ -462,6 +533,8 @@ fn backend(web: &WebView, host: Arc<Host>) -> Rc<Page> {
         last_press: Cell::new(None),
         typed: RefCell::new(None),
         editing: Cell::new(false),
+        snapshots: RefCell::new(HashMap::new()),
+        next_snapshot: Cell::new(0),
     });
     PAGES.with(|pages| pages.borrow_mut().insert(web.id(), Rc::downgrade(&page)));
     // Made at a size of its own until its box draws (`Painter`), so what the
@@ -818,7 +891,7 @@ mod tests {
             let mut found = false;
             for delivery in client::take_deliveries() {
                 let ours = match &delivery {
-                    Delivery::Frame(v) => *v == view,
+                    Delivery::Frame(v) | Delivery::Snapshot { view: v, .. } => *v == view,
                     Delivery::Message(message) => message_view(message) == Some(view),
                     Delivery::Gone => panic!("the host went away"),
                 };
@@ -857,7 +930,8 @@ mod tests {
             | FromHost::LinkHovered { view, .. }
             | FromHost::ThemeColor { view, .. }
             | FromHost::Store { view, .. }
-            | FromHost::Present { view, .. } => Some(*view),
+            | FromHost::Present { view, .. }
+            | FromHost::Snapshot { view, .. } => Some(*view),
             FromHost::Ready => None,
         }
     }
@@ -927,7 +1001,7 @@ mod tests {
         while Instant::now() < deadline {
             let deliveries = client::take_deliveries();
             let (ours, others): (Vec<_>, Vec<_>) = deliveries.into_iter().partition(|d| match d {
-                Delivery::Frame(v) => *v == view,
+                Delivery::Frame(v) | Delivery::Snapshot { view: v, .. } => *v == view,
                 Delivery::Message(m) => message_view(m) == Some(view),
                 Delivery::Gone => true,
             });
@@ -1061,6 +1135,81 @@ mod tests {
                 Delivery::Message(FromHost::LinkHovered { url, .. }) if url.is_empty()
             )),
             "off the link, none"
+        );
+    }
+
+    #[test]
+    fn snapshots_take_what_shows_or_the_whole_page() {
+        let Some((host, _serial)) = host_or_skip("snapshots_take_what_shows_or_the_whole_page")
+        else {
+            return;
+        };
+        let runtime = zgx::reactive::Runtime::new();
+        let web = WebView::new(
+            &runtime,
+            zgx::web_view::WebViewOptions {
+                engine: WebEngine::Ladybird,
+                ..Default::default()
+            },
+        );
+        let page = backend(&web, host.clone());
+        host.send(
+            Message::new(ToHost::Resize, page.id)
+                .u32(320)
+                .u32(200)
+                .f64(1.),
+        );
+        web.load_html(
+            "<title>tall</title><body style='margin:0'>\
+             <div style='height:300px;background:rgb(255,0,0)'></div>\
+             <div style='height:300px;background:rgb(0,0,255)'></div>",
+            None,
+        );
+        let frame = host.frame(page.id);
+        assert!(
+            wait_for(page.id, |_| {
+                pixel(&frame, 160, 100)
+                    .is_some_and(|(bgra, size)| bgra == [0, 0, 255, 255] && size == (320, 200))
+            }),
+            "the page draws at its size"
+        );
+        let answer = |area| {
+            let got = Rc::new(RefCell::new(None));
+            let into = got.clone();
+            web.snapshot(area, move |result| *into.borrow_mut() = Some(result));
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while got.borrow().is_none() && Instant::now() < deadline {
+                deliver();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            got.borrow_mut()
+                .take()
+                .expect("an answer")
+                .expect("a snapshot")
+        };
+        let rgba = |image: &zgx::image::ImageData, x: u32, y: u32| -> [u8; 4] {
+            let at = ((y * image.width() + x) * 4) as usize;
+            image.pixels()[at..at + 4].try_into().unwrap()
+        };
+        let visible = answer(zgx::web_view::SnapshotArea::Visible);
+        assert_eq!((visible.width(), visible.height()), (320, 200));
+        assert_eq!(
+            rgba(&visible, 160, 100),
+            [255, 0, 0, 255],
+            "what shows: the red top"
+        );
+        let whole = answer(zgx::web_view::SnapshotArea::FullPage);
+        assert_eq!(whole.width(), 320);
+        assert!(
+            whole.height() >= 600,
+            "the whole document: {}",
+            whole.height()
+        );
+        assert_eq!(rgba(&whole, 160, 100), [255, 0, 0, 255]);
+        assert_eq!(
+            rgba(&whole, 160, 500),
+            [0, 0, 255, 255],
+            "and the blue it scrolls to"
         );
     }
 

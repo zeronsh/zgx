@@ -155,6 +155,67 @@ fn full_screen_key(view: &WKWebView) -> Option<&'static &'static str> {
     let has: bool = unsafe { msg_send![view, respondsToSelector: sel!(fullscreenState)] };
     has.then_some(&"fullscreenState")
 }
+/// A snapshot's pixels: `image` drawn at `scale` into an RGBA bitmap of our
+/// own (premultiplied, as AppKit's bitmaps are).
+fn snapshot_pixels(image: &objc2_app_kit::NSImage, scale: f64) -> zgx::web_view::SnapshotResult {
+    let size = image.size();
+    let (width, height) = (
+        (size.width * scale).round() as isize,
+        (size.height * scale).round() as isize,
+    );
+    if width <= 0 || height <= 0 {
+        return Err("the snapshot is empty".into());
+    }
+    // SAFETY: AppKit on the main thread: a bitmap rep owning its buffer
+    // (`width * 4` bytes a row, 8-bit RGBA), drawn into through a graphics
+    // context of its own, which is restored before reading the buffer.
+    unsafe {
+        let rep: Option<Retained<objc2_app_kit::NSBitmapImageRep>> = msg_send![
+            objc2_app_kit::NSBitmapImageRep::alloc(),
+            initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>(),
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8isize,
+            samplesPerPixel: 4isize,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: &*NSString::from_str("NSDeviceRGBColorSpace"),
+            bytesPerRow: width * 4,
+            bitsPerPixel: 32isize
+        ];
+        let Some(rep) = rep else {
+            return Err("AppKit made no bitmap for the snapshot".into());
+        };
+        let context: Option<Retained<AnyObject>> = msg_send![
+            objc2::class!(NSGraphicsContext),
+            graphicsContextWithBitmapImageRep: &*rep
+        ];
+        let _: () = msg_send![objc2::class!(NSGraphicsContext), saveGraphicsState];
+        let _: () =
+            msg_send![objc2::class!(NSGraphicsContext), setCurrentContext: context.as_deref()];
+        let target = NSRect::new(
+            objc2_foundation::NSPoint::new(0., 0.),
+            objc2_foundation::NSSize::new(width as f64, height as f64),
+        );
+        // NSCompositingOperationCopy, the whole image.
+        let _: () = msg_send![
+            image,
+            drawInRect: target,
+            fromRect: NSRect::ZERO,
+            operation: 1usize,
+            fraction: 1f64
+        ];
+        let _: () = msg_send![objc2::class!(NSGraphicsContext), restoreGraphicsState];
+        let data: *mut u8 = msg_send![&*rep, bitmapData];
+        if data.is_null() {
+            return Err("the snapshot's bitmap has no pixels".into());
+        }
+        let bytes = std::slice::from_raw_parts(data, (width * height * 4) as usize).to_vec();
+        zgx::image::ImageData::new_premultiplied(width as u32, height as u32, bytes)
+            .map(std::sync::Arc::new)
+            .map_err(|_| "the snapshot had no pixels".into())
+    }
+}
 /// `themeColor` where WebKit has it (macOS 12), to observe.
 fn theme_color_key(view: &WKWebView) -> Option<&'static &'static str> {
     // SAFETY: `respondsToSelector:` on the main thread.
@@ -1394,6 +1455,45 @@ impl WebViewBackend for MacWebView {
                 Some(&config),
                 &done,
             );
+        }
+    }
+    fn snapshot(
+        &self,
+        area: zgx::web_view::SnapshotArea,
+        reply: Box<dyn FnOnce(zgx::web_view::SnapshotResult)>,
+    ) {
+        // WKWebView snapshots what it shows; a whole page beyond it isn't drawn.
+        if area == zgx::web_view::SnapshotArea::FullPage {
+            reply(Err(
+                "WKWebView can't take a snapshot of the whole page".into()
+            ));
+            return;
+        }
+        let scale = self
+            .view
+            .window()
+            .map_or(2., |window| window.backingScaleFactor());
+        let reply = Cell::new(Some(reply));
+        let done = block2::RcBlock::new(
+            move |image: *mut objc2_app_kit::NSImage, error: *mut NSError| {
+                let Some(reply) = reply.take() else { return };
+                // SAFETY: the image or error WebKit passes, on the main thread.
+                let result = match unsafe { (image.as_ref(), error.as_ref()) } {
+                    (Some(image), _) => snapshot_pixels(image, scale),
+                    (None, Some(error)) => Err(error.localizedDescription().to_string()),
+                    (None, None) => Err("WebKit took no snapshot".into()),
+                };
+                zgx::native_view::post(move || reply(result));
+            },
+        );
+        // SAFETY: `takeSnapshotWithConfiguration:completionHandler:` (macOS
+        // 10.13) on the main thread; a nil configuration takes what shows.
+        unsafe {
+            let _: () = msg_send![
+                &*self.view,
+                takeSnapshotWithConfiguration: None::<&AnyObject>,
+                completionHandler: &*done
+            ];
         }
     }
     fn clear_site_data(&self, url: &str, done: Box<dyn FnOnce(Result<usize, String>)>) {

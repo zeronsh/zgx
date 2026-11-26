@@ -588,6 +588,20 @@ pub struct FindResult {
     pub matches: Option<u32>,
 }
 
+/// What [`WebView::snapshot`] takes.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SnapshotArea {
+    /// What the view shows now.
+    #[default]
+    Visible,
+    /// The whole document, as tall and wide as it scrolls.
+    FullPage,
+}
+/// A snapshot's answer: the page's pixels, or why there are none.
+#[doc(hidden)]
+pub type SnapshotResult = Result<std::sync::Arc<crate::image::ImageData>, String>;
+
 /// A platform's page (implemented by the desktop host).
 pub trait WebViewBackend {
     /// Carry out `command`.
@@ -613,6 +627,17 @@ pub trait WebViewBackend {
         done(Err(
             "this platform's web view can't clear a site's data".into()
         ));
+    }
+    /// The page's pixels (see `WebView::snapshot`), calling `reply` once,
+    /// on the UI thread. One that can't says so.
+    #[doc(hidden)]
+    fn snapshot(&self, area: SnapshotArea, reply: Box<dyn FnOnce(SnapshotResult)>) {
+        reply(Err(match area {
+            SnapshotArea::Visible => "this platform's web view can't take a snapshot".into(),
+            SnapshotArea::FullPage => {
+                "this platform's web view can't take a snapshot of the whole page".into()
+            }
+        }));
     }
 }
 
@@ -1039,6 +1064,16 @@ impl WebView {
             (Some(backend), Some(_)) => backend.clear_site_data(url, Box::new(done)),
         }
     }
+    /// The page's pixels, `area` of it, straight from its engine (not the
+    /// window's frame: what covers the page isn't in it), to `reply` once.
+    /// A page not yet showing, or an engine that can't, answers why not.
+    #[doc(hidden)]
+    pub fn snapshot(&self, area: SnapshotArea, reply: impl FnOnce(SnapshotResult) + 'static) {
+        match self.backend() {
+            Some(backend) => backend.snapshot(area, Box::new(reply)),
+            None => reply(Err("the page isn't showing yet".into())),
+        }
+    }
     /// Stop finding: the match goes unselected and the platform's
     /// highlights of the others go.
     pub fn clear_find(&self) {
@@ -1411,6 +1446,36 @@ mod tests {
                 },
             ],
             "a failure visits nothing"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_says_why_there_is_none() {
+        struct Plain;
+        impl WebViewBackend for Plain {
+            fn run(&self, _: WebViewCommand) {}
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        let runtime = crate::reactive::Runtime::new();
+        let web = WebView::new(&runtime, WebViewOptions::default());
+        let got = Rc::new(RefCell::new(Vec::new()));
+        let take = |got: &Rc<RefCell<Vec<String>>>| {
+            let got = got.clone();
+            move |result: SnapshotResult| got.borrow_mut().push(result.err().unwrap_or_default())
+        };
+        web.snapshot(SnapshotArea::Visible, take(&got));
+        web.attach(Rc::new(Plain));
+        web.snapshot(SnapshotArea::Visible, take(&got));
+        web.snapshot(SnapshotArea::FullPage, take(&got));
+        assert_eq!(
+            *got.borrow(),
+            [
+                "the page isn't showing yet",
+                "this platform's web view can't take a snapshot",
+                "this platform's web view can't take a snapshot of the whole page",
+            ]
         );
     }
 

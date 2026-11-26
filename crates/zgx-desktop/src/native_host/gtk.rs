@@ -123,6 +123,8 @@ api! {
     fn webkit_uri_response_get_mime_type(Ptr) -> *const c_char;
     fn webkit_web_resource_get_data(Ptr, Ptr, unsafe extern "C" fn(Ptr, Ptr, Ptr), Ptr);
     fn webkit_web_resource_get_data_finish(Ptr, Ptr, *mut usize, *mut *mut GError) -> *mut u8;
+    fn webkit_web_view_get_snapshot(Ptr, c_int, c_int, Ptr, unsafe extern "C" fn(Ptr, Ptr, Ptr), Ptr);
+    fn webkit_web_view_get_snapshot_finish(Ptr, Ptr, *mut *mut GError) -> Ptr;
     fn gtk_offscreen_window_get_type() -> GType;
     fn gtk_window_get_type() -> GType;
     fn gtk_window_resize(Ptr, c_int, c_int);

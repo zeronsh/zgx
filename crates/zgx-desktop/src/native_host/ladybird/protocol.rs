@@ -30,6 +30,7 @@ pub(super) enum ToHost {
     ImeCommit = 17,
     ImeUnmark = 18,
     Visible = 19,
+    Snapshot = 20,
 }
 
 /// A message to the host, written field by field.
@@ -47,6 +48,10 @@ impl Message {
         self
     }
     pub(super) fn u32(mut self, value: u32) -> Self {
+        self.0.extend_from_slice(&value.to_le_bytes());
+        self
+    }
+    pub(super) fn u64(mut self, value: u64) -> Self {
         self.0.extend_from_slice(&value.to_le_bytes());
         self
     }
@@ -143,6 +148,24 @@ pub(super) enum FromHost {
         view: u64,
         color: Option<(u8, u8, u8, u8)>,
     },
+    /// A snapshot asked for (`ToHost::Snapshot`): its buffer (whose
+    /// descriptor came with it), or none.
+    Snapshot {
+        view: u64,
+        request: u64,
+        image: Option<SnapshotImage>,
+    },
+}
+
+/// A snapshot's shared buffer, as the host describes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SnapshotImage {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) pitch: u32,
+    pub(super) format: u8,
+    pub(super) premultiplied: bool,
+    pub(super) size: u64,
 }
 
 struct Fields<'a>(&'a [u8]);
@@ -239,6 +262,26 @@ pub(super) fn parse(kind: u8, fields: &[u8]) -> Option<FromHost> {
             view,
             editing: f.u8()? != 0,
         },
+        115 => {
+            let request = f.u64()?;
+            let image = if f.u8()? != 0 {
+                Some(SnapshotImage {
+                    width: f.u32()?,
+                    height: f.u32()?,
+                    pitch: f.u32()?,
+                    format: f.u8()?,
+                    premultiplied: f.u8()? != 0,
+                    size: f.u64()?,
+                })
+            } else {
+                None
+            };
+            FromHost::Snapshot {
+                view,
+                request,
+                image,
+            }
+        }
         113 => FromHost::LinkHovered {
             view,
             url: f.str()?,
@@ -255,9 +298,12 @@ pub(super) fn parse(kind: u8, fields: &[u8]) -> Option<FromHost> {
     })
 }
 
-/// Whether `kind` brings a file descriptor with it.
-pub(super) fn carries_fd(kind: u8) -> bool {
-    kind == 102
+/// Whether `message` came with a file descriptor.
+pub(super) fn carries_fd(message: &FromHost) -> bool {
+    matches!(
+        message,
+        FromHost::Store { .. } | FromHost::Snapshot { image: Some(_), .. }
+    )
 }
 
 #[cfg(test)]

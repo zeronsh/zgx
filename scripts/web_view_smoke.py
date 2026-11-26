@@ -665,6 +665,19 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.xdo("mousemove", "--window", session.window, 705, 130)
     session.wait(lambda: session.lines("HOVERED ")[-1:] == ["-"], "the hovered link stayed after the pointer left it")
     checks["hovered link"] = True
+    # Snapshots, straight from the engine: what shows, then the whole
+    # 3000-pixel page, blue where the page is.
+    session.key("ctrl+s")
+    shot = session.wait(lambda: session.lines("SNAPSHOT visible "), "no snapshot of what shows")[0]
+    size, pixel = shot.split(" ")[:2]
+    if pixel != "0,0,255,255" or int(size.split("x")[1]) <= 0:
+        raise AssertionError(f"the snapshot of what shows is {shot!r}")
+    session.key("ctrl+y")
+    shot = session.wait(lambda: session.lines("SNAPSHOT full "), "no snapshot of the whole page")[0]
+    size, pixel = shot.split(" ")[:2]
+    if pixel != "0,0,255,255" or int(size.split("x")[1]) < 3000:
+        raise AssertionError(f"the snapshot of the whole page is {shot!r}")
+    checks["snapshots"] = shot
     if not session.wayland:
         checks["file input"] = file_checks(session)
     # After the damage check: a dialog closing activates the window again,

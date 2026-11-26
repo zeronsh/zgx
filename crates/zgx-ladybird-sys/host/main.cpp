@@ -138,6 +138,18 @@ public:
         handle_resize();
     }
 
+    // The whole document's pixels, painted by WebContent for this, to the app as a shared buffer (`ToZgx::Snapshot`).
+    // One at a time, as Ladybird takes them; a request while one is out is answered at once without one.
+    void snapshot(u64 request)
+    {
+        if (m_snapshot_request.has_value()) {
+            send_snapshot(request, nullptr);
+            return;
+        }
+        m_snapshot_request = request;
+        page().async_take_document_screenshot();
+    }
+
     // The app is done reading the frame it was last sent, up to `bitmap_id`'s: every backing store Ladybird let go
     // of before it may be painted into again.
     void done(i32 bitmap_id)
@@ -204,6 +216,35 @@ private:
             writer.u64_(m_id).u8_(standard);
             s_connection->send(writer);
         };
+    }
+
+    void send_snapshot(u64 request, Gfx::Bitmap const* bitmap)
+    {
+        Writer writer { ToZgx::Snapshot };
+        writer.u64_(m_id).u64_(request);
+        if (!bitmap || !bitmap->anonymous_buffer().is_valid()) {
+            writer.u8_(0);
+            s_connection->send(writer);
+            return;
+        }
+        auto const& buffer = bitmap->anonymous_buffer();
+        writer.u8_(1)
+            .u32_(bitmap->width())
+            .u32_(bitmap->height())
+            .u32_(bitmap->pitch())
+            .u8_(static_cast<u8>(bitmap->format()))
+            .u8_(bitmap->alpha_type() == Gfx::AlphaType::Premultiplied ? 1 : 0)
+            .u64_(buffer.size());
+        s_connection->send(writer, buffer.fd());
+    }
+
+    // The host asks for no screenshots of Ladybird's own (they save files), so one it didn't ask for is dropped.
+    virtual void did_receive_screenshot(Badge<WebView::WebContentPage>, Gfx::ShareableBitmap const& screenshot) override
+    {
+        if (!m_snapshot_request.has_value())
+            return;
+        auto request = m_snapshot_request.release_value();
+        send_snapshot(request, screenshot.is_valid() ? screenshot.bitmap() : nullptr);
     }
 
     void send_history()
@@ -316,6 +357,7 @@ private:
 #endif
     Vector<i32> m_held_releases;
     i32 m_last_sent_bitmap { -1 };
+    Optional<u64> m_snapshot_request;
 };
 
 class Application final : public WebView::Application {
@@ -471,6 +513,9 @@ private:
             break;
         case ToHost::ImeUnmark:
             target->unmark_text_from_input_method();
+            break;
+        case ToHost::Snapshot:
+            target->snapshot(reader.u64_());
             break;
         case ToHost::Visible:
             target->set_system_visibility_state(reader.u8_() ? Web::HTML::VisibilityState::Visible : Web::HTML::VisibilityState::Hidden);
