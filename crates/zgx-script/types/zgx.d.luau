@@ -1693,6 +1693,10 @@ declare extern type Web with
 	-- hold until they reload. On Windows, storage of the site's other
 	-- subdomains stays.
 	function clear_site_data(self, url: string): Promise<number>
+	-- The page's pixels: what shows ("visible", the default), or the whole
+	-- document ("full_page"; not on macOS, whose WebKit draws only what
+	-- shows). Rejects where the engine can't.
+	function snapshot(self, area: ("visible" | "full_page")?): Promise<Bitmap>
 	-- A page from `ui.web(id, opts)` leaves the host's registry: the next
 	-- `ui.web(id)` makes a new one.
 	function close(self): ()

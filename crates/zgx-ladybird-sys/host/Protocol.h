@@ -38,6 +38,7 @@ enum class ToHost : u8 {
     ImeCommit = 17,
     ImeUnmark = 18,
     Visible = 19,
+    Snapshot = 20,
 };
 
 enum class ToZgx : u8 {
@@ -55,6 +56,7 @@ enum class ToZgx : u8 {
     Editing = 112,
     LinkHovered = 113,
     ThemeColor = 114,
+    Snapshot = 115,
 };
 
 class Writer {

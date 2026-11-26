@@ -44,6 +44,7 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Find in page (`WebView::find`) | WebKit's, without a count of matches | WebView2's, counting matches; its own find bar and browser keys off | WebKit's, counting matches (up to 1,000) |
 | Hovered link (`WebViewState::hovered_link`, Luau `web.hovered_link`) | none: WKWebView doesn't say | the status bar's text (its bar hidden) | the link under the pointer (`mouse-target-changed`) |
 | Theme colour (`WebViewState::theme_color`, Luau `web.theme_color`) | WebKit's `themeColor` (macOS 12) | none: WebView2 doesn't say | WebKit's `theme-color` (WebKitGTK 2.38); none for a page painted on the CPU (`accelerated: false`) |
+| Snapshots (`WebView::snapshot`, Luau `web:snapshot`) | what shows (`takeSnapshot`); the whole page not | what shows and the whole page (DevTools' `Page.captureScreenshot`) | what shows and the whole page (`webkit_web_view_get_snapshot`) |
 | Visits (`WebViewEvent::Visited`, Luau `on_visit`) | each finished navigation, with its title then | the same | the same |
 | Missing engine | — | placeholder | placeholder (the library is opened as the first page shows) |
 

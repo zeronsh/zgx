@@ -259,6 +259,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         });
                     }
+                    // Ctrl+S, Ctrl+Y: a snapshot of what shows, of the whole
+                    // page: `SNAPSHOT <area> <w>x<h> <r,g,b,a at (5, y)>`, y
+                    // 5 or, for the whole page, 2500 (the 3000-pixel page's).
+                    if let Some((area, y)) = match action.0.as_str() {
+                        "s" => Some((zgx::web_view::SnapshotArea::Visible, 5)),
+                        "y" => Some((zgx::web_view::SnapshotArea::FullPage, 2500)),
+                        _ => None,
+                    } {
+                        let name = if y == 5 { "visible" } else { "full" };
+                        inspect.snapshot(area, move |result| match result {
+                            Ok(image) => {
+                                let pixel = if image.height() > y {
+                                    let at = ((y * image.width() + 5) * 4) as usize;
+                                    let p = &image.pixels()[at..at + 4];
+                                    format!("{},{},{},{}", p[0], p[1], p[2], p[3])
+                                } else {
+                                    "-".into()
+                                };
+                                println!(
+                                    "SNAPSHOT {name} {}x{} {pixel}",
+                                    image.width(),
+                                    image.height()
+                                )
+                            }
+                            Err(error) => println!("SNAPSHOT {name} error {error}"),
+                        });
+                    }
                     // Ctrl+D: the app saves the page's downloads, into
                     // `ZGX_PROBE_SAVE_DIR`, telling each and how it goes.
                     if action.0 == "d" {
@@ -297,7 +324,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("p").reserved())
                     .bind(bind("f").reserved())
                     .bind(bind("g").reserved())
-                    .bind(bind("d").reserved()),
+                    .bind(bind("d").reserved())
+                    .bind(bind("s").reserved())
+                    .bind(bind("y").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {

@@ -95,6 +95,13 @@ pub(super) struct Frame {
 pub(super) enum Delivery {
     /// A page's frame changed: paint it.
     Frame(u64),
+    /// A snapshot's pixels (RGBA, premultiplied or not), or why there are
+    /// none.
+    Snapshot {
+        view: u64,
+        request: u64,
+        image: Result<(u32, u32, Vec<u8>, bool), String>,
+    },
     /// Anything else the host said.
     Message(FromHost),
     /// The host went away.
@@ -229,13 +236,13 @@ fn read(stream: UnixStream, host: &Host) {
                 break;
             }
             let kind = pending[offset + 4];
-            let fd = if protocol::carries_fd(kind) {
-                fds.pop_front()
-            } else {
-                None
-            };
             if let Some(message) = protocol::parse(kind, &pending[offset + 5..offset + 4 + length])
             {
+                let fd = if protocol::carries_fd(&message) {
+                    fds.pop_front()
+                } else {
+                    None
+                };
                 take(host, message, fd);
             }
             offset += 4 + length;
@@ -356,8 +363,70 @@ fn take(host: &Host, message: FromHost, fd: Option<OwnedFd>) {
                 deliver(Delivery::Frame(view));
             }
         }
+        FromHost::Snapshot {
+            view,
+            request,
+            image,
+        } => {
+            let image = match (image, fd) {
+                (Some(image), Some(fd)) => Mapping::new(
+                    fd,
+                    image.size as usize,
+                    image.width,
+                    image.height,
+                    image.pitch,
+                    image.format,
+                )
+                .map(|mapping| {
+                    (
+                        image.width,
+                        image.height,
+                        rgba(&mapping),
+                        image.premultiplied && matches!(image.format, 2 | 4),
+                    )
+                })
+                .ok_or_else(|| "Ladybird's snapshot couldn't be read".to_owned()),
+                _ => Err("Ladybird took no snapshot of the page".to_owned()),
+            };
+            deliver(Delivery::Snapshot {
+                view,
+                request,
+                image,
+            });
+        }
         other => deliver(Delivery::Message(other)),
     }
+}
+
+/// A store's pixels as RGBA rows without padding: Ladybird's BGR stores
+/// swapped, and those without alpha (BGRx, RGBx) opaque.
+pub(super) fn rgba(store: &Mapping) -> Vec<u8> {
+    let (width, height, pitch) = (
+        store.width as usize,
+        store.height as usize,
+        store.pitch as usize,
+    );
+    let bytes = store.bytes();
+    let mut out = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        for pixel in bytes[row * pitch..row * pitch + width * 4]
+            .as_chunks::<4>()
+            .0
+        {
+            let (r, b) = if matches!(store.format, 1 | 2) {
+                (pixel[2], pixel[0])
+            } else {
+                (pixel[0], pixel[2])
+            };
+            let a = if matches!(store.format, 1 | 3) {
+                255
+            } else {
+                pixel[3]
+            };
+            out.extend_from_slice(&[r, pixel[1], b, a]);
+        }
+    }
+    out
 }
 
 fn clip(x: i32, y: i32, w: i32, h: i32, width: u32, height: u32) -> (u32, u32, u32, u32) {

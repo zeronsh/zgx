@@ -89,6 +89,49 @@ pub(crate) fn available() -> bool {
     })
 }
 
+/// The number after `"key":` in `json` (DevTools' answers, read without a
+/// parser).
+fn json_number(json: &str, key: &str) -> Option<f64> {
+    let rest = json.split(&format!("\"{key}\":")).nth(1)?;
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | 'e' | 'E' | '+')))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+/// `Page.captureScreenshot`'s answer, `{"data":"<base64 PNG>"}`, decoded.
+fn snapshot_png(json: &str) -> zgx::web_view::SnapshotResult {
+    let data = json
+        .split("\"data\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .ok_or("WebView2's snapshot had no data")?;
+    let png = base64_decode(data).ok_or("WebView2's snapshot wasn't base64")?;
+    zgx_gpu::assets::decode_image(&png).map_err(|error| error.to_string())
+}
+/// Standard base64 (with or without padding), `None` if it isn't.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut bits, mut count) = (0u32, 0);
+    for c in text.bytes() {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            b'\\' | b'\n' | b'\r' => continue,
+            _ => return None,
+        };
+        bits = bits << 6 | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+        }
+    }
+    Some(out)
+}
 fn take(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> String {
     let mut value = PWSTR::null();
     match get(&mut value) {
@@ -532,6 +575,93 @@ impl WebViewBackend for Backend {
     /// a request to the host would carry (its own and its parent domains',
     /// which a browser never sets on a public suffix) one by one. Another
     /// subdomain's storage, and cookies one set for itself alone, stay.
+    fn snapshot(
+        &self,
+        area: zgx::web_view::SnapshotArea,
+        reply: Box<dyn FnOnce(zgx::web_view::SnapshotResult)>,
+    ) {
+        let ready = self.0.ready.borrow();
+        let Some(ready) = ready.as_ref() else {
+            return reply(Err("the web view isn't showing yet".into()));
+        };
+        let view = ready.view.clone();
+        let reply = Rc::new(Cell::new(Some(reply)));
+        let answer = {
+            let reply = reply.clone();
+            move |result: zgx::web_view::SnapshotResult| {
+                if let Some(reply) = reply.take() {
+                    reply(result);
+                }
+            }
+        };
+        // DevTools' screenshot: what shows, or (after asking the page's size)
+        // the whole document, rendered beyond the viewport.
+        let capture =
+            move |view: &ICoreWebView2,
+                  params: String,
+                  answer: Rc<dyn Fn(zgx::web_view::SnapshotResult)>| {
+                // SAFETY: WebView2 on the UI thread, where it calls back.
+                let called = unsafe {
+                    view.CallDevToolsProtocolMethod(
+                        &HSTRING::from("Page.captureScreenshot"),
+                        &HSTRING::from(params),
+                        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                            move |result, json| {
+                                answer(
+                                    result
+                                        .map_err(|error| error.message())
+                                        .and_then(|()| snapshot_png(&json)),
+                                );
+                                Ok(())
+                            },
+                        )),
+                    )
+                };
+                if let Err(error) = called {
+                    eprintln!("zgx: WebView2 snapshot: {}", error.message());
+                }
+            };
+        let answer: Rc<dyn Fn(zgx::web_view::SnapshotResult)> = Rc::new(answer);
+        match area {
+            zgx::web_view::SnapshotArea::Visible => {
+                capture(&view, r#"{"format":"png"}"#.into(), answer);
+            }
+            zgx::web_view::SnapshotArea::FullPage => {
+                let page_view = view.clone();
+                // SAFETY: as above.
+                let called = unsafe {
+                    view.CallDevToolsProtocolMethod(
+                        &HSTRING::from("Page.getLayoutMetrics"),
+                        &HSTRING::from("{}"),
+                        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                            move |result, json| {
+                                let size = result.ok().and_then(|()| {
+                                    let content = json.split("\"cssContentSize\"").nth(1)?;
+                                    Some((json_number(content, "width")?, json_number(content, "height")?))
+                                });
+                                match size {
+                                    Some((width, height)) => capture(
+                                        &page_view,
+                                        format!(
+                                            r#"{{"format":"png","captureBeyondViewport":true,"clip":{{"x":0,"y":0,"width":{width},"height":{height},"scale":1}}}}"#
+                                        ),
+                                        answer.clone(),
+                                    ),
+                                    None => answer(Err("WebView2 gave no size for the page".into())),
+                                }
+                                Ok(())
+                            },
+                        )),
+                    )
+                };
+                if let Err(error) = called
+                    && let Some(reply) = reply.take()
+                {
+                    reply(Err(error.message()));
+                }
+            }
+        }
+    }
     fn clear_site_data(&self, url: &str, done: SiteAnswer) {
         let Some(host) = zgx::web_view::site_host(url) else {
             return done(Err(format!("{url} has no site")));

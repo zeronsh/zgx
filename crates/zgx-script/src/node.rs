@@ -426,6 +426,38 @@ impl UserData for WebUd {
             })?;
             Ok(crate::calls::PromiseUd(promise))
         });
+        // The page's pixels as an image: what shows (`"visible"`, the
+        // default), or the whole document (`"full_page"`) where the engine can.
+        methods.add_method("snapshot", |lua, w, area: Option<String>| {
+            let area = match area.as_deref() {
+                None | Some("visible") => zgx::web_view::SnapshotArea::Visible,
+                Some("full_page") => zgx::web_view::SnapshotArea::FullPage,
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "web:snapshot(`{other}`): \"visible\" or \"full_page\""
+                    )));
+                }
+            };
+            let (tell, mut heard) = zgx::task::latest::<zgx::web_view::SnapshotResult>();
+            let promise = crate::calls::pending(lua, "web:snapshot".to_owned())?;
+            w.0.snapshot(area, move |result| {
+                tell.send(result);
+            });
+            crate::calls::settle_failing(lua, &promise, async move {
+                match heard.recv().await {
+                    Some(Ok(image)) => Ok(Value::Image(image)),
+                    Some(Err(message)) => Err(crate::errors::Failure::new(
+                        crate::errors::Kind::Io,
+                        message,
+                    )),
+                    None => Err(crate::errors::Failure::new(
+                        crate::errors::Kind::Io,
+                        "the web view went before it answered".to_owned(),
+                    )),
+                }
+            })?;
+            Ok(crate::calls::PromiseUd(promise))
+        });
     }
 }
 /// JSON as script data (objects as maps, arrays as lists).

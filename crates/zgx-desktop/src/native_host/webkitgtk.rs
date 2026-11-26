@@ -1777,6 +1777,18 @@ impl Page {
                         *self.finding.borrow_mut() = Some(search);
                     }
                 }
+                Command::Snapshot { full, reply } => {
+                    // WEBKIT_SNAPSHOT_REGION_VISIBLE 0, _FULL_DOCUMENT 1; no options.
+                    let asked = Box::new((self.id, reply));
+                    (api.webkit_web_view_get_snapshot)(
+                        view,
+                        c_int::from(full),
+                        0,
+                        null_mut(),
+                        snapshot_taken,
+                        Box::into_raw(asked) as Ptr,
+                    );
+                }
                 Command::ClearFind => {
                     (api.webkit_find_controller_search_finish)((api
                         .webkit_web_view_get_find_controller)(
@@ -3528,6 +3540,57 @@ unsafe fn take_error(api: &Api, error: *mut gtk::GError) -> Option<String> {
         }
     })
 }
+/// WebKit took a snapshot (`Command::Snapshot`): its pixels, read from the
+/// cairo image surface it made, go to the UI thread's reply.
+unsafe extern "C" fn snapshot_taken(view: Ptr, result: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the box `Command::Snapshot` leaked for this call, taken back once.
+    let (page_id, reply) = *unsafe { Box::from_raw(data as *mut (u64, u64)) };
+    let mut error: *mut gtk::GError = null_mut();
+    // SAFETY: the view and result WebKit passes; the surface is ours to
+    // destroy, read while it lives: ARGB32 (premultiplied, native-endian:
+    // BGRA here) rows `stride` apart.
+    let image = unsafe {
+        let surface = (api.webkit_web_view_get_snapshot_finish)(view, result, &mut error);
+        if surface.is_null() {
+            if !error.is_null() {
+                (api.g_error_free)(error);
+            }
+            Err("WebKitGTK took no snapshot of the page".to_owned())
+        } else {
+            (api.cairo_surface_flush)(surface);
+            let width = (api.cairo_image_surface_get_width)(surface).max(0) as usize;
+            let height = (api.cairo_image_surface_get_height)(surface).max(0) as usize;
+            let stride = (api.cairo_image_surface_get_stride)(surface).max(0) as usize;
+            let data = (api.cairo_image_surface_get_data)(surface);
+            let read = if data.is_null() || (api.cairo_image_surface_get_format)(surface) != 0 {
+                Err("WebKitGTK's snapshot isn't an ARGB image".to_owned())
+            } else {
+                let bytes = std::slice::from_raw_parts(data, stride * height);
+                let mut rgba = Vec::with_capacity(width * height * 4);
+                for row in bytes.chunks_exact(stride) {
+                    for pixel in row[..width * 4].as_chunks::<4>().0 {
+                        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                    }
+                }
+                Ok((width as u32, height as u32, rgba))
+            };
+            (api.cairo_surface_destroy)(surface);
+            read
+        }
+    };
+    deliver(move || {
+        if let Some(page) = ui_page(page_id)
+            && let Some(reply) = page.snapshots.borrow_mut().remove(&reply)
+        {
+            reply(image.and_then(|(width, height, rgba)| {
+                zgx::image::ImageData::new_premultiplied(width, height, rgba)
+                    .map(Arc::new)
+                    .map_err(|_| "the snapshot had no pixels".to_owned())
+            }));
+        }
+    });
+}
 unsafe extern "C" fn site_data_fetched(manager: Ptr, result: Ptr, data: Ptr) {
     let api = gtk::api().expect("GTK runs");
     // SAFETY: the box `Command::ClearSiteData` made, taken once; the result
@@ -3994,6 +4057,11 @@ enum Command {
         reply: u64,
     },
     ClearFind,
+    /// The page's pixels, the whole document's if `full` (`snapshot`).
+    Snapshot {
+        full: bool,
+        reply: u64,
+    },
     /// The box's size in device pixels, and device pixels a point.
     Size {
         width: u32,
@@ -4104,6 +4172,7 @@ fn ui_page(id: u64) -> Option<Rc<UiPage>> {
 type Reply = Box<dyn FnOnce(ScriptResult)>;
 /// What gets a find's answer.
 type FindReply = Box<dyn FnOnce(FindResult)>;
+type SnapshotReply = Box<dyn FnOnce(zgx::web_view::SnapshotResult)>;
 type SiteClearReply = Box<dyn FnOnce(Result<usize, String>)>;
 /// A page, on the UI thread: what its controller, box and painter share.
 /// The longest a page's commands wait for zgx's accessibility as focus
@@ -4186,6 +4255,8 @@ struct UiPage {
     finds: RefCell<HashMap<u64, FindReply>>,
     /// What gets each `clear_site_data`'s answer, under the same ids.
     site_clears: RefCell<HashMap<u64, SiteClearReply>>,
+    /// What gets each snapshot's answer, under the same ids.
+    snapshots: RefCell<HashMap<u64, SnapshotReply>>,
     next_reply: Cell<u64>,
     /// The box showing it, and its scene.
     node: Cell<Option<NodeId>>,
@@ -4668,6 +4739,20 @@ impl WebViewBackend for GtkWebView {
             reply: id,
         });
     }
+    fn snapshot(
+        &self,
+        area: zgx::web_view::SnapshotArea,
+        reply: Box<dyn FnOnce(zgx::web_view::SnapshotResult)>,
+    ) {
+        let page = &self.0;
+        let id = page.next_reply.get() + 1;
+        page.next_reply.set(id);
+        page.snapshots.borrow_mut().insert(id, reply);
+        page.send(Command::Snapshot {
+            full: area == zgx::web_view::SnapshotArea::FullPage,
+            reply: id,
+        });
+    }
     fn clear_find(&self) {
         self.0.send(Command::ClearFind);
     }
@@ -4735,6 +4820,7 @@ fn backend(
         replies: RefCell::new(HashMap::new()),
         finds: RefCell::new(HashMap::new()),
         site_clears: RefCell::new(HashMap::new()),
+        snapshots: RefCell::new(HashMap::new()),
         next_reply: Cell::new(0),
         node: Cell::new(None),
         scene: RefCell::new(Weak::new()),
