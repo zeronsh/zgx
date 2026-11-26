@@ -174,6 +174,8 @@ export const sets = [
       { slug: 'window-controls', src: 'docs/window-controls.md', title: 'Window controls' },
       { slug: 'native-surfaces', src: 'docs/native-surfaces.md', title: 'CoreVideo surfaces (macOS)',
         description: 'Show CoreVideo frames as a retained, styled view, fitted like an image.' },
+      { slug: 'ladybird', src: 'docs/ladybird.md', title: 'Ladybird pages',
+        description: "Web views whose pages run in Ladybird, in a process of zgx's, with the notices an app ships." },
       { slug: 'gpu-views', src: 'docs/gpu-views.md', title: 'GPU views (wgpu)',
         description: "An app's own wgpu drawing (3D, a game, video) in a box, composited as an image." },
       '---Evidence---',
