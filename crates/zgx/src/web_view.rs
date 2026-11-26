@@ -336,6 +336,25 @@ pub struct WebViewOptions {
     /// of 40–52%. Pages then draw no `backdrop-filter`, and flatten 3D transforms
     /// (no perspective). See docs/native-surfaces.md.
     pub accelerated: bool,
+    /// The engine that draws the page: the platform's (the default), or
+    /// Ladybird where the desktop host was built with it (zgx-desktop's
+    /// `ladybird` feature). Where the engine asked for is missing, the
+    /// page shows its placeholder.
+    #[doc(hidden)]
+    pub engine: WebEngine,
+}
+/// The engine a web view's page runs in (see [`WebViewOptions::engine`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WebEngine {
+    /// The platform's own: WKWebView on macOS, WebView2 on Windows,
+    /// WebKitGTK on Linux.
+    #[default]
+    Platform,
+    /// Ladybird, run in a process of zgx's (`zgx-ladybird-host`) and drawn
+    /// as an image in the window's own paint.
+    Ladybird,
 }
 impl Default for WebViewOptions {
     fn default() -> Self {
@@ -349,6 +368,7 @@ impl Default for WebViewOptions {
             scripts: Vec::new(),
             schemes: Vec::new(),
             accelerated: true,
+            engine: WebEngine::Platform,
         }
     }
 }
@@ -1162,6 +1182,22 @@ impl PageViews {
     pub fn new(make: impl Fn(&WebView) -> Option<View> + 'static) -> Self {
         Self(Rc::new(make))
     }
+    /// The box for `web`'s page, or `None` for a native view: so a host's
+    /// service can hand the pages it doesn't draw to another.
+    #[doc(hidden)]
+    pub fn make(&self, web: &WebView) -> Option<View> {
+        (self.0)(web)
+    }
+}
+/// What a page shows where its engine is missing, filling its box: a host's
+/// [`PageViews`] gives it for an engine it was asked for and doesn't have.
+#[doc(hidden)]
+pub fn placeholder_view(web: &WebView) -> View {
+    div()
+        .relative()
+        .w_full()
+        .h_full()
+        .child(placeholder(NativeContent::Web(web.clone())))
 }
 fn native(
     content: NativeContent,

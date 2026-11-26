@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **Web views can show Ladybird's pages** (zgx, zgx-desktop, zgx-script, zgx-ladybird-sys): `WebViewOptions::engine` (Luau `engine = "ladybird"`) runs a page in Ladybird instead of the platform's engine, in zgx-ladybird-host, a process of zgx's linking Ladybird's LibWebView, so an engine crash ends pages and not the app. Its frames reach the window as shared memory, of which only what changed is uploaded, and an idle page sends nothing. zgx-desktop's `ladybird` feature finds a host at run time (`ZGX_LADYBIRD_DIR`), and `ladybird-build` builds one with Ladybird from its pinned release (2026.47.8), unmodified; where there's none, Ladybird pages show their placeholders. Linux; macOS copies each frame's changed rows for now.

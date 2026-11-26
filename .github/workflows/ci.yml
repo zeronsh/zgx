@@ -236,7 +236,10 @@ jobs:
             chmod +x "$dir/stylua"
           fi
           "$dir/stylua" --check .
-      - run: cargo clippy --workspace --all-targets --features zgx-desktop/webkitgtk --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features zgx-desktop/webkitgtk,zgx-desktop/ladybird --locked -- -D warnings
+      # Ladybird pages' client (the ladybird feature; no host here, so the
+      # tests that drive one say they were skipped).
+      - run: cargo test -p zgx-desktop --features ladybird --lib --locked -- 'native_host::ladybird::'
       # Web views' own unit tests (the webkitgtk feature, off by default), on
       # a display of their own: one makes GTK windows.
       - run: xvfb-run -a cargo test -p zgx-desktop --features webkitgtk --lib --locked -- 'native_host::webkitgtk::'
@@ -763,7 +766,7 @@ jobs:
       # As an app from crates.io builds them: without the workspace's patched
       # winit, wgpu-hal and AccessKit (docs/releasing.md).
       - run: scripts/unpatched_check.sh
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features zgx-desktop/ladybird --locked -- -D warnings
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --test patched_wgpu_hal --locked

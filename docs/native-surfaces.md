@@ -16,7 +16,7 @@ The Mac validation bundle runs the complete GPU rendering suite, including nativ
 
 # Web views by platform
 
-A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out as a node. How each platform shows it, and what that leaves out:
+A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out as a node. How each platform shows it, and what that leaves out (a page can run in Ladybird instead, the same on every platform: see [Ladybird pages](ladybird.md)):
 
 | | macOS | Windows | Linux |
 | --- | --- | --- | --- |

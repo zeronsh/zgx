@@ -18,6 +18,8 @@ mod ghostty;
 mod ghostty_colors;
 #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
 mod gtk;
+#[cfg(all(unix, feature = "ladybird"))]
+pub(crate) mod ladybird;
 #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
 pub(crate) mod webkitgtk;
 #[cfg(all(target_os = "macos", feature = "ghostty"))]
@@ -113,6 +115,9 @@ pub(crate) struct NativeHost {
     /// Wakes the window when WebKitGTK's thread has something for it.
     #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
     _pages_waker: webkitgtk::WakerGuard,
+    /// Wakes the window when the Ladybird host has something for it.
+    #[cfg(all(unix, feature = "ladybird"))]
+    _ladybird_waker: ladybird::WakerGuard,
 }
 
 impl NativeHost {
@@ -159,6 +164,8 @@ impl NativeHost {
             runtime: ui.runtime.downgrade(),
             #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
             _pages_waker: webkitgtk::add_waker(wake.clone()),
+            #[cfg(all(unix, feature = "ladybird"))]
+            _ladybird_waker: ladybird::add_waker(wake.clone()),
             _waker: zgx::native_view::set_waker(move || wake()),
         }
     }

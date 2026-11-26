@@ -1038,18 +1038,27 @@ impl WindowContext {
             windows: Some(self.windows.clone()),
         }));
         // Pages as images of WebKitGTK's (`web_view` asks it first).
+        let pages: Option<zgx::web_view::PageViews> = None;
         #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
-        let view = zgx::compose::provide(
-            crate::native_host::webkitgtk::page_views(self.windows.clipboard.clone(), {
+        let pages = pages.or(Some(crate::native_host::webkitgtk::page_views(
+            self.windows.clipboard.clone(),
+            {
                 let dialogs = self.dialogs.clone();
                 Rc::new(move || {
                     dialogs
                         .window()
                         .and_then(|window| crate::x11_nudge::xid(&window))
                 })
-            }),
-            view,
-        );
+            },
+        )));
+        // Ladybird's pages (`WebEngine::Ladybird`), the others as above, or
+        // native views.
+        #[cfg(all(unix, feature = "ladybird"))]
+        let pages = Some(crate::native_host::ladybird::page_views(pages));
+        let view = match pages {
+            Some(pages) => zgx::compose::provide(pages, view),
+            None => view,
+        };
         // Terminals zgx draws, where Ghostty doesn't.
         #[cfg(all(
             feature = "terminal",
@@ -6849,6 +6858,8 @@ impl Host {
         // focus they took or gave back, at this safe point.
         #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
         crate::native_host::webkitgtk::deliver_pages();
+        #[cfg(all(unix, feature = "ladybird"))]
+        crate::native_host::ladybird::deliver();
         zgx::native_view::deliver_posted();
         // Moves zgx heard through the native views' pointer monitor.
         if let Some(pointer) = self.native.take_unheard_pointer() {

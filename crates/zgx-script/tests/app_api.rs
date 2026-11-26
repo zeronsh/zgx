@@ -712,6 +712,38 @@ fn keyed_web_pages_outlive_reloads_until_closed() {
 }
 
 #[test]
+fn a_page_names_its_engine_and_a_wrong_name_is_an_error() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.webview { engine = "ladybird", html = "<p>hi</p>", w = 200, h = 100 },
+        }"##,
+    );
+    assert_eq!(
+        page(&mut h).options().engine,
+        zgx::web_view::WebEngine::Ladybird
+    );
+    let mut h = Harness::inline(
+        r##"local web = ui.web({ engine = "platform" })
+        return ui.webview { web = web, w = 200, h = 100 }"##,
+    );
+    assert_eq!(
+        page(&mut h).options().engine,
+        zgx::web_view::WebEngine::Platform
+    );
+    let error = match zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r##"return ui.webview { engine = "gecko", w = 200, h = 100 }"##,
+        )
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("an unknown engine is an error"),
+    };
+    assert!(error.contains("engine `gecko`"), "{error}");
+}
+
+#[test]
 fn an_element_takes_focus_when_asked() {
     let mut h = Harness::inline(
         r##"local field = nil
