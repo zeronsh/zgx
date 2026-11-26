@@ -662,7 +662,7 @@ def by_function(rows, scenes, base, budget=None, clock=time.monotonic, found=Non
         (into / f'{name}.txt').write_text(report + '\n')
         print(f'=== {name} by function\n{report}', flush=True)
         if found is not None:
-            found[name] = (groups, total)
+            found[name] = (groups, total, cgdiff.luau_parts(into / f'{name}.base.cg', into / f'{name}.head.cg'))
         summary.append(f'| {name} | {total:+,} | ' + ' | '.join(f'{groups[g]:+,}' for g in cgdiff.GROUPS) + ' |')
     if not summary:
         return []
@@ -749,10 +749,27 @@ def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, a
     for name, before, after, delta, _ in sorted(rows, key=lambda row: -(row[3] or 0.0)):
         if name not in found or delta is None or not before:
             continue
-        groups, total = found[name]
+        groups, total, *parts = found[name]
         # `other` is mostly Luau's collector's unattributed frames, which move
         # with the heap as libc does: compared by the range, printed below.
         ours = {g: groups[g] for g in ('zgx', 'luau', 'rust') if groups.get(g, 0) > 0}
+        parts = parts[0] if parts else None
+        heap_luau = ''
+        if parts and 'luau' in ours:
+            # Luau's compiler hashes by address, and its tables place keys
+            # hashed so: those move with the heap as libc does, compared by
+            # the range. Its tables only while what calls them (its
+            # interpreter, the C API) did no more: more lookups cost their
+            # callers too.
+            share = lambda part: parts.get(part, 0) / before * 100
+            callers = [p for p in ('interpreter', 'api') if share(p) > LAYOUT_OURS]
+            if callers:
+                ours['luau ' + callers[0]] = parts[callers[0]]
+            moved = ['parse'] + ([] if callers else ['tables'])
+            ours['luau'] = groups['luau'] - sum(parts.get(p, 0) for p in moved)
+            if ours['luau'] <= 0:
+                del ours['luau']
+            heap_luau = ''.join(f', luau {p} {parts[p]:+,}' for p in moved if parts.get(p))
         most = max(ours.values(), default=0) / before * 100
         if total <= 0 or delta <= 0:
             continue
@@ -801,7 +818,8 @@ def layout_rows(rows, found, scenes, base, clock=time.monotonic, counted=None, a
                 own = ', given the change\'s own ' + ', '.join(
                     f'{n} {c:+,} ({b:+,} bytes)' for n, c, b in allocated)
             other = f", other {groups['other']:+,}" if groups.get('other') else ''
-            lines.append((name, delta, f"layout{own}: zgx {groups['zgx']:+,}{other}, the same calls and bytes; {over}"))
+            lines.append((name, delta, f"layout{own}: zgx {groups['zgx']:+,}{other}{heap_luau}, "
+                                       f"the same calls and bytes; {over}"))
     return lines
 
 

@@ -68,6 +68,31 @@ def group(name, file):
     return 'other'
 
 
+# Luau's code by what it is (`luau_parts`), for the gate's heap layout rows:
+# what hashes by address and so moves with where the heap puts things (its
+# compiler's maps keyed by pointers; its tables' placement of keys hashed by
+# address), and what calls those (its interpreter; the C API zgx and mlua call).
+LUAU_PARTS = (
+    ('parse', re.compile(r'Luau::(Parser|Compiler|Compile::|BytecodeBuilder|DenseHash|detail::DenseHash)')),
+    ('tables', re.compile(r'^(luaH_getp|luaH_get|mainposition|newkey\w*|luaO_rawequalKey)\(')),
+    ('interpreter', re.compile(r'^(void )?(luau_execute|luau_precall)\b')),
+    ('api', re.compile(r'^(lua_|luaL_)\w*\(')),
+)
+
+
+def luau_parts(base_path, head_path):
+    """Luau's change by part (`LUAU_PARTS`, and `rest`), head - base."""
+    (base, base_files), (head, head_files) = load(base_path), load(head_path)
+    files = {**base_files, **head_files}
+    parts = dict.fromkeys([name for name, _ in LUAU_PARTS] + ['rest'], 0)
+    for name in set(base) | set(head):
+        if group(name, files.get(name, '???')) != 'luau':
+            continue
+        part = next((part for part, pattern in LUAU_PARTS if pattern.search(name)), 'rest')
+        parts[part] += head.get(name, 0) - base.get(name, 0)
+    return parts
+
+
 def diff(base_path, head_path, top=30):
     """The report: totals by group, then the functions that moved most."""
     (base, base_files), (head, head_files) = load(base_path), load(head_path)

@@ -129,11 +129,11 @@ class LayoutTests(unittest.TestCase):
              'memcmp': (300_000, 2_000_000), 'malloc': (20_000, 800_000), 'realloc': (900, 60_000)}
 
     def told(self, delta=0.10, groups=None, head=None, shifts=(0, 400_000), total=200_000, name='cell', max_=8,
-             clock=None):
+             clock=None, parts=None):
         before = 100_000_000
         base = list(shifts) + [0] * (len(gate.SHIFTS) - len(shifts))
         found = {name: ({'zgx': 1_000, 'luau': 500, 'libc': total - 1_500, 'rust': 0, 'linker': 0, 'other': 0,
-                         **(groups or {})}, total)}
+                         **(groups or {})}, total, *([parts] if parts else []))}
         scenes = {name: (name, 'zgx-script', 'bench', {})}
         counts = iter([before + extra for extra in base])
         sides = iter([self.ASKED, {**self.ASKED, **(head or {})}])
@@ -183,6 +183,51 @@ class LayoutTests(unittest.TestCase):
         self.assertTrue(why.startswith('layout:'), why)
         self.assertIn('other +120,000', why)
         self.assertIn("past the base's own range", self.told(groups={'other': 120_000}, shifts=(0, 50_000)))
+
+    # Luau by part (`cgdiff.luau_parts`): a cell of 100,000,000, 0.02% being 20,000.
+    def luau(self, **parts):
+        full = {'parse': 0, 'tables': 0, 'interpreter': 0, 'api': 0, 'rest': 0, **parts}
+        return self.told(groups={'luau': sum(full.values())}, parts=full)
+
+    def test_luaus_compiler_moving_is_compared_by_the_range(self):
+        why = self.luau(parse=60_000)
+        self.assertTrue(why.startswith('layout:'), why)
+        self.assertIn('luau parse +60,000', why)
+
+    def test_luaus_tables_moving_with_their_callers_still_are_too(self):
+        why = self.luau(tables=50_000, interpreter=5_000, api=5_000)
+        self.assertTrue(why.startswith('layout:'), why)
+        self.assertIn('luau tables +50,000', why)
+
+    def test_more_lookups_from_the_interpreter_are_the_changes(self):
+        # Each lookup costs its caller too: the tables are then the change's.
+        self.assertIn("the change's: luau", self.luau(tables=50_000, interpreter=25_000))
+
+    def test_more_lookups_through_the_c_api_are_the_changes(self):
+        self.assertIn("the change's: luau", self.luau(tables=50_000, api=25_000))
+
+    def test_the_rest_of_luau_stays_the_changes(self):
+        # The collector's named work, the VM's: ours, as zgx's is.
+        self.assertIn("the change's: luau", self.luau(parse=60_000, rest=25_000))
+
+    def test_luaus_parts_are_read_from_its_function_names(self):
+        sys.path.insert(0, str(pathlib.Path(__file__).parent))
+        import cgdiff
+        names = {'Luau::Parser::parseNameExpr(char const*)': (100, 160), 'Luau::Compiler::compileExpr(x)': (50, 80),
+                 'Luau::detail::DenseHashTable<A, B>::find(x) const': (10, 20),
+                 'luaH_getp(LuaTable*, void*, int)': (10, 40), 'mainposition(LuaTable const*, lua_TValue const*)': (5, 15),
+                 'void luau_execute<false>(lua_State*)': (1000, 1003), 'lua_rawgeti(lua_State*, int, int)': (7, 9),
+                 'propagatemark(global_State*)': (40, 90), 'luaV_gettable(x)': (20, 25),
+                 'zgx::scene::Scene::flush': (5, 500)}
+        with tempfile.TemporaryDirectory() as out:
+            for side, at in (('base', 0), ('head', 1)):
+                # As cachegrind has them: the collector's marking with no file
+                # it knows ('other', apart), zgx's in its own.
+                file = lambda n: '???' if n.startswith('propagatemark') else 'src/scene.rs' if 'zgx' in n else 'luau/VM/src/x.cpp'
+                lines = ['events: Ir'] + [f'fl={file(n)}\nfn={n}\n1 {v[at]}' for n, v in names.items()]
+                (pathlib.Path(out) / side).write_text('\n'.join(lines) + '\n')
+            parts = cgdiff.luau_parts(pathlib.Path(out) / 'base', pathlib.Path(out) / 'head')
+        self.assertEqual(parts, {'parse': 100, 'tables': 40, 'interpreter': 3, 'api': 2, 'rest': 5})
 
     def test_one_percent_more_compares_at_the_same_cost_of_zgx_is_the_changes(self):
         self.assertIn('memcmp +3,000 calls', self.told(head={'memcmp': (303_000, 2_020_000)}))
