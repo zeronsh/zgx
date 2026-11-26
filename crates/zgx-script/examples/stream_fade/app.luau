@@ -3,7 +3,11 @@
 -- measured transcript that follows its end, its last row the reply under
 -- way, parsed by a keyed `ui.markdown` and drawn by a `ui.each`, and its
 -- newest words fading in as they arrive. Chunks come from the host
--- (`stream.chunk`), a few tokens at a time.
+-- (`stream.chunk`), a few tokens at a time. Its rows are a chat app's
+-- messages (a header, the body in a presence, a tool's row, a footer), and
+-- the window around it a chat app's too (a sidebar of chats, tabs, a
+-- composer, a panel of files: about 2,200 nodes, as Zeron's window has while
+-- a reply streams), with the host's pointer resting over the transcript.
 --
 -- How they fade is the host's `stream.mode`:
 --   bindings  each fading chunk's colour a function of the time and a tick
@@ -151,25 +155,96 @@ local function reply_view(): Node
 	}
 end
 
-local rows: { { id: string, text: string? } } = {}
+-- What a chat app puts around a message, as Zeron's transcript does: a
+-- header, its body in a presence (which of its forms shows), a tool's row, a
+-- footer with a button; and a settled message's body of paragraphs with
+-- inline code, bold and a link, and a code block with its own header.
+local function header(name: string): Node
+	return ui.row {
+		gap = 8,
+		align = "center",
+		ui.div { w = 20, h = 20, rounded = 10, bg = "#d0d4da" },
+		ui.text { name, weight = 600 },
+		ui.text { "4:45 PM", color = "#80868b", text_size = 12 },
+	}
+end
+local function footer(): Node
+	return ui.row {
+		gap = 6,
+		ui.text { "Nov 25", color = "#80868b", text_size = 12 },
+		ui.button { "Copy", on_click = function() end, variant = "ghost" },
+	}
+end
+local function prose(i: number, k: number): Node
+	return ui.rich {
+		wrap = true,
+		color = INK,
+		ui.span { `Step {i}.{k}: I read `, literal = true },
+		ui.span { "src/invoices.ts", literal = true, font = "mono", bg = "#f1f3f4" },
+		ui.span { " and noted ", literal = true },
+		ui.span { "what it needs", literal = true, weight = 600 },
+		ui.span { " from ", literal = true },
+		ui.span { "the ledger", literal = true, href = "https://example.invalid/ledger" },
+		ui.span { ", then checked ", literal = true },
+		ui.span { "invoiceTotal()", literal = true, font = "mono", bg = "#f1f3f4" },
+		ui.span { " against the totals the tests expect.", literal = true },
+	}
+end
+local function settled(i: number): Node
+	return ui.column {
+		gap = 8,
+		w_full = true,
+		prose(i, 1),
+		prose(i, 2),
+		ui.column {
+			gap = 4,
+			ui.row {
+				gap = 6,
+				ui.text { "TypeScript", color = "#80868b", text_size = 12, grow = 1 },
+				ui.button { "Copy", on_click = function() end, variant = "ghost" },
+			},
+			ui.text {
+				"function summarize(invoice: Invoice): InvoiceSummary {\n  const total = invoiceTotal(invoice);\n  return { id: invoice.id, totalCents: total };\n}",
+				font = "$font.mono",
+				wrap = false,
+			},
+		},
+		prose(i, 3),
+	}
+end
+local function message(row: any): Node
+	local mine = row.id == "reply"
+	return ui.column {
+		role = "article",
+		class = if mine then "message message-assistant" else "message",
+		provide = { message = row.id },
+		w_full = true,
+		gap = 8,
+		header(if mine then "Assistant" else "Someone"),
+		ui.presence(function(): string
+			return "blocks"
+		end, function(_: string): Node
+			return if mine then reply_view() else settled(row.n)
+		end),
+		ui.button { "Read 1 file", on_click = function() end, variant = "ghost" },
+		footer(),
+	}
+end
+
+local rows: { { id: string, n: number } } = {}
 -- (Enough before the reply that, scrolled to the top, none of it shows.)
 for i = 1, 60 do
-	table.insert(rows, { id = `m{i}`, text = `An earlier message, {i}: a line or two of what was said before the reply.` })
+	table.insert(rows, { id = `m{i}`, n = i })
 end
-table.insert(rows, { id = "reply" })
+table.insert(rows, { id = "reply", n = 0 })
 
-return ui.list {
+local transcript = ui.list {
 	id = "transcript",
 	data = ui.state("rows", rows),
 	key = function(row: any): string
 		return row.id
 	end,
-	row = function(row: any): Node
-		if row.id == "reply" then
-			return reply_view()
-		end
-		return ui.text { row.text or "", wrap = true }
-	end,
+	row = message,
 	-- Opened at its end, as a chat opens on its last message; `follow`
 	-- keeps it there as the reply grows.
 	offset = ui.state("offset", math.huge),
@@ -178,4 +253,70 @@ return ui.list {
 	height = 64,
 	w = 760,
 	h = 700,
+}
+
+-- The window around it, as Zeron's is (about 2,200 nodes mounted while a
+-- reply streams, most of them outside the transcript): a sidebar of chats,
+-- tabs, a composer and a panel of files. What a hit test under the pointer
+-- has to rule out.
+local function chat_entry(i: number): Node
+	return ui.button {
+		on_click = function() end,
+		variant = "ghost",
+		w_full = true,
+		ui.row {
+			gap = 8,
+			align = "center",
+			ui.div { w = 16, h = 16, rounded = 4, bg = "#d0d4da" },
+			ui.column {
+				grow = 1,
+				ui.text { `A chat about invoices, {i}`, weight = 500 },
+				ui.text { "Read 3 files, edited 1", color = "#80868b", text_size = 12 },
+			},
+			ui.text { `{i}h`, color = "#80868b", text_size = 12 },
+		},
+	}
+end
+local function file_entry(i: number): Node
+	return ui.row {
+		gap = 6,
+		align = "center",
+		on_click = function() end,
+		ui.div { w = 8 * (i % 4) },
+		ui.div { w = 14, h = 14, rounded = 3, bg = "#c8ccd2" },
+		ui.text { `file-{i}.ts`, grow = 1 },
+		ui.text { if i % 7 == 0 then "M" else "", color = "#b06000", text_size = 12 },
+	}
+end
+local chats: { Node } = {}
+for i = 1, 150 do
+	table.insert(chats, chat_entry(i))
+end
+local files: { Node } = {}
+for i = 1, 200 do
+	table.insert(files, file_entry(i))
+end
+local tabs: { Node } = {}
+for i = 1, 8 do
+	table.insert(tabs, ui.button { `Tab {i}`, on_click = function() end, variant = "ghost" })
+end
+
+return ui.row {
+	w = 1400,
+	h = 900,
+	ui.column { w = 260, h_full = true, overflow_y = "scroll", gap = 2, p = 8, table.unpack(chats) },
+	ui.column {
+		w = 760,
+		h_full = true,
+		ui.row { gap = 4, h = 36, table.unpack(tabs) },
+		transcript,
+		ui.row {
+			gap = 6,
+			p = 8,
+			ui.textarea { value = ui.state("draft", ""), placeholder = "Ask anything", grow = 1 },
+			ui.button { "Attach", on_click = function() end, variant = "ghost" },
+			ui.button { "Send", on_click = function() end },
+		},
+	},
+	ui.column { w = 380, h_full = true, overflow_y = "scroll", gap = 2, p = 8, table.unpack(files) },
 }
