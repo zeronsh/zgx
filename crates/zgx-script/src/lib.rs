@@ -240,6 +240,11 @@ pub struct Limits {
     /// CPU time from a reading up to 1 ms old, so a script may be stopped up
     /// to 1 ms short of one, never past it.
     pub call: Duration,
+    /// Sounds each plugin plays at once (`audio.play`, `audio.music`, a
+    /// control's sound), streams among them: past them a play is a voice that
+    /// never plays. 8 by default; the app's own scripts have no cap.
+    #[doc(hidden)]
+    pub plugin_voices: usize,
 }
 impl Default for Limits {
     /// In a debug build the time budgets are ten times longer: the same
@@ -254,6 +259,7 @@ impl Default for Limits {
             plugin_memory: 32 << 20,
             load: Duration::from_millis(500 * scale),
             call: Duration::from_millis(50 * scale),
+            plugin_voices: 8,
         }
     }
 }
@@ -5633,6 +5639,7 @@ impl ScriptHost {
         #[cfg(feature = "audio")]
         {
             let (audio, plugin) = (self.0.audio.clone(), plugin.then(|| name.as_str().into()));
+            audio.set_plugin_voices(limits.plugin_voices);
             lazy.global(&["audio"], move |lua, globals| {
                 audio::install(lua, globals, audio, plugin)
             });

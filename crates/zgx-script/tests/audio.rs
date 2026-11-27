@@ -509,16 +509,17 @@ fn audio_without_an_engine_says_how_to_give_one() {
     );
 }
 
-#[test]
-fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
-    let tone = wav("plugin", 1.);
+/// A plugin `sfx` granted audio, whose `nine` button plays nine looping
+/// voices, in a host under `limits`.
+fn nine_voices(name: &str, limits: zgx_script::Limits) -> Sounding {
+    let tone = wav(name, 1.);
     let dir = tone.parent().unwrap().to_path_buf();
     let entry = dir.join("init.luau");
     std::fs::write(
         &entry,
         format!(
             "{READY}
-            local tone = audio.sound(\"plugin.wav\")
+            local tone = audio.sound(\"{name}.wav\")
             ui.contribute(\"bar\", ui.column {{
                 ui.text {{ id = \"ready\", count_ready(tone) }},
                 ui.text {{ id = \"reach\", tostring(audio.bus(\"music\") == nil and audio.prewarm == nil and audio.ui_sounds_enabled == nil) }},
@@ -536,7 +537,8 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
     )
     .unwrap();
     let mut s = Sounding::with(move |runtime| {
-        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })");
+        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })")
+            .limits(limits);
         host.set_plugins(vec![zgx_script::Plugin {
             name: "sfx".into(),
             entry,
@@ -545,6 +547,12 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
         host
     });
     s.ready(1);
+    s
+}
+
+#[test]
+fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
+    let mut s = nine_voices("plugin", zgx_script::Limits::default());
     assert_eq!(
         s.app.text("reach"),
         "true",
@@ -559,6 +567,21 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
     s.audio.set_ui_sounds(false).unwrap();
     let level = s.render(0.05);
     assert_eq!(*level.last().unwrap(), 0.);
+}
+
+/// The host sets how many voices a plugin plays at once
+/// (`Limits::plugin_voices`).
+#[test]
+fn a_hosts_limit_caps_a_plugins_voices() {
+    let limits = zgx_script::Limits {
+        plugin_voices: 3,
+        ..Default::default()
+    };
+    let mut s = nine_voices("capped", limits);
+    s.app.click("nine");
+    assert_eq!(s.audio.voices_playing(), 3, "past three each is refused");
+    let level = s.render(0.05);
+    assert!((level.last().unwrap() - 0.15).abs() < 0.01, "{level:?}");
 }
 
 /// Without the `audio` grant a plugin's `audio` calls are errors saying

@@ -30,8 +30,6 @@ use zgx_audio::{Audio, Play, Ramp, Sound, Source, Time, Voice};
 /// How long a play asked before its sound is ready may wait for it: past
 /// it, a click would come long after its button, so it's dropped.
 const LATE: Duration = Duration::from_millis(250);
-/// Voices a plugin plays at once.
-const PLUGIN_VOICES: usize = 8;
 /// A followed value's glide to each new value: long enough not to click.
 const GLIDE: f64 = 0.010;
 /// Decoded bytes of sounds no script holds that the app's cache keeps
@@ -62,6 +60,8 @@ pub(crate) struct AudioHost {
     epoch: Cell<u64>,
     /// Voices playing, by id.
     voices: RefCell<HashMap<u64, Live>>,
+    /// Voices a plugin plays at once (`Limits::plugin_voices`).
+    plugin_voices: Cell<usize>,
     /// What follows state into a bus (its gain, mute or solo), by bus and
     /// what: the load that set it, and the follower.
     buses: RefCell<Vec<(BusParam, u64, Follow)>>,
@@ -125,6 +125,7 @@ impl AudioHost {
             uses: Cell::new(0),
             epoch: Cell::new(0),
             voices: RefCell::default(),
+            plugin_voices: Cell::new(crate::Limits::default().plugin_voices),
             buses: RefCell::default(),
             sounds: RefCell::default(),
             slots: RefCell::default(),
@@ -390,7 +391,17 @@ impl AudioHost {
         self.sounds.borrow().len()
     }
 
-    fn plugin_voices(&self, plugin: &str) -> usize {
+    /// Voices a plugin may play at once, from the host's limits.
+    pub(crate) fn set_plugin_voices(&self, voices: usize) {
+        self.plugin_voices.set(voices);
+    }
+
+    /// Whether `plugin` plays as many voices as it may.
+    fn plugin_full(&self, plugin: &str) -> bool {
+        self.voices_of(plugin) >= self.plugin_voices.get()
+    }
+
+    fn voices_of(&self, plugin: &str) -> usize {
         self.voices
             .borrow()
             .values()
@@ -1513,7 +1524,7 @@ impl BusUd {
 }
 
 /// Makes the `audio` global: a plugin's (`plugin`, its name) plays into a
-/// bus of its own under `ui`, at most `PLUGIN_VOICES` at once, and reaches
+/// bus of its own under `ui`, at most `Limits::plugin_voices` at once, and reaches
 /// no other bus, the clock's `prewarm`, or the system setting.
 pub(crate) fn install(
     lua: &Lua,
@@ -1698,7 +1709,7 @@ fn call(
             // a plugin's count among its voices. Past them, a voice that
             // never plays.
             if let Some(plugin) = plugin
-                && host.plugin_voices(plugin) >= PLUGIN_VOICES
+                && host.plugin_full(plugin)
             {
                 return lua.pack_multi(VoiceUd {
                     cell: Rc::new(VoiceCell {
@@ -1982,7 +1993,7 @@ pub(crate) fn activate(prop: &SoundProp, vm: &Vm) {
         .filter(|env| matches!(*env.grants, crate::Grants::Only(_)))
         .map(|env| env.owner.clone());
     let bus = match &plugin {
-        Some(plugin) if host.plugin_voices(plugin) >= PLUGIN_VOICES => return,
+        Some(plugin) if host.plugin_full(plugin) => return,
         Some(plugin) => match host.plugin_bus(&audio, plugin) {
             Ok(bus) => bus,
             Err(error) => {
