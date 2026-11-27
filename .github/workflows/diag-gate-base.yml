@@ -1,0 +1,113 @@
+name: Diag gate base
+
+# THROWAWAY (draft PR, closed after): is a kept perf base binary (built by
+# perf-base.yml or main's CI, restored from its cache) the same binary as
+# one this job builds from the same commit, the same way? Uploads both
+# video_bench binaries for diffing and counting elsewhere.
+
+on: pull_request
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  # Named `perf`, as CI's and perf-base.yml's: the dependency cache's key includes it.
+  perf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The newest kept base on main
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          key=$(gh cache list -R "$GITHUB_REPOSITORY" --key gate-bin-u24- --ref refs/heads/main --sort created_at --order desc --limit 1 --json key -q '.[0].key')
+          test -n "$key" || { echo "no kept perf binaries on main"; exit 1; }
+          echo "key=$key" | tee -a "$GITHUB_OUTPUT"
+          echo "from=${key#gate-bin-u24-}" | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/gate-bin
+          key: ${{ steps.pick.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Keep the cached binary aside
+        run: |
+          mkdir -p "$RUNNER_TEMP/diag"
+          cp "$RUNNER_TEMP/gate-bin/video_bench" "$RUNNER_TEMP/diag/cached_video_bench"
+          cp "$RUNNER_TEMP/gate-bin/built-from" "$RUNNER_TEMP/diag/cached-built-from"
+          rm -rf "$RUNNER_TEMP/gate-bin"
+      # As perf-base.yml builds it: that commit checked out in the workspace.
+      - name: Check out the kept commit
+        run: git checkout --force "${{ steps.pick.outputs.from }}" && git log -1 --oneline
+      - uses: dtolnay/rust-toolchain@stable
+      - id: apt-key
+        run: echo "month=$(date +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/apt-archives
+          key: apt-perf-${{ runner.arch }}-${{ steps.apt-key.outputs.month }}
+          restore-keys: apt-perf-${{ runner.arch }}-
+      - name: Packages
+        timeout-minutes: 10
+        run: sh .github/apt-install.sh valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf-gate
+          save-if: false
+      - name: Binaries, as perf-base.yml builds them
+        env:
+          ZGX_GATE_TARGET: target/perf-gate
+          ZGX_GATE_BIN_CACHE: ${{ runner.temp }}/gate-bin
+        run: |
+          python3 scripts/perf/gate.py HEAD --stage head
+          cp "$RUNNER_TEMP/gate-bin/video_bench" "$RUNNER_TEMP/diag/job_video_bench"
+          cp "$RUNNER_TEMP/gate-bin/built-from" "$RUNNER_TEMP/diag/job-built-from"
+          cd "$RUNNER_TEMP/diag" && sha256sum *video_bench && cmp cached_video_bench job_video_bench && echo IDENTICAL || echo DIFFERENT
+          diff cached-built-from job-built-from && echo "same stamp"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diag-video-bench
+          path: ${{ runner.temp }}/diag
+          retention-days: 7
+      # The same binary counted three times on this runner, as the gate
+      # counts (gate.py's count and environment): does CI count it the same?
+      - name: One binary counted three times
+        env:
+          ZGX_GATE_TARGET: target/perf-gate
+        run: |
+          python3 - <<'PY'
+          import collections, os, pathlib, re, sys
+          sys.path.insert(0, 'scripts/perf')
+          import gate
+          _, _, ex, env = [s for s in gate.SCENES if s[0] == 'video'][0]
+          binary = pathlib.Path(os.environ['RUNNER_TEMP']) / 'diag' / 'job_video_bench'
+          def fns(f):
+              d = collections.Counter(); cur = None
+              for l in open(f, errors='replace'):
+                  if l.startswith('fn='): cur = l[3:].strip()
+                  elif cur and l[:1].isdigit():
+                      p = l.split()
+                      if len(p) > 1: d[cur] += int(p[1])
+              return d
+          runs = []
+          for i in range(3):
+              out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'diag' / f'count-{i}.out'
+              t = gate.count(binary, env, pathlib.Path('.').resolve(), out=str(out))
+              d = fns(out); runs.append((t, d))
+              g = sum(v for k, v in d.items() if 'Vm>::guard' in k)
+              print(f'count {i}: total {t:,}  Vm::guard {g:,}', flush=True)
+          t0, d0 = runs[0]
+          for i, (t, d) in enumerate(runs[1:], 1):
+              diff = {k: d[k] - d0[k] for k in set(d) | set(d0)}
+              print(f'count {i} vs 0: {t - t0:+,}', flush=True)
+              for k, v in sorted(diff.items(), key=lambda x: -abs(x[1]))[:8]:
+                  if v: print(f'      {v:+12,} {k[:120]}', flush=True)
+          PY
+          grep -m1 "model name" /proc/cpuinfo; valgrind --version
