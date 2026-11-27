@@ -7747,6 +7747,39 @@ impl Scene {
             |shaper| shaper(rich, width),
         )
     }
+    /// Install where ranges of a rich paragraph lie (a link's words), from
+    /// the lines its measurer lays out and a renderer draws, so they are
+    /// found without shaping it again (`rich_text_selection`).
+    #[doc(hidden)]
+    pub fn set_rich_text_selection(
+        &mut self,
+        selection: impl Fn(
+            &crate::rich_text::RichText,
+            Option<f32>,
+            &[std::ops::Range<usize>],
+        ) -> Vec<Vec<Rect>>
+        + 'static,
+    ) {
+        self.rich_measurer.install_selection(Box::new(selection));
+    }
+    /// Where each of `ranges` of `rich`, wrapped at `width`, lies: from the
+    /// lines laid out for it, if its host says (`set_rich_text_selection`),
+    /// else shaped for the purpose (`shape_rich_text`).
+    pub(crate) fn rich_text_selection(
+        &self,
+        rich: &crate::rich_text::RichText,
+        width: Option<f32>,
+        ranges: &[std::ops::Range<usize>],
+    ) -> Vec<Vec<Rect>> {
+        if let Some(found) = self.rich_measurer.selection(rich, width, ranges) {
+            return found;
+        }
+        let layout = self.shape_rich_text(rich, width);
+        ranges
+            .iter()
+            .map(|range| layout.selection(range.clone()))
+            .collect()
+    }
     /// Make `install` the text services of every scene on this thread whose
     /// host installed none (no font measurer), at its next layout: a
     /// renderer's, which `zgx_gpu` makes it, so that text a renderer draws

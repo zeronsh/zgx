@@ -856,22 +856,19 @@ pub(crate) fn mount_links(
             } else {
                 // At the width its lines wrap at, where they show
                 // (balanced). A change of balance moves `engine`.
+                // From the lines laid out for it, where its host says
+                // (`rich_text_selection`), else shaped for them.
                 let scene = ui.scene.borrow();
                 let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-                let layout = crate::text_layout::Inset::around(
-                    scene.shape_rich_text(&data.rich, Some(wrap)),
-                    inset,
-                );
+                let ranges: Vec<_> = data.links.iter().map(|l| l.range.clone()).collect();
+                let found = scene.rich_text_selection(&data.rich, Some(wrap), &ranges);
                 drop(scene);
-                data.links
-                    .iter()
-                    .map(|link| {
-                        layout
-                            .selection(link.range.clone())
-                            .into_iter()
-                            .filter_map(|rect| {
-                                rect.intersection(Rect::new(0., 0., bounds.width, bounds.height))
-                            })
+                let within = Rect::new(0., 0., bounds.width, bounds.height);
+                (found.into_iter())
+                    .map(|rects| {
+                        (rects.into_iter())
+                            .map(|rect| Rect::new(rect.x + inset, rect.y, rect.width, rect.height))
+                            .filter_map(|rect| rect.intersection(within))
                             .filter(|r| r.width > 0. && r.height > 0.)
                             .collect()
                     })
