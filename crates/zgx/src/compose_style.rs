@@ -2083,6 +2083,10 @@ fn apply_rare(
             node,
             cold.and_then(|cold| cold.outline_style).unwrap_or_default(),
         );
+        scene.set_corner_curve(
+            node,
+            cold.and_then(|cold| cold.corner_curve).unwrap_or_default(),
+        );
         // Inner rings are rare (Windows' focus): nothing to do unless this
         // style sets one or the scene holds one to take away.
         let inner = cold.and_then(|cold| cold.outline_inner).flatten();

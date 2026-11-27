@@ -608,7 +608,8 @@ impl MetalFrame {
             | Shading::Blend
             | Shading::FilterBlend(_)
             | Shading::SourceIn
-            | Shading::Behind => self.full.clone(),
+            | Shading::Behind
+            | Shading::Continuous => self.full.clone(),
         }
     }
 }
@@ -989,7 +990,8 @@ impl Frame {
                 | Shading::ImageEffect
                 | Shading::Polyline
                 | Shading::SourceIn
-                | Shading::Behind,
+                | Shading::Behind
+                | Shading::Continuous,
                 true,
             ) => Bound::FullClear,
             (Shading::Basic | Shading::Opaque, true) => Bound::Quads(Shading::Opaque),

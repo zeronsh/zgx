@@ -27,6 +27,23 @@ impl Corners {
         }
     }
 }
+/// The shape of a box's rounded corners.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CornerCurve {
+    /// A quarter circle of the radius.
+    #[default]
+    Circular,
+    /// As `CALayer`'s `cornerCurve = continuous`, the corners of iOS: the
+    /// curve eases out of the sides, starting 1.53 radii along them, and
+    /// becomes the circular one as the box gets too small for that, each way
+    /// on its own.
+    ///
+    /// Not for apps yet: on macOS and iOS a window that has drawn a
+    /// continuous box leaves direct Metal for the wgpu path, for good, until
+    /// direct Metal draws the curve. Direct3D 11 draws it circular.
+    Continuous,
+}
 /// How a border is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BorderStyle {
@@ -543,7 +560,8 @@ pub struct Decoration {
     /// less itself moved by the offset and shrunk by the spread, cut to its
     /// inner corners (a 1-point top highlight is
     /// `inset 0 1px`), their blur as CSS's: softened into the box from that
-    /// edge, half their colour on it.
+    /// edge, half their colour on it. A box with a shader fill
+    /// (`Background::Shader`) draws none: the shader shades it whole.
     pub inset_shadows: Option<Arc<[BoxShadow]>>,
     /// Where it clips (`overflow: hidden`), its descendants fade out over
     /// this many points inside its rounded edge, rather than being cut at
