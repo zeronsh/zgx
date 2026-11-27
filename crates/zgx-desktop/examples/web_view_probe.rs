@@ -45,7 +45,7 @@ use zgx::{
 };
 use zgx_desktop::{Application, MenuAction, WindowOptions};
 
-const PAGE: &str = r#"<!doctype html><html><head><title>probe page</title><meta name="theme-color" content="rgb(51,102,153)"><link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg=="><style>
+const PAGE: &str = r#"<!doctype html><html><head><title>probe page</title><meta name="theme-color" content="rgb(51,102,153)"><style>
 html, body { margin: 0; background: rgb(0, 0, 255); height: 3000px; }
 #field { position: absolute; left: 20px; top: 20px; width: 300px; height: 40px; font-size: 20px; box-sizing: border-box; }
 #choice { position: absolute; left: 360px; top: 20px; width: 200px; height: 30px; }
@@ -287,6 +287,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(error) => println!("SNAPSHOT {name} error {error}"),
                         });
                     }
+                    // Ctrl+H: a page with an icon (`ZGX_PROBE_ICON_PAGE`,
+                    // the smoke's server: WebKitGTK loads only http(s)
+                    // icons, not `data:` or an app scheme's).
+                    if action.0 == "h" {
+                        inspect.load_url(std::env::var("ZGX_PROBE_ICON_PAGE").unwrap_or_default());
+                    }
                     // Ctrl+O: select all of the page and copy it; Ctrl+U:
                     // reload ignoring the cache (`EDIT`/`RELOAD` say how
                     // each went).
@@ -341,7 +347,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("s").reserved())
                     .bind(bind("y").reserved())
                     .bind(bind("o").reserved())
-                    .bind(bind("u").reserved()),
+                    .bind(bind("u").reserved())
+                    .bind(bind("h").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {

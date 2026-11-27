@@ -37,6 +37,7 @@ on the CPU (`WebViewOptions::accelerated` false) passes the same checks,
 and two dots far apart that it turns green upload as two small parts.
 """
 import argparse
+import base64
 import functools
 import http.server
 import io
@@ -654,9 +655,6 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     checks["full screen"] = True
     # The page's theme colour (its <meta name="theme-color">) and the link
     # under the pointer reach the app's state.
-    # The page's icon (a 16 x 16 PNG in its <link rel=icon>) reaches the app.
-    session.wait(lambda: "16x16" in session.lines("FAVICON "), "the page's icon never reached its state")
-    checks["favicon"] = True
     # WebKitGTK reports no theme colour for a page it paints on the CPU
     # (`accelerated: false`): it never changes `theme-color` there.
     if not unaccelerated:
@@ -715,6 +713,11 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.wait(lambda: session.lines("RELOAD ")[-1:] == ["Ok(())"], "the page didn't take the reload")
     session.wait(lambda: len(session.lines("FINISHED ")) > finished, "reloading ignoring the cache loaded nothing")
     checks["reload ignoring the cache"] = True
+    # A page's icon (a 16 x 16 PNG its <link rel=icon> names, from a local
+    # server: WebKitGTK loads only http(s) icons) reaches the app's state.
+    session.key("ctrl+h")
+    session.wait(lambda: "16x16" in session.lines("FAVICON "), "the page's icon never reached its state", 20)
+    checks["favicon"] = True
     return checks
 
 
@@ -1229,6 +1232,7 @@ def x11(args, output, private):
         downloads(private)
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
+        env["ZGX_PROBE_ICON_PAGE"] = ICON_PAGE
         ime = None
         if args.ime or args.orca:
             with (output / "dbus.log").open("w") as log:
@@ -1325,6 +1329,7 @@ def wayland(args, output, private):
         downloads(private)
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
+        env["ZGX_PROBE_ICON_PAGE"] = ICON_PAGE
         # A private session bus: Fcitx5 talks on it, and nothing else starts.
         bus_config = pathlib.Path(private, "dbus.conf")
         bus_config.write_text("<busconfig><type>session</type><listen>unix:tmpdir=" + private + "</listen><auth>EXTERNAL</auth>"
@@ -1415,6 +1420,32 @@ def wayland(args, output, private):
             device.close()
         end(owned)
 
+
+ICON = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg==")
+
+
+def serve_icon_page():
+    """A page whose <link rel=icon> names a 16 x 16 red PNG beside it, over
+    HTTP on a free localhost port, for the probe's Ctrl+H: its URL."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            icon = self.path == "/icon.png"
+            body = ICON if icon else b'<!doctype html><title>icon</title><link rel="icon" href="/icon.png"><body>icon'
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png" if icon else "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}/"
+
+
+ICON_PAGE = serve_icon_page()
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
