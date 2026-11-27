@@ -12009,6 +12009,20 @@ impl Scene {
             self.add_damage(clip);
         }
     }
+    /// Repaint where `id` was when it was `height` tall, its top where it is
+    /// now, as wide as it is: a list's view made shorter, what it showed
+    /// below its new edge. Under a transformed or filtered node it shows
+    /// elsewhere: the viewport.
+    pub(crate) fn damage_left(&mut self, id: NodeId, height: f32) {
+        if self.transformed + self.filtered.get() > 0 {
+            return self.add_damage(self.viewport);
+        }
+        let now = self.world_bounds(id);
+        let was = Rect::new(now.x, now.y, now.width, height.max(now.height));
+        if let Some(was) = was.intersection(self.viewport) {
+            self.add_damage(was);
+        }
+    }
     /// Repaint what `id` and its descendants paint, where they are: what
     /// stays still under or over scroll content as it moves (a code block's
     /// pinned marks as its lines scroll sideways), which a copy of the

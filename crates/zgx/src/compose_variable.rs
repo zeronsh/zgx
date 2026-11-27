@@ -760,6 +760,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // focus goes with it (the keyboard's, not a scroll's).
             let mut pending_reveal: Option<(usize, RowAlign, f32, Option<NodeId>, bool)> = None;
             let mut anchor: Option<Anchor> = None;
+            // The view's height last pass.
+            let mut placed: Option<f32> = None;
             // The anchor row's key, for a list that keeps its place: rows
             // added or removed above it move it by as many, and it is found
             // there by its key. Beside the anchor, not in it, so that other
@@ -1230,6 +1232,20 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     }
                     {
                         let mut scene = ui.scene.borrow_mut();
+                        // Held at its end as its view changes height (a
+                        // composer growing under a chat), its rows move with
+                        // it, perhaps a pass before the view does. What they
+                        // painted where the view was, and isn't now, nothing
+                        // repaints where nothing opaque lies under it: the view
+                        // as it was. (Its clip is the new one by now, laid out
+                        // with the box around it: its old height is ours.)
+                        if !ancestor
+                            && heights.end.get()
+                            && let Some(was) = placed.filter(|was| *was != height)
+                        {
+                            scene.damage_left(root, was);
+                        }
+                        placed = Some(height);
                         // Scrolled with the view around it: as tall as its
                         // rows, unclipped, in place.
                         match ancestor {

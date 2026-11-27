@@ -172,6 +172,8 @@ mod text_fade;
 mod text_props;
 #[path = "../theme.rs"]
 mod theme;
+#[path = "../transcript_over_composer.rs"]
+mod transcript_over_composer;
 #[path = "../ui.rs"]
 mod ui;
 #[path = "../ui_controls.rs"]
