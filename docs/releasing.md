@@ -1,6 +1,6 @@
 # Releasing
 
-zgx 0.1.10 is on crates.io (2026-11-04, tag `v0.1.10`; 0.1.0, the first, on 2026-10-25). This is how a release goes, and what it checks.
+zgx 0.2.0 is on crates.io (published 2026-11-25 to 27, tag `v0.2.0`; 0.1.0, the first, on 2026-10-25). This is how a release goes, and what it checks.
 
 ## Version scheme
 
@@ -12,9 +12,9 @@ zgx 0.1.10 is on crates.io (2026-11-04, tag `v0.1.10`; 0.1.0, the first, on 2026
 
 ## What is published
 
-zgx's crates: `zgx`, `zgx-components`, `zgx-text`, `zgx-gpu`, `zgx-3d`, `zgx-audio`, `zgx-module`, `zgx-module-macros`, `zgx-desktop`, `zgx-script`, `zgx-run`, `zgx-terminal` and `zgx-ghostty-sys` (its declarations only; its `link` feature builds Ghostty from a pinned source with Zig). Not published (`publish = false`): `zgx-fx` and `zgx-video` (held: a held crate can be published later, a published name can't be taken back), `zgx-dom`, `zgx-demo` and `zgx-workload` (the benchmarks in `comparisons/`), `zgx-fingerprint` (the perf gate's) and `zgx-module`'s two test fixtures. Of those published, 0.1.10 had no `zgx-text`, `zgx-audio`, `zgx-module` or `zgx-module-macros`: the next release is their first.
+zgx's crates: `zgx`, `zgx-components`, `zgx-text`, `zgx-gpu`, `zgx-3d`, `zgx-audio`, `zgx-module`, `zgx-module-macros`, `zgx-desktop`, `zgx-script`, `zgx-run`, `zgx-terminal` and `zgx-ghostty-sys` (its declarations only; its `link` feature builds Ghostty from a pinned source with Zig). Not published (`publish = false`): `zgx-fx` and `zgx-video` (held: a held crate can be published later, a published name can't be taken back), `zgx-dom`, `zgx-demo` and `zgx-workload` (the benchmarks in `comparisons/`), `zgx-fingerprint` (the perf gate's) and `zgx-module`'s two test fixtures. `zgx-text`, `zgx-audio`, `zgx-module` and `zgx-module-macros` were first published with 0.2.0.
 
-And nine forks, as zgx's own crates, published first (0.1.10 had no `zgx-vte`, `zgx-swash` or `zgx-arboard`):
+And nine forks, as zgx's own crates, published first (`zgx-vte`, `zgx-swash` and `zgx-arboard` from 0.2.0):
 
 | Crate | Fork of | Why | Notes |
 | --- | --- | --- | --- |
@@ -76,27 +76,21 @@ It never publishes. It doesn't run on pull requests: CI's time is unchanged. Loc
 
 ## Publishing
 
-Not automated, on purpose: publishing needs a crates.io token, and is done by hand, in this order, each after the release check passes on the tag:
+Not automated, on purpose: publishing needs a crates.io token, and is done by hand, in this order, each after the release check passes on the release commit (on its branch, `Release dry run` by hand; the tag comes after publishing, below):
 
 1. The forks that changed since they were last published, their versions bumped, `zgx-harfrust` and `zgx-swash` before `zgx-cosmic-text` (which depends on them): `cargo publish --manifest-path vendor/harfrust/Cargo.toml`, `vendor/swash`, `vendor/cosmic-text`, `vendor/taffy`, `vendor/mlua --features luau`, `vendor/zune-jpeg`, `vendor/vte`, `vendor/alacritty-terminal` (which depends on `zgx-vte`), `vendor/arboard`.
-2. The workspace: `cargo publish --workspace --locked` (it orders the crates itself). With more than five names new to crates.io, one crate at a time instead: see [the next release's new names](#the-next-releases-new-names).
+2. The workspace: `cargo publish --workspace --locked` (it orders the crates itself). With more than five names new to crates.io, one crate at a time instead: see [new names](#new-names).
 
 `cargo publish --workspace` can stop part way with cargo's own error "no packages ready to publish but … remain in plan … awaiting confirmation" (cargo 1.96, at 0.1.0 and again at 0.1.2, each time after `zgx-gpu`; 0.1.1 went through): what it uploaded is published (check crates.io), and the rest publish one at a time in dependency order, each once the one before is in the index (`curl https://index.crates.io/zg/x-/zgx-gpu`): `cargo publish -p zgx-script --locked`, then `zgx-terminal` (before the desktop host, which depends on it), then `zgx-desktop`, then `zgx-run`.
 
 crates.io's index can stop taking new versions for everyone while uploads still succeed (2026-10-26, about four hours from 04:46 UTC; its status page said operational): the API lists the version, the index (`https://index.crates.io/zg/x-/<crate>?cb=<anything>`, past its cache) answers 404, and nothing depending on it publishes. Check that other crates' newest versions are missing too before blaming ours; a version bump doesn't help (zgx-harfrust 0.5.2 and 0.5.3 both waited). Wait, and go on once it answers.
 
-Then tag the commit (`v<version>`), make a GitHub release from its changelog section's head (the summary, highlights and migrating notes; the whole section can be too long for one) with a link to `CHANGELOG.md` at the tag (its links absolute, `https://github.com/zeronsh/zgx/blob/v<version>/…`: a release resolves no relative ones), and check a new project, with no lockfile, builds from crates.io alone and runs: `cargo add zgx zgx-desktop zgx-script zgx-run`, a `main` calling `zgx_run::run` on an `app.luau`, launched to its window. Building is not enough: 0.1.0 and 0.1.1 built in a new project and panicked as their first script loaded (luau0-src 0.22.1, resolved afresh; the release check's third step now runs one).
+Once every crate is in the index, and the new project below builds from crates.io and runs, tag the commit (`v<version>`), make a GitHub release from its changelog section's head (the summary, highlights and migrating notes; the whole section can be too long for one) with a link to `CHANGELOG.md` at the tag (its links absolute, `https://github.com/zeronsh/zgx/blob/v<version>/…`: a release resolves no relative ones), and check a new project, with no lockfile, builds from crates.io alone and runs: `cargo add zgx zgx-desktop zgx-script zgx-run`, a `main` calling `zgx_run::run` on an `app.luau`, launched to its window. Building is not enough: 0.1.0 and 0.1.1 built in a new project and panicked as their first script loaded (luau0-src 0.22.1, resolved afresh; the release check's third step now runs one).
 
 A crate on crates.io can't be deleted, only yanked: a version published is published for good.
 
-### The next release's new names
+### New names
 
 crates.io limits how fast one account publishes, new names apart from new versions: five new names at once, then one each 10 minutes; thirty new versions at once, then one a minute (the defaults in [crates.io's `rate_limiter.rs`](https://github.com/rust-lang/crates.io/blob/main/src/rate_limiter.rs), read 2026-11-24; an account can have limits of its own, so check it again). `cargo publish --workspace` orders crates by their dependencies, not by that limit, so a release with more than five new names publishes one crate at a time, each once the one before is in the index.
 
-The next release has seven names crates.io had none of on 2026-11-24 (`zgx-swash`, `zgx-vte`, `zgx-arboard`, `zgx-audio`, `zgx-module-macros`, `zgx-module`, `zgx-text`). Nothing reserves them until they are published. In order, the new ones in bold:
-
-- [ ] Forks: `zgx-harfrust`, **`zgx-swash`**, `zgx-cosmic-text`, `zgx-taffy`, `zgx-mlua`, **`zgx-vte`**, `zgx-alacritty-terminal`, **`zgx-arboard`**. `zgx-zune-jpeg` is unchanged.
-- [ ] `zgx`, **`zgx-audio`**, **`zgx-module-macros`**: the first five new names.
-- [ ] **`zgx-module`**, once the limit lets a sixth through, then **`zgx-text`**, 10 minutes after it.
-- [ ] `zgx-gpu`, `zgx-components`, `zgx-3d`, `zgx-ghostty-sys`, `zgx-script`, `zgx-terminal`, `zgx-desktop`, `zgx-run`, each after the crates it depends on.
-- [ ] Not `zgx-fx` or `zgx-video`: held with `publish = false`, as no published crate needs them (`zgx-gpu`'s path dev-dependency on `zgx-fx` is left out of its package). Their names stay unclaimed, and their docs and `zgx video`'s error say "from the repository"; publishing them later changes those. The other new zgx crates can't be held this way: Cargo needs every dependency on crates.io, optional ones too.
+0.2.0 published seven (`zgx-swash`, `zgx-vte`, `zgx-arboard`, `zgx-audio`, `zgx-module-macros`, `zgx-module`, `zgx-text`), one crate at a time in dependency order (the forks, then `zgx`, `zgx-audio`, `zgx-module-macros`, `zgx-module`, `zgx-text`, `zgx-gpu`, `zgx-components`, `zgx-3d`, `zgx-ghostty-sys`, `zgx-script`, `zgx-terminal`, `zgx-desktop`, `zgx-run`), with no refusal: the first new name went up over an hour before the sixth. `zgx-fx` and `zgx-video` are held (`publish = false`), as no published crate needs them: their docs and `zgx video`'s error say "from the repository". A new workspace crate is published unless it says `publish = false`: decide for each before a release (`zgx-ladybird-sys`, new after 0.2.0, says nothing yet).
