@@ -437,6 +437,9 @@ struct Page {
     /// Credentials challenges the app answers (`on_authenticate`), held
     /// (a reference each) until `Command::Authenticate`.
     challenges: RefCell<HashMap<u64, Ptr>>,
+    /// Permission requests the app answers (`on_permission_request`), held
+    /// (a reference each) until `Command::Permit`.
+    permissions: RefCell<HashMap<u64, Ptr>>,
     new_windows: bool,
     nonce: String,
     /// Buttons held, as GDK's state mask.
@@ -645,6 +648,14 @@ impl Gtk {
             );
             let settings = (api.webkit_web_view_get_settings)(view);
             (api.webkit_settings_set_enable_developer_extras)(settings, spec.inspectable as c_int);
+            // Cameras and microphones (`getUserMedia`), each use the app's
+            // to allow (`on_permission_request`). `ZGX_WEB_MOCK_CAPTURE=1`
+            // gives pages WebKit's mock devices instead, for probes on
+            // machines without any.
+            (api.webkit_settings_set_enable_media_stream)(settings, 1);
+            if std::env::var_os("ZGX_WEB_MOCK_CAPTURE").is_some() {
+                (api.webkit_settings_set_enable_mock_capture_devices)(settings, 1);
+            }
             if let Some(agent) = &spec.user_agent {
                 (api.webkit_settings_set_user_agent)(settings, c(agent).as_ptr());
             }
@@ -696,6 +707,7 @@ impl Gtk {
                 decisions: RefCell::new(HashMap::new()),
                 next_decision: Cell::new(0),
                 challenges: RefCell::new(HashMap::new()),
+                permissions: RefCell::new(HashMap::new()),
                 new_windows: spec.new_windows,
                 nonce,
                 buttons: Cell::new(0),
@@ -775,6 +787,14 @@ impl Gtk {
                 view,
                 "authenticate",
                 handler(on_authenticate as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
+                "permission-request",
+                handler(on_permission_request as *const ()),
                 data,
                 false,
             );
@@ -1005,6 +1025,11 @@ impl Gtk {
                 (api.g_object_unref)(decision);
             }
             // Challenges the app never answered: cancelled.
+            // Permissions the app never answered: denied.
+            for (_, request) in page.permissions.borrow_mut().drain() {
+                (api.webkit_permission_request_deny)(request);
+                (api.g_object_unref)(request);
+            }
             for (_, request) in page.challenges.borrow_mut().drain() {
                 (api.webkit_authentication_request_cancel)(request);
                 (api.g_object_unref)(request);
@@ -1956,6 +1981,16 @@ impl Page {
                                 request,
                                 std::ptr::null_mut(),
                             ),
+                        }
+                        (api.g_object_unref)(request);
+                    }
+                }
+                Command::Permit { request, allowed } => {
+                    if let Some(request) = self.permissions.borrow_mut().remove(&request) {
+                        if allowed {
+                            (api.webkit_permission_request_allow)(request);
+                        } else {
+                            (api.webkit_permission_request_deny)(request);
                         }
                         (api.g_object_unref)(request);
                     }
@@ -2962,6 +2997,97 @@ unsafe extern "C" fn on_authenticate(_: Ptr, request: Ptr, data: Ptr) -> gtk::gb
     });
     // Answered (later): WebKit shows no dialog of its own.
     1
+}
+/// A page asks to use something: the app's handler allows it, or denies.
+unsafe extern "C" fn on_permission_request(_: Ptr, request: Ptr, data: Ptr) -> gtk::gboolean {
+    use zgx::web_view::PermissionKind as Kind;
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the request GTK passes, read now and kept with a reference
+    // until the app answers (`Command::Permit`); this handler's page.
+    let (page, kinds) = unsafe {
+        let page = page(data);
+        let is = |kind: gtk::GType| (api.g_type_check_instance_is_a)(request, kind) != 0;
+        let mut kinds = Vec::new();
+        if is((api.webkit_user_media_permission_request_get_type)()) {
+            let display = api
+                .webkit_user_media_permission_is_for_display_device
+                .is_some_and(|display| display(request) != 0);
+            if display {
+                kinds.push(Kind::ScreenCapture);
+            } else {
+                if (api.webkit_user_media_permission_is_for_video_device)(request) != 0 {
+                    kinds.push(Kind::Camera);
+                }
+                if (api.webkit_user_media_permission_is_for_audio_device)(request) != 0 {
+                    kinds.push(Kind::Microphone);
+                }
+            }
+        } else if is((api.webkit_geolocation_permission_request_get_type)()) {
+            kinds.push(Kind::Geolocation);
+        } else if is((api.webkit_notification_permission_request_get_type)()) {
+            kinds.push(Kind::Notifications);
+        } else if is((api.webkit_pointer_lock_permission_request_get_type)()) {
+            kinds.push(Kind::PointerLock);
+        } else if api
+            .webkit_clipboard_permission_request_get_type
+            .is_some_and(|clipboard| is(clipboard()))
+        {
+            kinds.push(Kind::ClipboardRead);
+        } else if is((api.webkit_device_info_permission_request_get_type)()) {
+            kinds.push(Kind::Other("device-info".into()));
+        } else if is((api.webkit_media_key_system_permission_request_get_type)()) {
+            kinds.push(Kind::Other("media-keys".into()));
+        } else if is((api.webkit_website_data_access_permission_request_get_type)()) {
+            kinds.push(Kind::Other("storage-access".into()));
+        }
+        if kinds.is_empty() {
+            kinds.push(Kind::Other("unknown".into()));
+        }
+        (api.g_object_ref)(request);
+        (page, kinds)
+    };
+    let id = page.next_decision.get() + 1;
+    page.next_decision.set(id);
+    page.permissions.borrow_mut().insert(id, request);
+    let (page_id, url) = (page.id, page.uri());
+    deliver(move || {
+        let answer = move |allowed: bool| {
+            on_gtk(move |gtk| {
+                if let Some(page) = gtk.page(page_id) {
+                    page.run(Command::Permit {
+                        request: id,
+                        allowed,
+                    });
+                }
+            });
+        };
+        let responder = zgx::web_view::PermissionResponder::new(answer);
+        let origin = origin_of(&url);
+        match ui_page(page_id).and_then(|page| page.web.upgrade()) {
+            Some(web) => web.permission_request(
+                zgx::web_view::PermissionRequest::new(url, origin, kinds),
+                responder,
+            ),
+            None => responder.deny(),
+        }
+    });
+    // Answered (later): WebKit's default would deny at once.
+    1
+}
+/// The origin of `url`: `https://example.com:8080`.
+fn origin_of(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            let host = authority.rsplit('@').next().unwrap_or_default();
+            format!(
+                "{}://{}",
+                scheme.to_ascii_lowercase(),
+                host.to_ascii_lowercase()
+            )
+        }
+        None => url.split(':').next().unwrap_or_default().to_owned(),
+    }
 }
 unsafe extern "C" fn on_terminated(_: Ptr, reason: c_int, data: Ptr) {
     // WEBKIT_WEB_PROCESS_CRASHED, _EXCEEDED_MEMORY_LIMIT, _TERMINATED_BY_API.
@@ -4373,6 +4499,11 @@ enum Command {
     Ime(Ime),
     Decide {
         decision: u64,
+        allowed: bool,
+    },
+    /// A permission request answered.
+    Permit {
+        request: u64,
         allowed: bool,
     },
     /// A credentials challenge answered: a user name and password, or

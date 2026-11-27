@@ -517,6 +517,40 @@ define_class!(
             }
             None
         }
+        /// A page's `getUserMedia` (macOS 12): the app's to allow, for this
+        /// request (WKPermissionDecision grant, 1, or deny, 2; never
+        /// WebKit's own prompt, 0). Denied unanswered. Geolocation and
+        /// notifications have no such delegate in WKWebView: denied
+        /// without asking.
+        #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
+        fn media_capture(&self, _view: &WKWebView, origin: &AnyObject, frame: &WKFrameInfo, kind: isize, decision: &block2::DynBlock<dyn Fn(isize)>) {
+            use zgx::web_view::PermissionKind as Kind;
+            // WKMediaCaptureType: camera (0), microphone (1), both (2).
+            let kinds = match kind {
+                0 => vec![Kind::Camera],
+                1 => vec![Kind::Microphone],
+                2 => vec![Kind::Camera, Kind::Microphone],
+                other => vec![Kind::Other(format!("media capture {other}"))],
+            };
+            // SAFETY: WKSecurityOrigin's and WKFrameInfo's getters on the
+            // main thread, each result nil-checked.
+            let (origin, url) = unsafe {
+                let scheme: Option<Retained<NSString>> = msg_send![origin, protocol];
+                let host: Option<Retained<NSString>> = msg_send![origin, host];
+                let port: isize = msg_send![origin, port];
+                let text = |s: Option<Retained<NSString>>| s.map(|s| s.to_string()).unwrap_or_default();
+                let origin = match port {
+                    0 => format!("{}://{}", text(scheme), text(host)),
+                    port => format!("{}://{}:{port}", text(scheme), text(host)),
+                };
+                let url = frame.request().URL().and_then(|url| url.absoluteString()).map(|url| url.to_string()).unwrap_or_default();
+                (origin, url)
+            };
+            let decision = decision.copy();
+            // Made here, so a page gone before it's asked still denies.
+            let responder = zgx::web_view::PermissionResponder::new(move |allowed| decision.call((if allowed { 1 } else { 2 },)));
+            self.post(move |web| web.permission_request(zgx::web_view::PermissionRequest::new(url, origin, kinds), responder));
+        }
         /// `alert(message)`: an alert sheet with OK.
         #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
         fn alert(&self, view: &WKWebView, message: &NSString, frame: &WKFrameInfo, completion: &block2::DynBlock<dyn Fn()>) {

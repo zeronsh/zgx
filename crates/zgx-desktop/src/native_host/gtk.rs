@@ -55,6 +55,11 @@ macro_rules! api {
             /// `webkit_web_view_get_theme_color(view, rgba)`: WebKitGTK 2.38.
             pub webkit_web_view_get_theme_color:
                 Option<unsafe extern "C" fn(Ptr, *mut GdkRGBA) -> gboolean>,
+            /// `webkit_clipboard_permission_request_get_type`: WebKitGTK 2.42.
+            pub webkit_clipboard_permission_request_get_type: Option<unsafe extern "C" fn() -> GType>,
+            /// `webkit_user_media_permission_is_for_display_device`: WebKitGTK 2.34.
+            pub webkit_user_media_permission_is_for_display_device:
+                Option<unsafe extern "C" fn(Ptr) -> gboolean>,
             _libraries: Vec<Library>,
         }
         impl Api {
@@ -87,6 +92,16 @@ macro_rules! api {
                     atk_bridge_adaptor_init: find(&libraries, "atk_bridge_adaptor_init").ok(),
                     atk_bridge_adaptor_cleanup: find(&libraries, "atk_bridge_adaptor_cleanup").ok(),
                     webkit_web_view_get_theme_color: find(&libraries, "webkit_web_view_get_theme_color").ok(),
+                    webkit_clipboard_permission_request_get_type: find(
+                        &libraries,
+                        "webkit_clipboard_permission_request_get_type",
+                    )
+                    .ok(),
+                    webkit_user_media_permission_is_for_display_device: find(
+                        &libraries,
+                        "webkit_user_media_permission_is_for_display_device",
+                    )
+                    .ok(),
                     webkit_website_data_manager_set_favicons_enabled: find(
                         &libraries,
                         "webkit_website_data_manager_set_favicons_enabled",
@@ -151,6 +166,19 @@ api! {
     fn webkit_authentication_request_cancel(Ptr);
     fn webkit_credential_new(*const c_char, *const c_char, c_int) -> Ptr;
     fn webkit_credential_free(Ptr);
+    fn webkit_permission_request_allow(Ptr);
+    fn webkit_permission_request_deny(Ptr);
+    fn webkit_geolocation_permission_request_get_type() -> GType;
+    fn webkit_notification_permission_request_get_type() -> GType;
+    fn webkit_user_media_permission_request_get_type() -> GType;
+    fn webkit_user_media_permission_is_for_audio_device(Ptr) -> gboolean;
+    fn webkit_user_media_permission_is_for_video_device(Ptr) -> gboolean;
+    fn webkit_pointer_lock_permission_request_get_type() -> GType;
+    fn webkit_device_info_permission_request_get_type() -> GType;
+    fn webkit_media_key_system_permission_request_get_type() -> GType;
+    fn webkit_website_data_access_permission_request_get_type() -> GType;
+    fn webkit_settings_set_enable_media_stream(Ptr, gboolean);
+    fn webkit_settings_set_enable_mock_capture_devices(Ptr, gboolean);
     fn gtk_offscreen_window_get_type() -> GType;
     fn gtk_window_get_type() -> GType;
     fn gtk_window_resize(Ptr, c_int, c_int);
