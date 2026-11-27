@@ -654,6 +654,9 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     checks["full screen"] = True
     # The page's theme colour (its <meta name="theme-color">) and the link
     # under the pointer reach the app's state.
+    # The page's icon (a 16 x 16 PNG in its <link rel=icon>) reaches the app.
+    session.wait(lambda: "16x16" in session.lines("FAVICON "), "the page's icon never reached its state")
+    checks["favicon"] = True
     # WebKitGTK reports no theme colour for a page it paints on the CPU
     # (`accelerated: false`): it never changes `theme-color` there.
     if not unaccelerated:

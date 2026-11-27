@@ -62,6 +62,7 @@ enum class ToZgx : u8 {
     Snapshot = 115,
     ClipboardWrite = 116,
     ClipboardRead = 117,
+    Favicon = 118,
 };
 
 class Writer {
@@ -89,6 +90,13 @@ public:
     Writer& i32_(i32 value) { return raw(value); }
     Writer& u64_(u64 value) { return raw(value); }
     Writer& f64_(double value) { return raw(value); }
+    Writer& bytes(ReadonlyBytes value)
+    {
+        raw(static_cast<u32>(value.size()));
+        for (auto byte : value)
+            m_bytes.append(byte);
+        return *this;
+    }
     Writer& str(StringView value)
     {
         raw(static_cast<u32>(value.length()));

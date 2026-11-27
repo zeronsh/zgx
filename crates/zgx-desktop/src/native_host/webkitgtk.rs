@@ -492,6 +492,7 @@ struct Spec {
     messages: bool,
     new_windows: bool,
     accelerated: bool,
+    favicons: bool,
     scripts: Vec<(String, bool)>,
     schemes: Vec<String>,
     frame: Arc<Mutex<Frame>>,
@@ -738,6 +739,25 @@ impl Gtk {
                 data,
                 false,
             );
+            // The page's icon, where the app shows it: WebKit loads icons
+            // only with its favicon database on, a context's own.
+            if spec.favicons {
+                if let Some(enable) = api.webkit_website_data_manager_set_favicons_enabled {
+                    enable((api.webkit_web_view_get_website_data_manager)(view), 1);
+                } else if let Some(directory) =
+                    api.webkit_web_context_set_favicon_database_directory
+                {
+                    directory(context, std::ptr::null());
+                }
+                connect(
+                    api,
+                    view,
+                    "notify::favicon",
+                    handler(on_favicon as *const ()),
+                    data,
+                    false,
+                );
+            }
             connect(
                 api,
                 view,
@@ -2805,6 +2825,46 @@ unsafe extern "C" fn on_terminated(_: Ptr, reason: c_int, data: Ptr) {
             state.unresponsive = false;
         });
         web.emit(WebViewEvent::ProcessTerminated);
+    });
+}
+/// The page's icon changed: its cairo surface (ARGB32, premultiplied, BGRA
+/// here), copied as RGBA, or none.
+unsafe extern "C" fn on_favicon(view: Ptr, _: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the view GTK passes and this handler's page; the surface is
+    // WebKit's, read now (not kept).
+    let (page, favicon) = unsafe {
+        let surface = (api.webkit_web_view_get_favicon)(view);
+        let favicon = (!surface.is_null() && (api.cairo_image_surface_get_format)(surface) == 0)
+            .then(|| {
+                (api.cairo_surface_flush)(surface);
+                let width = (api.cairo_image_surface_get_width)(surface).max(0) as usize;
+                let height = (api.cairo_image_surface_get_height)(surface).max(0) as usize;
+                let stride = (api.cairo_image_surface_get_stride)(surface).max(0) as usize;
+                let pixels = (api.cairo_image_surface_get_data)(surface);
+                if pixels.is_null() || width == 0 || height == 0 {
+                    return None;
+                }
+                let bytes = std::slice::from_raw_parts(pixels, stride * height);
+                let mut rgba = Vec::with_capacity(width * height * 4);
+                for row in bytes.chunks_exact(stride) {
+                    for pixel in row[..width * 4].as_chunks::<4>().0 {
+                        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                    }
+                }
+                Some((width as u32, height as u32, rgba))
+            })
+            .flatten();
+        (page(data), favicon)
+    };
+    page.post(move |web| {
+        let favicon = favicon.and_then(|(width, height, rgba)| {
+            zgx::image::ImageData::new_premultiplied(width, height, rgba)
+                .ok()
+                .map(Arc::new)
+        });
+        web.update_state(|state| state.favicon = favicon);
+        web.emit(WebViewEvent::FaviconChanged);
     });
 }
 /// The web process stopped answering, or answers again
@@ -4947,6 +5007,7 @@ fn backend(
         messages: options.messages,
         new_windows: options.new_windows,
         accelerated: options.accelerated,
+        favicons: options.favicons,
         scripts: options
             .scripts
             .iter()

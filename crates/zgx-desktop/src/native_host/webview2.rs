@@ -1356,6 +1356,58 @@ impl Page {
                     &mut token,
                 );
             }
+            // The page's icon, where the app shows it (`favicons`): WebView2
+            // says it changed, then hands it over as a PNG.
+            if options.favicons
+                && let Ok(view) = view.cast::<ICoreWebView2_15>()
+            {
+                let page = on.clone();
+                let _ = view.add_FaviconChanged(
+                    &FaviconChangedEventHandler::create(Box::new(move |sender, _| {
+                        let Some(sender) =
+                            sender.and_then(|sender| sender.cast::<ICoreWebView2_15>().ok())
+                        else {
+                            return Ok(());
+                        };
+                        let page = page.clone();
+                        let _ = sender.GetFavicon(
+                            COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
+                            &GetFaviconCompletedHandler::create(Box::new(move |result, stream| {
+                                let mut png = Vec::new();
+                                if let (Ok(()), Some(stream)) = (result, stream) {
+                                    let mut chunk = [0u8; 16 * 1024];
+                                    loop {
+                                        let mut read = 0u32;
+                                        let done = stream.Read(
+                                            chunk.as_mut_ptr() as *mut c_void,
+                                            chunk.len() as u32,
+                                            Some(&mut read),
+                                        );
+                                        if done.is_err() || read == 0 {
+                                            break;
+                                        }
+                                        png.extend_from_slice(&chunk[..read as usize]);
+                                    }
+                                }
+                                // An empty stream: the page has no icon.
+                                let favicon = (!png.is_empty())
+                                    .then(|| zgx_gpu::assets::decode_image(&png).ok())
+                                    .flatten();
+                                page(&|page| {
+                                    let favicon = favicon.clone();
+                                    page.post(move |web| {
+                                        web.update_state(|state| state.favicon = favicon);
+                                        web.emit(WebViewEvent::FaviconChanged);
+                                    });
+                                });
+                                Ok(())
+                            })),
+                        );
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+            }
             // A download is the app's (`WebView::download`): saved where
             // it says, or cancelled, as with no handler. WebView2's own
             // download bar stays hidden.

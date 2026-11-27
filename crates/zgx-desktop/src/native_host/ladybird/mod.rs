@@ -160,7 +160,8 @@ fn take(message: FromHost) {
         | FromHost::Crashed { view, .. }
         | FromHost::Editing { view, .. }
         | FromHost::LinkHovered { view, .. }
-        | FromHost::ThemeColor { view, .. } => *view,
+        | FromHost::ThemeColor { view, .. }
+        | FromHost::Favicon { view, .. } => *view,
         FromHost::ClipboardWrite { .. } | FromHost::ClipboardRead { .. } => return,
         FromHost::Ready
         | FromHost::Store { .. }
@@ -224,6 +225,23 @@ fn take(message: FromHost) {
         FromHost::Editing { editing, .. } => page.editing.set(editing),
         FromHost::LinkHovered { url, .. } => {
             web.update_state(|state| state.hovered_link = (!url.is_empty()).then_some(url));
+        }
+        FromHost::Favicon { image, .. } => {
+            if !web.options().favicons {
+                return;
+            }
+            let favicon = image.and_then(|(width, height, pitch, format, premultiplied, bytes)| {
+                let pixels = client::rgba_rows(&bytes, width, height, pitch, format);
+                image_data(
+                    width,
+                    height,
+                    pixels,
+                    premultiplied && matches!(format, 2 | 4),
+                )
+                .ok()
+            });
+            web.update_state(|state| state.favicon = favicon);
+            web.emit(WebViewEvent::FaviconChanged);
         }
         FromHost::ThemeColor { color, .. } => web.update_state(|state| {
             state.theme_color = color.map(|(r, g, b, a)| zgx::scene::Color(r, g, b, a));
@@ -1011,6 +1029,7 @@ mod tests {
             | FromHost::Editing { view, .. }
             | FromHost::LinkHovered { view, .. }
             | FromHost::ThemeColor { view, .. }
+            | FromHost::Favicon { view, .. }
             | FromHost::Store { view, .. }
             | FromHost::Present { view, .. }
             | FromHost::Snapshot { view, .. } => Some(*view),
@@ -1369,6 +1388,41 @@ mod tests {
             wait_for(view, title_is("pasted")),
             "the app's text is pasted into the field"
         );
+    }
+
+    #[test]
+    fn a_pages_icon_reaches_the_controller() {
+        let Some((host, _serial)) = host_or_skip("a_pages_icon_reaches_the_controller") else {
+            return;
+        };
+        let runtime = zgx::reactive::Runtime::new();
+        let web = WebView::new(
+            &runtime,
+            zgx::web_view::WebViewOptions {
+                engine: WebEngine::Ladybird,
+                favicons: true,
+                ..Default::default()
+            },
+        );
+        let _page = backend(&web, host);
+        // A red 16 x 16 PNG.
+        web.load_html(
+            "<title>icon</title><link rel=icon href='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg=='>",
+            None,
+        );
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while web.state().with_untracked(|state| state.favicon.is_none())
+            && Instant::now() < deadline
+        {
+            deliver();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let favicon = web
+            .state()
+            .with_untracked(|state| state.favicon.clone())
+            .expect("the page's icon");
+        assert_eq!((favicon.width(), favicon.height()), (16, 16));
+        assert_eq!(&favicon.pixels()[..4], &[255, 0, 0, 255], "red");
     }
 
     #[test]

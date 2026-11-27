@@ -401,24 +401,34 @@ fn take(host: &Host, message: FromHost, fd: Option<OwnedFd>) {
 /// A store's pixels as RGBA rows without padding: Ladybird's BGR stores
 /// swapped, and those without alpha (BGRx, RGBx) opaque.
 pub(super) fn rgba(store: &Mapping) -> Vec<u8> {
-    let (width, height, pitch) = (
-        store.width as usize,
-        store.height as usize,
-        store.pitch as usize,
-    );
-    let bytes = store.bytes();
+    rgba_rows(
+        store.bytes(),
+        store.width,
+        store.height,
+        store.pitch,
+        store.format,
+    )
+}
+
+/// Ladybird's pixels, `pitch` bytes a row in `format`, as RGBA rows without
+/// padding (`rgba`); empty where `bytes` is too short for them.
+pub(super) fn rgba_rows(bytes: &[u8], width: u32, height: u32, pitch: u32, format: u8) -> Vec<u8> {
+    let (width, height, pitch) = (width as usize, height as usize, pitch as usize);
+    if pitch < width * 4 || bytes.len() < pitch * height.saturating_sub(1) + width * 4 {
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity(width * height * 4);
     for row in 0..height {
         for pixel in bytes[row * pitch..row * pitch + width * 4]
             .as_chunks::<4>()
             .0
         {
-            let (r, b) = if matches!(store.format, 1 | 2) {
+            let (r, b) = if matches!(format, 1 | 2) {
                 (pixel[2], pixel[0])
             } else {
                 (pixel[0], pixel[2])
             };
-            let a = if matches!(store.format, 1 | 3) {
+            let a = if matches!(format, 1 | 3) {
                 255
             } else {
                 pixel[3]

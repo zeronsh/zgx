@@ -252,6 +252,24 @@ private:
             writer.u64_(m_id).u8_(why);
             s_connection->send(writer);
         };
+        // The page's icon, its pixels inline (icons are small); none when it has none.
+        on_favicon_change = [this](Optional<Gfx::Bitmap const&> favicon) {
+            Writer writer { ToZgx::Favicon };
+            writer.u64_(m_id);
+            if (!favicon.has_value()) {
+                writer.u8_(0);
+            } else {
+                auto const& bitmap = *favicon;
+                writer.u8_(1)
+                    .u32_(bitmap.width())
+                    .u32_(bitmap.height())
+                    .u32_(bitmap.pitch())
+                    .u8_(static_cast<u8>(bitmap.format()))
+                    .u8_(bitmap.alpha_type() == Gfx::AlphaType::Premultiplied ? 1 : 0)
+                    .bytes({ bitmap.scanline_u8(0), bitmap.size_in_bytes() });
+            }
+            s_connection->send(writer);
+        };
         on_cursor_change = [this](Gfx::Cursor const& cursor) {
             u8 standard = 0;
             if (auto const* named = cursor.get_pointer<Gfx::StandardCursor>())
