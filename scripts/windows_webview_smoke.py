@@ -173,7 +173,12 @@ def trust_cases(proc, lines, heard):
         proc.stdin.write(command + "\n")
         proc.stdin.flush()
 
-    (_, tls), (_, auth) = trust_servers.https(), trust_servers.basic_auth()
+    (tls_server, tls), (_, auth) = trust_servers.https(), trust_servers.basic_auth()
+
+    def explain(what):
+        """`what`, with the paths the TLS server served and the app's last lines."""
+        tail = "\n  ".join(lines[-30:])
+        return f"{what}\nthe TLS server served {tls_server.paths}\nthe app's last lines:\n  {tail}"
     count = lambda prefix: sum(line.startswith(prefix) for line in lines)
     loaded = lambda prefix, path: any(line.startswith(prefix) and f'"{path}"' in line for line in lines)
 
@@ -206,7 +211,11 @@ def trust_cases(proc, lines, heard):
     wait_for(lambda: heard("CERTS cancel"), "the cancelling handler")
     asked, second_asked = count("CERT "), count("SECOND_CERT ")
     send(f"load {tls}/again")
-    wait_for(lambda: count("CERT ") > asked, "the next load from the server to be asked", 20)
+    try:
+        wait_for(lambda: count("CERT ") > asked or loaded("MESSAGE ", "/again"), "", 20)
+    except AssertionError:
+        raise AssertionError(explain("the next load from the server was neither asked nor loaded")) from None
+    assert count("CERT ") > asked, explain("the next load from the server loaded without the app asked")
     refused("/again", "the next load, cancelled")
     send(f"load2 {tls}/later")
     wait_for(lambda: count("SECOND_CERT ") > second_asked, "the second page's later load to be asked", 20)
