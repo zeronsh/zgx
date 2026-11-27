@@ -2176,19 +2176,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mlua-sys"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1631cda17bd6486410ab751d91f5fd4484f441589278cdad879eb3afc721a285"
-dependencies = [
- "cc",
- "cfg-if",
- "libc",
- "luau0-src",
- "pkg-config",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5690,16 +5677,27 @@ version = "0.2.0"
 
 [[package]]
 name = "zgx-mlua"
-version = "0.12.10"
+version = "0.12.11"
 dependencies = [
  "bstr",
  "either",
  "libc",
  "luau0-src",
- "mlua-sys",
  "num-traits",
  "parking_lot",
  "rustc-hash 2.1.3",
+ "zgx-mlua-sys",
+]
+
+[[package]]
+name = "zgx-mlua-sys"
+version = "0.13.1"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "luau0-src",
+ "pkg-config",
 ]
 
 [[package]]
@@ -5779,6 +5777,7 @@ dependencies = [
  "zgx-fingerprint",
  "zgx-gpu",
  "zgx-mlua",
+ "zgx-mlua-sys",
  "zgx-module",
  "zgx-module-fixture",
  "zgx-module-fixture-typed",

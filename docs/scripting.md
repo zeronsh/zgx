@@ -601,7 +601,7 @@ The `ui.tween(state, opts)`, `ui.spring(state, opts)` and `ui.loop(opts)` bindin
 
 ### Cost
 
-**Release builds need `LUAU_CXXFLAGS=-DNDEBUG`.** Luau checks its asserts unless `NDEBUG` is defined, and the crate that compiles it for mlua never defines it: with them, every script loop, call and table access runs about a fifth slower (`list_state_bench`: 6.3 M instructions a tick against 5.0 M). This workspace sets it in `.cargo/config.toml`; an app built elsewhere sets it in its own:
+**Release builds need `LUAU_CXXFLAGS=-DNDEBUG`.** Luau checks its asserts unless `NDEBUG` is defined, and the crate that compiles it for mlua never defines it: with them, every script loop, call and table access runs about a fifth slower (`list_state_bench`: 4.22 M instructions a tick against 3.07 M, 0.18 ms against 0.15 ms on an Apple M5 Max). This workspace's release builds need nothing set (its zgx-mlua-sys defines it, as 0.2.1 on crates.io will); an app built against zgx-script 0.2.0 sets it in its own:
 
 ```toml
 # .cargo/config.toml

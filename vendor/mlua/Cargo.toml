@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88"
 name = "zgx-mlua"
-version = "0.12.10"
+version = "0.12.11"
 authors = [
     "Aleksandr Orlenko <zxteam@pm.me>",
     "kyren <catherine@kyju.org>",
@@ -128,8 +128,11 @@ version = "0.4"
 optional = true
 
 [dependencies.ffi]
-version = "0.13.0"
-package = "mlua-sys"
+# zgx patch: zgx-mlua-sys, mlua-sys building Luau without its asserts in
+# release builds (vendor/mlua-sys/ZGX_PATCH.md).
+version = "0.13.1"
+package = "zgx-mlua-sys"
+path = "../mlua-sys"
 
 
 # zgx patch: any Luau 0.22, 740 or 744 and later: Luau 744's bytecode
