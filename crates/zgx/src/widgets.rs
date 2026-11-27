@@ -19,9 +19,10 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    GroupFrame, Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
-    SpanHighlighter, SpanStyle, SpanText,
+    GroupFrame, Highlighter, KeptLineMarks, LineColors, LineInset, LineInsets, LineMark, LineMarks,
+    LineSpans, MarkImage, MarkLook, SpanHighlighter, SpanStyle, SpanText,
 };
+use crate::editor_lines::{MarksGiver, MarksOf};
 
 /// What had keyboard focus, and a text field's selection there, when it
 /// was taken (`Ui::focus_snapshot`), to put back (`Ui::restore_focus`).
@@ -1979,6 +1980,16 @@ impl EditorHandle {
     /// scroll with their lines. `None`: none.
     #[doc(hidden)]
     pub fn set_line_marks(&self, marks: Option<LineMarks>) {
+        if !self.multiline {
+            return;
+        }
+        self.hint
+            .line_cache()
+            .set_marks(marks.map(MarksGiver::Each));
+        self.refresh();
+    }
+    /// `set_line_marks`, however its marks are given.
+    pub(crate) fn set_marks_giver(&self, marks: Option<MarksGiver>) {
         if !self.multiline {
             return;
         }
@@ -8304,6 +8315,7 @@ impl Ui {
                             shown_lines.clone(),
                             &font,
                             (inner_width, *scroll),
+                            (&theme, &draw_storage, root),
                         );
                     }
                 }
@@ -10928,6 +10940,19 @@ struct MarksDrawn {
     over: Option<NodeId>,
     under_nodes: Vec<NodeId>,
     over_nodes: Vec<NodeId>,
+    /// How many lines the text had, and those the last draw showed.
+    shown: (usize, std::ops::Range<usize>),
+    /// What its marks with a look (`MarkLook`) are drawn with: none until one
+    /// has shown.
+    looks: Option<Box<MarkLooks>>,
+}
+/// What a text area's marks with a look (`MarkLook`) are drawn with.
+#[derive(Default)]
+struct MarkLooks {
+    /// Their turns (`MarkLook::rotate`).
+    turns: crate::mark_turn::Turns,
+    /// A mark's node has held a picture.
+    pictured: bool,
 }
 /// The marks of the lines `shown` of `lines` drawn in their layers, made in
 /// `viewport` as the first shows (under `selection_layer`, or over
@@ -10936,6 +10961,7 @@ struct MarksDrawn {
 /// any drawn go.
 #[cold]
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn place_line_marks(
     s: &mut Scene,
     lines: &crate::editor_lines::LinesLayout,
@@ -10944,51 +10970,24 @@ fn place_line_marks(
     shown: std::ops::Range<usize>,
     font: &FontStyle,
     (inner_width, scroll): (f32, (f32, f32)),
+    (theme, storage, root): (&crate::theme::ThemeScope, &std::rc::Weak<UiStorage>, NodeId),
 ) {
-    let mut under = Vec::new();
-    let mut over = Vec::new();
     // The groups that moved since the last draw (`place_groups`).
     let moved: Vec<u32> = (code.groups_drawn.borrow().as_ref())
         .map(|drawn| drawn.moved.clone())
         .unwrap_or_default();
-    if lines.has_marks() {
-        for i in shown {
-            let inset = lines.inset(i);
-            if inset.hidden {
-                continue;
-            }
-            let top = lines.top(i) + inset.above;
-            let tall = (lines.height(i) - inset.above).max(0.);
-            let group = lines.group_of(i);
-            for mark in lines.marks(i) {
-                let width = if mark.width.is_finite() {
-                    mark.width
-                } else {
-                    (inner_width - mark.x).max(0.)
-                };
-                let height = if mark.height.is_finite() {
-                    mark.height
-                } else {
-                    (tall - mark.y - mark.bottom).max(0.)
-                };
-                let x = if mark.from_right {
-                    inner_width - mark.x - width
-                } else {
-                    mark.x
-                };
-                let mut rect = Rect::new(x, top + mark.y, width, height);
-                let mut placed = PlacedMark::default();
-                if let Some((id, frame)) = &group {
-                    placed = group_mark(lines, &mut rect, &mark, (*id, frame), &moved);
-                }
-                if mark.over_text {
-                    over.push((rect, mark, placed));
-                } else {
-                    under.push((rect, mark, placed));
-                }
-            }
-        }
+    // What marks with a look are drawn with, once one has shown here.
+    let (mut looks, last) = (code.marks_drawn.borrow_mut().as_mut())
+        .map(|drawn| (drawn.looks.take(), drawn.shown.clone()))
+        .unwrap_or_default();
+    if let Some(looks) = &mut looks {
+        looks.turns.begin(lines.line_count());
     }
+    let (given, under, over) =
+        marks_placed(lines, shown.clone(), inner_width, &moved, |look, at| {
+            let looks = looks.get_or_insert_with(|| MarkLooks::new(lines, &last));
+            looks.angle(look, at, theme)
+        });
     let mut drawn = code.marks_drawn.borrow_mut();
     if under.is_empty() && over.is_empty() {
         // None now: the layers go with their marks.
@@ -11002,6 +11001,16 @@ fn place_line_marks(
         return;
     }
     let drawn = drawn.get_or_insert_default();
+    drawn.shown = (lines.line_count(), shown.clone());
+    if let Some(looks) = &mut looks {
+        looks.turns.end(shown);
+        // Still turning: drawn again a step on, as an interaction deadline.
+        if let Some(now) = looks.turns.moving()
+            && let Some(storage) = storage.upgrade()
+        {
+            storage.scroll_reveals.borrow_mut().turning(root, now);
+        }
+    }
     for (marks, layer, nodes, above) in [
         (under, &mut drawn.under, &mut drawn.under_nodes, false),
         (over, &mut drawn.over, &mut drawn.over_nodes, true),
@@ -11039,7 +11048,7 @@ fn place_line_marks(
             nodes.clear();
         }
         let layer = layer.expect("made above");
-        paint_line_marks(s, layer, nodes, marks, font);
+        paint_line_marks(s, layer, nodes, (&given, marks), font, looks.as_deref_mut());
         s.set_transform(
             layer,
             Transform {
@@ -11048,6 +11057,163 @@ fn place_line_marks(
             },
         );
     }
+    drawn.looks = looks;
+}
+/// The marks of the lines `shown`, placed: those under the text, and those
+/// over it, with the lines' marks they are of. `angle`: given each mark's
+/// look, its line and its place there, the angle it shows at.
+#[inline(always)]
+fn marks_placed(
+    lines: &crate::editor_lines::LinesLayout,
+    shown: std::ops::Range<usize>,
+    inner_width: f32,
+    moved: &[u32],
+    mut angle: impl FnMut(&MarkLook, (usize, usize)) -> f32,
+) -> (Given, Vec<MarkAt>, Vec<MarkAt>) {
+    let mut given = Given::default();
+    let mut under = Vec::new();
+    let mut over = Vec::new();
+    if !lines.has_marks() {
+        return (given, under, over);
+    }
+    for i in shown {
+        let inset = lines.inset(i);
+        if inset.hidden {
+            continue;
+        }
+        let top = lines.top(i) + inset.above;
+        let tall = (lines.height(i) - inset.above).max(0.);
+        let group = lines.group_of(i);
+        // Kept by who gives them (Luau's), shared; else made for this draw.
+        let (marks, line) = match lines.marks(i) {
+            MarksOf::Kept(marks) if marks.is_empty() => continue,
+            MarksOf::Each(marks) if marks.is_empty() => continue,
+            MarksOf::Kept(marks) => {
+                given.kept.push(marks);
+                let line = given.kept.len() as u32 - 1;
+                (&given.kept[line as usize][..], line)
+            }
+            MarksOf::Each(marks) => {
+                given.each.push(marks);
+                let line = given.each.len() as u32 - 1;
+                (&given.each[line as usize][..], line | Given::EACH)
+            }
+        };
+        for (place, mark) in marks.iter().enumerate() {
+            let width = if mark.width.is_finite() {
+                mark.width
+            } else {
+                (inner_width - mark.x).max(0.)
+            };
+            let height = if mark.height.is_finite() {
+                mark.height
+            } else {
+                (tall - mark.y - mark.bottom).max(0.)
+            };
+            let mut x = if mark.from_right {
+                inner_width - mark.x - width
+            } else {
+                mark.x
+            };
+            let mut turned = 0.;
+            if let Some(look) = &mark.look {
+                turned = angle(look, (i, place));
+                x = aligned_x(look, (inset.left, inner_width), (x, mark.x), width);
+            }
+            let mut rect = Rect::new(x, top + mark.y, width, height);
+            let mut placed = PlacedMark::default();
+            if let Some((id, frame)) = &group {
+                placed = group_mark(lines, &mut rect, mark, (*id, frame), moved);
+            }
+            let at = MarkAt {
+                rect,
+                mark: (line, place as u32),
+                placed,
+                angle: turned,
+            };
+            if mark.over_text {
+                over.push(at);
+            } else {
+                under.push(at);
+            }
+        }
+    }
+    (given, under, over)
+}
+impl MarkLooks {
+    /// As a text area's first mark with a look is drawn, `lines` its text and
+    /// `last` what the last draw showed (`MarksDrawn::shown`).
+    #[cold]
+    #[inline(never)]
+    fn new(
+        lines: &crate::editor_lines::LinesLayout,
+        last: &(usize, std::ops::Range<usize>),
+    ) -> Box<Self> {
+        Box::new(Self {
+            turns: crate::mark_turn::Turns::new(lines.line_count(), last),
+            pictured: false,
+        })
+    }
+    /// The angle a mark with `look` shows at, `at` its line and place there.
+    #[cold]
+    #[inline(never)]
+    fn angle(
+        &mut self,
+        look: &MarkLook,
+        at: (usize, usize),
+        theme: &crate::theme::ThemeScope,
+    ) -> f32 {
+        self.turns.angle(at, look.rotate, || {
+            let fast = theme.number_untracked(tok::MOTION_DURATION_FAST);
+            std::time::Duration::from_secs_f32((fast / 1000.).max(0.))
+        })
+    }
+}
+/// Where a mark's `width` starts: at `x`, or aligned (`MarkLook::align`)
+/// across its line's width, from its indent `left` to the area's right edge
+/// `right`, `offset` along.
+#[cold]
+#[inline(never)]
+fn aligned_x(
+    look: &MarkLook,
+    (left, right): (f32, f32),
+    (x, offset): (f32, f32),
+    width: f32,
+) -> f32 {
+    use crate::text_layout::TextAlign;
+    match look.align {
+        None => x,
+        Some(TextAlign::Center) => left + (right - left - width) / 2. + offset,
+        Some(TextAlign::Right | TextAlign::End) => right - offset - width,
+        Some(_) => offset,
+    }
+}
+/// The marks of the lines in view a draw holds while it runs: those kept by
+/// who gives them, shared, and those made for it.
+#[derive(Default)]
+struct Given {
+    kept: Vec<Rc<[LineMark]>>,
+    each: Vec<Vec<LineMark>>,
+}
+impl Given {
+    /// A `MarkAt::mark` line of `each`.
+    const EACH: u32 = 1 << 31;
+    #[inline]
+    fn mark(&self, (line, mark): (u32, u32)) -> &LineMark {
+        if line & Self::EACH == 0 {
+            &self.kept[line as usize][mark as usize]
+        } else {
+            &self.each[(line & !Self::EACH) as usize][mark as usize]
+        }
+    }
+}
+/// A mark in view: where it shows, which of the given lines' marks it is (the
+/// line among those given, the mark among its own), and its turn.
+struct MarkAt {
+    rect: Rect,
+    mark: (u32, u32),
+    placed: PlacedMark,
+    angle: f32,
 }
 /// How a mark of a scroll group's line shows (`group_mark`): what of it the
 /// group's frame cuts, and whether it repaints where it is (still as the
@@ -11059,7 +11225,7 @@ struct PlacedMark {
 }
 /// Mark `mark` at `rect` of a line in scroll group `id` (its `frame`):
 /// moved by the group's offset and cut to its frame, unless pinned
-/// (`LineMark::pinned`). A pinned one with edges, corners, a label, or over
+/// (`LineMark::pinned`). A pinned one with edges, corners, a label, a picture, or over
 /// the text, inside the frame of a group in `moved`, repaints.
 #[cold]
 #[inline(never)]
@@ -11078,6 +11244,7 @@ fn group_mark(
             && mark.radius <= 0.
             && mark.border_width <= 0.
             && mark.label.is_none()
+            && mark.look.is_none()
             && !inside(rect.x)
             && !inside(rect.x + rect.width);
         return PlacedMark {
@@ -11095,17 +11262,20 @@ fn group_mark(
     }
 }
 /// `marks` drawn in `layer`'s `nodes`, made and let go as their count
-/// changes: a quad each, and a text node for each label.
+/// changes: a quad each (an SVG's or a picture's box, for a mark with one),
+/// and a text node for each label. `given`: the lines' marks they are of.
+/// `looks`: a mark with a look has shown.
 fn paint_line_marks(
     s: &mut Scene,
     layer: NodeId,
     nodes: &mut Vec<NodeId>,
-    marks: Vec<(Rect, LineMark, PlacedMark)>,
+    (given, marks): (&Given, Vec<MarkAt>),
     font: &FontStyle,
+    mut looks: Option<&mut MarkLooks>,
 ) {
     let count: usize = marks
         .iter()
-        .map(|(_, m, _)| 1 + usize::from(m.label.is_some()))
+        .map(|at| 1 + usize::from(given.mark(at.mark).label.is_some()))
         .sum();
     while nodes.len() > count {
         s.remove(nodes.pop().expect("longer than count"));
@@ -11114,7 +11284,14 @@ fn paint_line_marks(
         nodes.push(s.append(layer, NodeKind::Rect(Color(0, 0, 0, 0)), Style::default()));
     }
     let mut ids = nodes.iter().copied();
-    for (rect, mark, placed) in marks {
+    for at in marks {
+        let MarkAt {
+            rect,
+            mark,
+            placed,
+            angle,
+        } = at;
+        let mark = given.mark(mark);
         let Some(id) = ids.next() else { return };
         if placed.clip.is_some() || s.clip_inset(id).is_some() {
             s.set_clip_inset(id, placed.clip);
@@ -11132,10 +11309,14 @@ fn paint_line_marks(
             border_over: false,
             outline: None,
         };
-        if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
-            s.set_kind(id, NodeKind::Quad(quad));
+        if let Some(looks) = looks.as_deref_mut() {
+            paint_mark_look(s, id, &rect, quad, (mark.look(), angle), looks);
+        } else {
+            if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
+                s.set_kind(id, NodeKind::Quad(quad));
+            }
+            s.set_style(id, fixed(rect.width, rect.height));
         }
-        s.set_style(id, fixed(rect.width, rect.height));
         s.set_transform(
             id,
             Transform {
@@ -11143,28 +11324,31 @@ fn paint_line_marks(
                 y: rect.y,
             },
         );
-        if let Some((label, label_color, label_size)) = mark.label {
+        if let Some((label, label_color, label_size)) = &mark.label {
             let Some(id) = ids.next() else { return };
+            if let Some(looks) = looks.as_deref_mut() {
+                plain_mark_node(s, id, looks);
+            }
             let unchanged = matches!(
                 s.kind(id),
                 NodeKind::Text { text, color: c, font_size }
-                    if **text == *label && *c == label_color && *font_size == label_size
+                    if **text == **label && *c == *label_color && *font_size == *label_size
             );
             if !unchanged {
                 s.set_kind(
                     id,
                     NodeKind::Text {
-                        text: label,
-                        color: label_color,
-                        font_size: label_size,
+                        text: label.clone(),
+                        color: *label_color,
+                        font_size: *label_size,
                     },
                 );
             }
             let mut label_font = font.clone();
-            if mark.mono {
+            if mark.label_font & crate::editor_lines::LABEL_MONO != 0 {
                 label_font.family = crate::text_layout::FontFamily::Monospace;
             }
-            if mark.tabular {
+            if mark.label_font & crate::editor_lines::LABEL_TABULAR != 0 {
                 label_font.features = label_font.features.with_feature(*b"tnum", 1);
             }
             if mark.height.is_finite() && mark.height > 0. {
@@ -11187,6 +11371,128 @@ fn paint_line_marks(
             );
         }
     }
+}
+/// A mark's node `id`, `rect` big, in a text area whose marks have looks:
+/// its own `look`, or none over what its node showed.
+#[cold]
+#[inline(never)]
+fn paint_mark_look(
+    s: &mut Scene,
+    id: NodeId,
+    rect: &Rect,
+    mut quad: crate::scene::QuadStyle,
+    (look, angle): (Option<&MarkLook>, f32),
+    looks: &mut MarkLooks,
+) {
+    quad.decoration = look.and_then(|look| look.decoration.clone());
+    if looks.turns.any {
+        turn_mark(s, id, angle);
+    }
+    let svg = look.and_then(|look| look.svg.as_ref());
+    if svg.is_none()
+        && let Some(image) = look.and_then(|look| look.image.as_ref())
+    {
+        looks.pictured = true;
+        return paint_mark_image(s, id, rect, quad, image);
+    }
+    if looks.pictured {
+        drop_mark_image(s, id);
+    }
+    match svg {
+        Some(svg) => {
+            if !matches!(s.kind(id), NodeKind::Svg(shown) if **shown == **svg) {
+                s.set_kind(id, NodeKind::Svg(svg.clone()));
+            }
+        }
+        None => {
+            if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
+                s.set_kind(id, NodeKind::Quad(quad));
+            }
+        }
+    }
+    s.set_style(id, fixed(rect.width, rect.height));
+}
+/// A label's node, which may have shown a mark with a look.
+#[cold]
+#[inline(never)]
+fn plain_mark_node(s: &mut Scene, id: NodeId, looks: &MarkLooks) {
+    if looks.pictured {
+        drop_mark_image(s, id);
+    }
+    if looks.turns.any {
+        turn_mark(s, id, 0.);
+    }
+}
+/// A mark's node turned `degrees` about its centre (`LineMark::rotate`).
+fn turn_mark(s: &mut Scene, id: NodeId, degrees: f32) {
+    s.set_local_transform(
+        id,
+        crate::scene::LocalTransform {
+            rotate: degrees.to_radians(),
+            ..crate::scene::LocalTransform::IDENTITY
+        },
+    );
+}
+/// The picture a mark's node held (`paint_mark_image`) gone, the node
+/// another mark's now.
+fn drop_mark_image(s: &mut Scene, id: NodeId) {
+    while let Some(picture) = s.children(id).first().copied() {
+        s.remove(picture);
+    }
+}
+/// A mark's picture (`LineMark::image`) in its node `id`, `rect` big: a
+/// panel clipping it to its rounded corners, the picture fitted in it.
+#[cold]
+#[inline(never)]
+fn paint_mark_image(
+    s: &mut Scene,
+    id: NodeId,
+    rect: &Rect,
+    quad: crate::scene::QuadStyle,
+    image: &MarkImage,
+) {
+    if !matches!(s.kind(id), NodeKind::Panel { quad: q, .. } if *q == quad) {
+        s.set_kind(
+            id,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad,
+            },
+        );
+    }
+    s.set_style(
+        id,
+        Style {
+            clip: true,
+            ..fixed(rect.width, rect.height)
+        },
+    );
+    let picture = (s.children(id).first().copied())
+        .unwrap_or_else(|| s.append(id, NodeKind::Rect(Color(0, 0, 0, 0)), Style::default()));
+    if !matches!(s.kind(picture), NodeKind::Image(shown) if *shown == image.image) {
+        s.set_kind(picture, NodeKind::Image(image.image.clone()));
+    }
+    let (w, h) = crate::compose::fitted_image_size(
+        rect.width,
+        rect.height,
+        image.image.width() as f32,
+        image.image.height() as f32,
+        image.fit,
+    );
+    s.set_style(
+        picture,
+        Style {
+            absolute: true,
+            ..fixed(w, h)
+        },
+    );
+    s.set_transform(
+        picture,
+        Transform {
+            x: (rect.width - w) / 2.,
+            y: (rect.height - h) / 2.,
+        },
+    );
 }
 /// A text area's line nodes for the lines in view, each placed past its
 /// room (`set_line_insets`) in what its indent leaves; a hidden line
