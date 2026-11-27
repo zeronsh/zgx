@@ -1054,7 +1054,10 @@ impl WindowContext {
         // Ladybird's pages (`WebEngine::Ladybird`), the others as above, or
         // native views.
         #[cfg(all(unix, feature = "ladybird"))]
-        let pages = Some(crate::native_host::ladybird::page_views(pages));
+        let pages = Some(crate::native_host::ladybird::page_views(
+            pages,
+            self.windows.clipboard.clone(),
+        ));
         let view = match pages {
             Some(pages) => zgx::compose::provide(pages, view),
             None => view,

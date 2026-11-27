@@ -423,6 +423,49 @@ pub struct WebViewState {
     /// the CPU, `accelerated: false`).
     #[doc(hidden)]
     pub theme_color: Option<crate::scene::Color>,
+    /// The page's process stopped answering (a script in a loop), until it
+    /// answers again (`WebViewEvent::Unresponsive` and `Responsive`). Not
+    /// on macOS or with Ladybird, whose engines don't say.
+    #[doc(hidden)]
+    pub unresponsive: bool,
+    /// Why the page's process last ended, where the engine says (with
+    /// `WebViewEvent::ProcessTerminated`).
+    #[doc(hidden)]
+    pub termination: Option<Termination>,
+}
+/// Why a page's process ended (see [`WebViewState::termination`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Termination {
+    /// It crashed.
+    Crashed,
+    /// It used more memory than it may.
+    OutOfMemory,
+    /// It was ended: by the system, the user, or the engine itself (a page
+    /// that stopped answering, a protocol error).
+    Killed,
+    /// The engine doesn't say.
+    Unknown,
+}
+/// An editing command for the page (see [`WebView::edit`]): what a
+/// browser's Edit menu does, to the page's selection or focused field.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EditCommand {
+    /// Copy the selection to the clipboard.
+    Copy,
+    /// Copy the selection and delete it from its field.
+    Cut,
+    /// Paste the clipboard into the focused field.
+    Paste,
+    /// Select all of the focused field, or of the page.
+    SelectAll,
+    /// Undo the last edit in the page.
+    Undo,
+    /// Redo it.
+    Redo,
 }
 
 /// What happened in a page, as the platform reports it (see
@@ -486,6 +529,13 @@ pub enum WebViewEvent {
     /// had then, on every engine alike (sent by the controller after each
     /// `NavigationFinished`). What a browser's history records; a title the
     /// page sets later comes as `TitleChanged`.
+    /// The page's process stopped answering (see
+    /// [`WebViewState::unresponsive`]).
+    #[doc(hidden)]
+    Unresponsive,
+    /// It answers again.
+    #[doc(hidden)]
+    Responsive,
     #[doc(hidden)]
     Visited {
         /// The page's URL.
@@ -627,6 +677,19 @@ pub trait WebViewBackend {
         done(Err(
             "this platform's web view can't clear a site's data".into()
         ));
+    }
+    /// Carry out an editing command (see `WebView::edit`). One that can't
+    /// says so.
+    #[doc(hidden)]
+    fn edit(&self, command: EditCommand) -> Result<(), String> {
+        let _ = command;
+        Err("this platform's web view takes no editing commands".into())
+    }
+    /// Reload, fetching everything again (see
+    /// `WebView::reload_ignoring_cache`). One that can't says so.
+    #[doc(hidden)]
+    fn reload_ignoring_cache(&self) -> Result<(), String> {
+        Err("this platform's web view can't reload ignoring its cache".into())
     }
     /// The page's pixels (see `WebView::snapshot`), calling `reply` once,
     /// on the UI thread. One that can't says so.
@@ -1064,6 +1127,26 @@ impl WebView {
             (Some(backend), Some(_)) => backend.clear_site_data(url, Box::new(done)),
         }
     }
+    /// Carry out `command` in the page, as a browser's Edit menu does
+    /// (copy and cut go to the system's clipboard, paste comes from it).
+    /// `Err` where the page isn't showing or the engine can't.
+    #[doc(hidden)]
+    pub fn edit(&self, command: EditCommand) -> Result<(), String> {
+        match self.backend() {
+            Some(backend) => backend.edit(command),
+            None => Err("the page isn't showing yet".into()),
+        }
+    }
+    /// Reload the page, fetching it and what it loads again rather than from
+    /// the cache (a browser's Shift+reload). `Err` where the page isn't
+    /// showing or the engine can't.
+    #[doc(hidden)]
+    pub fn reload_ignoring_cache(&self) -> Result<(), String> {
+        match self.backend() {
+            Some(backend) => backend.reload_ignoring_cache(),
+            None => Err("the page isn't showing yet".into()),
+        }
+    }
     /// The page's pixels, `area` of it, straight from its engine (not the
     /// window's frame: what covers the page isn't in it), to `reply` once.
     /// A page not yet showing, or an engine that can't, answers why not.
@@ -1476,6 +1559,36 @@ mod tests {
                 "this platform's web view can't take a snapshot",
                 "this platform's web view can't take a snapshot of the whole page",
             ]
+        );
+    }
+
+    #[test]
+    fn commands_an_engine_lacks_say_so() {
+        struct Plain;
+        impl WebViewBackend for Plain {
+            fn run(&self, _: WebViewCommand) {}
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        let runtime = crate::reactive::Runtime::new();
+        let web = WebView::new(&runtime, WebViewOptions::default());
+        assert_eq!(
+            web.edit(EditCommand::Copy),
+            Err("the page isn't showing yet".into())
+        );
+        assert_eq!(
+            web.reload_ignoring_cache(),
+            Err("the page isn't showing yet".into())
+        );
+        web.attach(Rc::new(Plain));
+        assert_eq!(
+            web.edit(EditCommand::Paste),
+            Err("this platform's web view takes no editing commands".into())
+        );
+        assert_eq!(
+            web.reload_ignoring_cache(),
+            Err("this platform's web view can't reload ignoring its cache".into())
         );
     }
 

@@ -292,6 +292,22 @@ impl UserData for WebUd {
         fields.add_field_method_get("can_go_back", |_, w| Ok(w.0.can_go_back()));
         fields.add_field_method_get("can_go_forward", |_, w| Ok(w.0.can_go_forward()));
         fields.add_field_method_get("focused", |_, w| Ok(w.0.focused()));
+        // The page's process stopped answering (not on macOS or with Ladybird).
+        fields.add_field_method_get("unresponsive", |_, w| {
+            Ok(w.0.state().with(|state| state.unresponsive))
+        });
+        // Why the page's process last ended: "crashed", "out_of_memory",
+        // "killed" or "unknown"; nil while it hasn't.
+        fields.add_field_method_get("termination", |_, w| {
+            Ok(w.0.state().with(|state| {
+                state.termination.map(|termination| match termination {
+                    zgx::web_view::Termination::Crashed => "crashed",
+                    zgx::web_view::Termination::OutOfMemory => "out_of_memory",
+                    zgx::web_view::Termination::Killed => "killed",
+                    _ => "unknown",
+                })
+            }))
+        });
         // The link under the pointer, or nil (WKWebView doesn't say).
         fields.add_field_method_get("hovered_link", |_, w| Ok(w.0.hovered_link()));
         // The page's theme colour as "#rrggbbaa", or nil.
@@ -425,6 +441,31 @@ impl UserData for WebUd {
                 }
             })?;
             Ok(crate::calls::PromiseUd(promise))
+        });
+        // An editing command, as a browser's Edit menu: "copy", "cut",
+        // "paste", "select_all", "undo" or "redo". Raises where the engine
+        // can't.
+        methods.add_method("edit", |_, w, command: String| {
+            use zgx::web_view::EditCommand;
+            let command = match command.as_str() {
+                "copy" => EditCommand::Copy,
+                "cut" => EditCommand::Cut,
+                "paste" => EditCommand::Paste,
+                "select_all" => EditCommand::SelectAll,
+                "undo" => EditCommand::Undo,
+                "redo" => EditCommand::Redo,
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "web:edit(`{other}`): \"copy\", \"cut\", \"paste\", \"select_all\", \"undo\" or \"redo\""
+                    )));
+                }
+            };
+            w.0.edit(command).map_err(mlua::Error::runtime)
+        });
+        // Reload, fetching the page and what it loads again (Shift+reload).
+        // Raises where the engine can't.
+        methods.add_method("reload_ignoring_cache", |_, w, ()| {
+            w.0.reload_ignoring_cache().map_err(mlua::Error::runtime)
         });
         // The page's pixels as an image: what shows (`"visible"`, the
         // default), or the whole document (`"full_page"`) where the engine can.

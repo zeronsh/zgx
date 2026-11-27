@@ -481,6 +481,8 @@ define_class!(
                 web.update_state(|state| {
                     state.loading = false;
                     state.error = Some("The page stopped responding.".into());
+                    // WebKit doesn't say why.
+                    state.termination = Some(zgx::web_view::Termination::Unknown);
                 });
                 web.emit(WebViewEvent::ProcessTerminated);
             });
@@ -1456,6 +1458,60 @@ impl WebViewBackend for MacWebView {
                 &done,
             );
         }
+    }
+    fn edit(&self, command: zgx::web_view::EditCommand) -> Result<(), String> {
+        use zgx::web_view::EditCommand;
+        // SAFETY: AppKit's standard actions, which WKWebView answers, and
+        // its undo manager's, on the main thread; a nil sender.
+        unsafe {
+            let sender = None::<&AnyObject>;
+            match command {
+                EditCommand::Copy => {
+                    let _: () = msg_send![&*self.view, copy: sender];
+                }
+                EditCommand::Cut => {
+                    let _: () = msg_send![&*self.view, cut: sender];
+                }
+                EditCommand::Paste => {
+                    let _: () = msg_send![&*self.view, paste: sender];
+                }
+                EditCommand::SelectAll => {
+                    let _: () = msg_send![&*self.view, selectAll: sender];
+                }
+                EditCommand::Undo | EditCommand::Redo => {
+                    let manager: Option<Retained<AnyObject>> = msg_send![&*self.view, undoManager];
+                    let Some(manager) = manager else {
+                        return Err("the page has no undo manager".into());
+                    };
+                    if command == EditCommand::Undo {
+                        let _: () = msg_send![&*manager, undo];
+                    } else {
+                        let _: () = msg_send![&*manager, redo];
+                    }
+                }
+                _ => return Err("WKWebView has no such editing command".into()),
+            }
+        }
+        Ok(())
+    }
+    fn reload_ignoring_cache(&self) -> Result<(), String> {
+        // A page of HTML the app gave is given again, as `Reload` does: its
+        // base URL is only its origin, with nothing at it to fetch.
+        let on_html = self.html.borrow().as_ref().is_some_and(|(_, base)| {
+            let shown = base
+                .as_ref()
+                .and_then(|base| base.absoluteString())
+                .map_or_else(|| "about:blank".into(), |url| url.to_string());
+            url_of(&self.view) == shown
+        });
+        if on_html {
+            self.run(WebViewCommand::Reload);
+            return Ok(());
+        }
+        // SAFETY: WKWebView's `reloadFromOrigin` on the main thread, as
+        // `run`'s reload.
+        let _ = unsafe { self.view.reloadFromOrigin() };
+        Ok(())
     }
     fn snapshot(
         &self,

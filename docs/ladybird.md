@@ -27,6 +27,8 @@ The host is found in the install `ZGX_LADYBIRD_DIR` names, else in `zgx-ladybird
 | Load a URL or HTML, reload, stop, back and forward, history steps | yes |
 | Title, URL, loading, history state and events, visits | yes |
 | The hovered link and the page's theme colour | yes |
+| Clipboard: what pages copy goes to the system's, pastes read it | yes |
+| Editing commands, reload ignoring the cache, why WebContent ended | yes; a page that stops answering isn't said |
 | Snapshots, of what shows and of the whole page | yes: what shows from the frame zgx holds, the whole page painted by WebContent |
 | Pointer, wheel, keys, input methods, focus, cursor | yes |
 | Resize and the display's scale | yes |
