@@ -1682,6 +1682,8 @@ declare extern type Web with
 	-- The page's theme colour (`<meta name="theme-color">`) as "#rrggbbaa";
 	-- nil without one, and on Windows (WebView2 doesn't say).
 	theme_color: string?
+	-- The page's icon, with `favicons = true`; nil without one, and on macOS.
+	favicon: Bitmap?
 	-- The page's process stopped answering (not on macOS or with Ladybird).
 	unresponsive: boolean
 	-- Why the page's process last ended; nil while it hasn't.
@@ -1738,6 +1740,8 @@ export type WebOptions = {
 	-- "platform" (the default) or "ladybird" where the host was built with
 	-- it; a page whose engine is missing shows a placeholder.
 	engine: ("platform" | "ladybird")?,
+	-- Keep each page's icon in `web.favicon`, as a browser's tab shows it.
+	favicons: boolean?,
 	[number]: never,
 }
 export type WebEvent = { kind: "started" | "committed" | "finished" | "failed" | "changed", url: string }
@@ -21649,6 +21653,8 @@ export type WebViewProps = {
 	-- "platform" (the default) or "ladybird" where the host was built with
 	-- it; a page whose engine is missing shows a placeholder.
 	engine: ("platform" | "ladybird")?,
+	-- Keep each page's icon in `web.favicon`, as a browser's tab shows it.
+	favicons: boolean?,
 	[number]: never,
 	-- A `ui.web()` controller, so the page outlives the node; the options
 	-- above make one otherwise.
