@@ -1197,6 +1197,14 @@ pub(crate) fn offer_current_key() -> bool {
         .currentEvent()
         .is_some_and(|event| offer_key(&event))
 }
+/// `ZGX_TRACE_KEYS`: where the app's shortcuts go, on stderr (macOS),
+/// read once.
+#[cfg(target_os = "macos")]
+pub(crate) fn trace_keys() -> bool {
+    static TRACE: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_TRACE_KEYS").is_some());
+    *TRACE
+}
 #[cfg(target_os = "macos")]
 pub(crate) fn offer_key(event: &objc2_app_kit::NSEvent) -> bool {
     let Some(mtm) = objc2::MainThreadMarker::new() else {
@@ -1533,9 +1541,7 @@ mod edit_keys {
         let block = block2::RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
             // SAFETY: AppKit passes a valid event for the handler's duration.
             let key = unsafe { event.as_ref() };
-            if zgx::env::var_os("ZGX_TRACE_KEYS").is_some()
-                && key.modifierFlags().contains(NSEventModifierFlags::Command)
-            {
+            if super::trace_keys() && key.modifierFlags().contains(NSEventModifierFlags::Command) {
                 trace(key);
             }
             if (CAPTURING.get() || is_edit_shortcut(key))

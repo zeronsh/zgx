@@ -8360,6 +8360,13 @@ impl WindowManager {
                     _ => None,
                 }
             });
+        if crate::app_menu::trace_keys() {
+            eprintln!(
+                "TRACE menu-action {:?} window={focused:?} of {}",
+                action.0,
+                self.hosts.len()
+            );
+        }
         if let Some(token) = focused {
             self.menu_action(token, action);
         }
@@ -8416,6 +8423,10 @@ impl WindowManager {
             return;
         }
         if !crate::app_menu::enabled_action(&self.factory.menus.borrow(), &action) {
+            #[cfg(target_os = "macos")]
+            if crate::app_menu::trace_keys() {
+                eprintln!("TRACE menu-action {:?}: no enabled item has it", action.0);
+            }
             return;
         }
         if let Some(host) = self.hosts.get_mut(&token) {

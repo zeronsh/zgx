@@ -1250,6 +1250,18 @@ focused, though the page takes ⌘K and Ghostty binds it, and the page never
 hears them, while ⌘U, not reserved, is still the page's first and then the
 app's. Passed on macOS 26 (M5), 2026-10-28.
 
+`scripts/macos_web_view_keys_probe.py` (CI's macOS job) runs the
+web_view_keys_probe example off-screen (`ZGX_OFFSCREEN=1`, no window shown)
+with a text field focused in a page, and sends keys straight to the hidden
+window as AppKit sends a key window's (its views' `performKeyEquivalent:`,
+the main menu, then `sendEvent:`). A browser's keys, reserved menu items
+(⌘T ⌘W ⌘L ⌘K ⌘1 ⌘/ ⌘, ⌃Tab), each fire the app's action and the page hears
+none of them; ⌘U, not reserved, is the page's and then the app's; ⌘C and ⌘A
+stay the field's, with no app action. Without a key window, a key the page
+leaves alone that WebKit sends on reaches the main menu but not zgx's own
+view, so a binding in no menu is the on-screen probe's to check. Passed on
+macOS 26 (M5), 2026-11-26.
+
 ## macOS Ghostty colours following the theme
 
 The ghostty_theme_probe example (`--features ghostty`) runs a program that

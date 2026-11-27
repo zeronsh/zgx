@@ -110,6 +110,13 @@ pages. `KeyBinding::reserved()` does the same for a key binding in no menu.
 Reserving an editing or system key (⌘C, ⌘V, ⌘Z, ⌘Q…) takes it from every page
 and terminal; a debug build says so once.
 
+On macOS, `ZGX_TRACE_KEYS=1` prints where shortcuts go, on stderr: each ⌘
+key's first responder and key window (`TRACE edit-keys`), each ⌘ or Control
+key a focused page or terminal is offered, as zgx names it, and whether it is
+reserved and a menu item took it (`TRACE native-key`; a page offered the same
+key twice left it alone, and WebKit sent it on), and each menu action with
+the window it went to, or that no enabled item has it (`TRACE menu-action`).
+
 Run `cargo run -p zgx-desktop --example platform_services` for an interactive
 example. `scripts/native_services_smoke.py` exercises a real GTK file portal in
 an isolated Sway session; it does not inject dialog results into application code.

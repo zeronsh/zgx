@@ -189,13 +189,28 @@ fn shortcut_of(
 pub(crate) fn take_reserved_key(view: &NSView, event: &objc2_app_kit::NSEvent) -> bool {
     // AppKit offers key equivalents to every view; only a focused one's
     // keys are its to give up.
-    if event.r#type() != objc2_app_kit::NSEventType::KeyDown
-        || !has_focus(view)
-        || !app_reserves_key(view, event)
-    {
+    if event.r#type() != objc2_app_kit::NSEventType::KeyDown || !has_focus(view) {
         return false;
     }
-    if !crate::app_menu::offer_key(event) {
+    if !app_reserves_key(view, event) {
+        if crate::app_menu::trace_keys() {
+            trace_native_key(view, event, "not reserved: the view's first");
+        }
+        return false;
+    }
+    let menu = crate::app_menu::offer_key(event);
+    if crate::app_menu::trace_keys() {
+        trace_native_key(
+            view,
+            event,
+            if menu {
+                "reserved: a menu item took it"
+            } else {
+                "reserved: no menu item took it, to the next responder"
+            },
+        );
+    }
+    if !menu {
         // SAFETY: AppKit's own responder chain, on the main thread; the
         // next responder is a live view or the window.
         if let Some(next) = unsafe { view.nextResponder() } {
@@ -203,6 +218,37 @@ pub(crate) fn take_reserved_key(view: &NSView, event: &objc2_app_kit::NSEvent) -
         }
     }
     true
+}
+
+/// `ZGX_TRACE_KEYS`: what became of a ⌘ or Control key the focused native
+/// `view` was offered, as zgx names it, and whether its window has a
+/// router (zgx's key bindings are reachable from it). A page offered the
+/// same key twice left it alone: WebKit sent it on.
+#[cold]
+fn trace_native_key(view: &NSView, event: &objc2_app_kit::NSEvent, what: &str) {
+    use objc2_app_kit::NSEventModifierFlags as Flags;
+    let flags = event.modifierFlags();
+    let modifiers = zgx::input::Modifiers {
+        shift: flags.contains(Flags::Shift),
+        control: flags.contains(Flags::Control),
+        alt: flags.contains(Flags::Option),
+        meta: flags.contains(Flags::Command),
+    };
+    // Shortcuts, not the page's typing.
+    if !modifiers.meta && !modifiers.control {
+        return;
+    }
+    let routed = view
+        .window()
+        .and_then(|window| window.contentView())
+        .and_then(|content| router_of(&content))
+        .is_some();
+    eprintln!(
+        "TRACE native-key {:?} as {:?} {modifiers:?} view={} routed={routed}: {what}",
+        event.charactersIgnoringModifiers().map(|k| k.to_string()),
+        shortcut_of(event, modifiers),
+        view.class().name().to_string_lossy(),
+    );
 }
 
 /// The router of `content`'s window, if it has native views.

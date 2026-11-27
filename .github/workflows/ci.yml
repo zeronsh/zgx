@@ -824,6 +824,10 @@ jobs:
         run: |
           cargo build -p zgx-desktop --example component_workload --locked
           python3 scripts/component_host_smoke.py target/debug/examples/component_workload --output "$RUNNER_TEMP/zgx-macos-host"
+      # Off-screen: no window is shown, the keys go straight to it.
+      - name: Shortcuts while a web page has the keyboard
+        if: ${{ !cancelled() }}
+        run: python3 scripts/macos_web_view_keys_probe.py --target-dir target
       # Keep textual diagnostics even if account artifact storage is exhausted.
       - name: Print Metal validation diagnostics
         if: always()
