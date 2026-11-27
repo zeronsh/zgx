@@ -888,6 +888,16 @@ jobs:
       # Clippy compiles what `cargo check` would, and lints the Windows-only
       # code Linux and macOS never build; WebView2 (off by default) with it.
       - run: cargo clippy --workspace --all-targets --features zgx-desktop/webview2 --locked -- -D warnings
+      # A WebView2 page in a window on the runner's desktop, driven through
+      # the example's stdin: certificate errors (no handler and a dropped
+      # responder cancel; proceeding is for that one load, a second page on
+      # the profile loading the server at that moment still asked) and
+      # credentials (scripts/windows_webview_smoke.py).
+      - name: WebView2 certificates and credentials
+        timeout-minutes: 20
+        run: |
+          cargo build -p zgx-desktop --features webview2 --example web_view --locked
+          python scripts/windows_webview_smoke.py target/debug/examples/web_view.exe --no-foreground --only trust
       # zgx-script's unit tests (its file events wait on Windows' own
       # notifications) and its bundled script paths (caught a Windows
       # separator bug), in one run.
