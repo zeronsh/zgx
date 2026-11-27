@@ -439,7 +439,8 @@ impl Scene {
             style => maps.outline_styles.insert(id, style),
         };
         self.sync_cold(id);
-        self.invalidate(id, PAINTED);
+        // Its own paint changed: damaged there.
+        self.invalidate(id, PAINT);
     }
     /// Draw node `id`'s image in nine pieces as `slice` cuts it (a
     /// nine-patch, `ImageSlice`); `None`: whole, as it fits.
