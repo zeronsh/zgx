@@ -5328,7 +5328,8 @@ impl ScriptHost {
         warning(
             Some(&self.0.warnings),
             "Luau was built with its asserts, which slow scripts by about a fifth: \
-             build with LUAU_CXXFLAGS=-DNDEBUG (docs/scripting.md, Cost)"
+             build it with zgx-mlua-sys, which leaves them out of release builds \
+             (docs/scripting.md, Cost)"
                 .into(),
         );
         // The handle `Lua::new` returns collects all garbage when it drops,
@@ -6164,4 +6165,16 @@ fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
         report.chunks = chunks;
     }
     report
+}
+
+#[cfg(test)]
+mod luau_asserts_tests {
+    /// Luau has its asserts exactly where this crate has debug assertions:
+    /// zgx-mlua-sys leaves them out of a build without them, and says so.
+    #[test]
+    fn luau_asserts_follow_debug_assertions() {
+        if cfg!(luau_asserts) != cfg!(debug_assertions) {
+            panic!("Luau's asserts don't follow this build's debug assertions");
+        }
+    }
 }

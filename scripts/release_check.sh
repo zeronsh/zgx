@@ -55,7 +55,7 @@ cd "$(git rev-parse --show-toplevel)"
 # `--allow-dirty`: check uncommitted changes too (a release itself is clean).
 dirty=""
 if [ "${1:-}" = --allow-dirty ]; then dirty=--allow-dirty; fi
-forks="harfrust swash cosmic-text taffy mlua vte alacritty-terminal zune-jpeg arboard"
+forks="harfrust swash cosmic-text taffy mlua-sys mlua vte alacritty-terminal zune-jpeg arboard"
 # Where packages are unpacked, the forks' beside the workspace's (3 reads
 # them there).
 target="${CARGO_TARGET_DIR:-target}"
@@ -67,13 +67,14 @@ for fork in $forks; do
     echo "== zgx-$fork (vendor/$fork)"
     # mlua builds for one Lua, chosen by a feature: zgx's, Luau.
     features=""
-    if [ "$fork" = mlua ]; then features="--features luau"; fi
+    if [ "$fork" = mlua ] || [ "$fork" = mlua-sys ]; then features="--features luau"; fi
     # A fork is given only the forks it depends on: a patch it never uses
     # is written into its own lockfile (`[[patch.unused]]`, harfrust's and
     # taffy's are committed), which leaves the checkout dirty.
     deps=""
     if [ "$fork" = cosmic-text ]; then deps="harfrust swash"; fi
     if [ "$fork" = alacritty-terminal ]; then deps="vte"; fi
+    if [ "$fork" = mlua ]; then deps="mlua-sys"; fi
     given=""
     for dep in $deps; do
         given="$given --config patch.crates-io.zgx-$dep.path=\"vendor/$dep\""
