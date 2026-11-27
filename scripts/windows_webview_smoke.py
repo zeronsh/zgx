@@ -263,6 +263,61 @@ def key_case(proc, window, lines, at):
     print("ok: Ctrl+F in the page reaches the app, and its find finds the heading")
 
 
+def all_windows_of(pid):
+    """Every top-level window of process `pid`, shown or not: (class, title,
+    visible, client size), to tell a window not made from one made hidden
+    or empty."""
+    user32 = ctypes.windll.user32
+    found = []
+    name = ctypes.create_unicode_buffer(256)
+
+    def visit(hwnd, _):
+        owner = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid:
+            user32.GetClassNameW(hwnd, name, 256)
+            found.append((name.value, win.title(hwnd), bool(user32.IsWindowVisible(hwnd)), win.client_size(hwnd)))
+        return True
+
+    user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(visit), 0)
+    return found
+
+
+def launch(command, env, controlled, timeout=90.0):
+    """Start the example and wait for its window: (process, its lines, the
+    window). A launch that shows none in `timeout` is told in full (alive or
+    not, CPU it used, every window it made, its last lines) and stopped,
+    then the example is launched once more: on CI's runners a first launch
+    (a new executable, WebView2's runtime started cold) has taken from 17 s
+    to over 60 s to show its window. A second launch showing none fails,
+    with both told."""
+    told = []
+    for attempt in (1, 2):
+        lines = []
+        started = time.monotonic()
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                stdin=subprocess.PIPE if controlled else None, env=env)
+        threading.Thread(target=lambda lines=lines, proc=proc: lines.extend(proc.stdout), daemon=True).start()
+        try:
+            window = win.wait_window(proc, timeout=timeout)
+            print(f"launch {attempt}: the window showed after {time.monotonic() - started:.1f} s")
+            return proc, lines, window
+        except RuntimeError as error:
+            state = "running" if proc.poll() is None else f"exited with {proc.returncode}"
+            try:
+                cpu = f"{win.cpu_seconds(proc.pid):.1f} s of CPU"
+            except OSError:
+                cpu = "CPU unknown"
+            windows = all_windows_of(proc.pid) if proc.poll() is None else []
+            told.append(f"launch {attempt}: {error} in {time.monotonic() - started:.0f} s ({state}, {cpu}); "
+                        f"its windows: {windows or 'none'}; it said:\n    " + "\n    ".join(l.rstrip() for l in lines[-40:]))
+            proc.kill()
+            proc.wait(10)
+            if attempt == 1:
+                print("::warning::" + told[-1].replace("\n", " | ") + " -- launching once more")
+    raise RuntimeError("no launch showed a window:\n  " + "\n  ".join(told))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=pathlib.Path)
@@ -272,15 +327,12 @@ def main():
     parser.add_argument("--only", choices=["trust"],
                         help="with --no-foreground, only the page loading and these cases (CI's Windows job)")
     args = parser.parse_args()
-    lines = []
     save_dir = pathlib.Path(tempfile.mkdtemp(prefix="zgx-downloads-"))
     command = [str(args.binary.resolve())] + (["--control"] if args.no_foreground else [])
-    proc = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        stdin=subprocess.PIPE if args.no_foreground else None,
-        env=dict(os.environ, ZGX_EXAMPLE_SAVE_DIR=str(save_dir), ZGX_WEB_SETTINGS="1"),
-    )
-    threading.Thread(target=lambda: lines.extend(proc.stdout), daemon=True).start()
+    # ZGX_PROFILE: zgx's startup marks (and what its kept shaders did by the
+    # first present) among the app's lines, for a launch that shows nothing.
+    env = dict(os.environ, ZGX_EXAMPLE_SAVE_DIR=str(save_dir), ZGX_WEB_SETTINGS="1", ZGX_PROFILE="1")
+    proc, lines, window = launch(command, env, args.no_foreground)
     heard = lambda prefix: any(line.startswith(prefix) for line in lines)
 
     def shot(name):
@@ -291,12 +343,6 @@ def main():
         return capture
 
     try:
-        # A cold runner's first launch (a new executable, WebView2's
-        # environment and the GPU's shaders made afresh) took past 15 s.
-        try:
-            window = win.wait_window(proc, timeout=60.0)
-        except RuntimeError as error:
-            raise RuntimeError(f"{error}; the app said:\n  " + "\n  ".join(lines[-30:])) from None
         scale = win.dpi(window) / 96
         if args.no_foreground:
             at = lambda x, y: (round(x * scale), round(y * scale))
