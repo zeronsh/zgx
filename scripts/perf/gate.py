@@ -189,6 +189,10 @@ SCENES = [
     # which puts every line below in a block and back.
     ('note-letters', 'zgx-script', 'note_bench', {}),
     ('note-fence', 'zgx-script', 'note_bench', {'SCENE': 'fence'}),
+    # A text area's marks a Rust closure gives (marks_bench): a wash, a rule
+    # and a number beside each of 400 lines, made at each call, scrolled a
+    # line a frame.
+    ('marks-rust', 'zgx-script', 'marks_bench', {}),
     ('style', 'zgx', 'style_bench', {}),
     # A terminal streaming a build log (16, 256 and true colours, styles,
     # wrapping, a progress line rewritten), its output replayed on the

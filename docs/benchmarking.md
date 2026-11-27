@@ -278,6 +278,11 @@ and marks given by their highlighter's state: letters typed and scrolls, with
 no fence changed, and a fence typed at its top and undone, which puts every
 line below in a block and back. Nothing is drawn.
 
+**Marks a Rust closure gives.** `marks-rust` (`marks_bench`) scrolls a
+400-line text area a line a frame, its `line_marks` a Rust closure giving a
+wash, a rule and a number beside each line, made at each call (Luau's are
+kept, as `note-letters` has them). Nothing is drawn.
+
 **The floor under a frame with the GPU encode.** Most of zgx's `RENDER=1`
 frame is what any Metal frame costs. `crates/zgx-gpu/examples/mtl_floor.rs`
 times a bare one (a command buffer, one empty render pass into a 2048 × 1536

@@ -10945,6 +10945,9 @@ struct MarksDrawn {
     /// What its marks with a look (`MarkLook`) are drawn with: none until one
     /// has shown.
     looks: Option<Box<MarkLooks>>,
+    /// What the last draw held of its lines' marks, emptied: its lists'
+    /// room kept for the next.
+    given: Given,
 }
 /// What a text area's marks with a look (`MarkLook`) are drawn with.
 #[derive(Default)]
@@ -10977,19 +10980,27 @@ fn place_line_marks(
         .map(|drawn| drawn.moved.clone())
         .unwrap_or_default();
     // What marks with a look are drawn with, once one has shown here.
-    let (mut looks, last) = (code.marks_drawn.borrow_mut().as_mut())
-        .map(|drawn| (drawn.looks.take(), drawn.shown.clone()))
+    let (mut looks, last, mut given) = (code.marks_drawn.borrow_mut().as_mut())
+        .map(|drawn| {
+            let given = std::mem::take(&mut drawn.given);
+            (drawn.looks.take(), drawn.shown.clone(), given)
+        })
         .unwrap_or_default();
     if let Some(looks) = &mut looks {
         looks.turns.begin(lines.line_count());
     }
-    let (given, under, over) =
-        marks_placed(lines, shown.clone(), inner_width, &moved, |look, at| {
+    marks_placed(
+        &mut given,
+        lines,
+        shown.clone(),
+        (inner_width, &moved),
+        |look, at| {
             let looks = looks.get_or_insert_with(|| MarkLooks::new(lines, &last));
             looks.angle(look, at, theme)
-        });
+        },
+    );
     let mut drawn = code.marks_drawn.borrow_mut();
-    if under.is_empty() && over.is_empty() {
+    if given.under.is_empty() && given.over.is_empty() {
         // None now: the layers go with their marks.
         if let Some(drawn) = drawn.take() {
             for layer in [drawn.under, drawn.over].into_iter().flatten() {
@@ -11011,10 +11022,11 @@ fn place_line_marks(
             storage.scroll_reveals.borrow_mut().turning(root, now);
         }
     }
-    for (marks, layer, nodes, above) in [
-        (under, &mut drawn.under, &mut drawn.under_nodes, false),
-        (over, &mut drawn.over, &mut drawn.over_nodes, true),
+    for (above, layer, nodes) in [
+        (false, &mut drawn.under, &mut drawn.under_nodes),
+        (true, &mut drawn.over, &mut drawn.over_nodes),
     ] {
+        let marks = if above { &given.over } else { &given.under };
         if marks.is_empty() && layer.is_none() {
             continue;
         }
@@ -11058,24 +11070,30 @@ fn place_line_marks(
         );
     }
     drawn.looks = looks;
+    given.clear();
+    drawn.given = given;
 }
 /// The marks of the lines `shown`, placed: those under the text, and those
-/// over it, with the lines' marks they are of. `angle`: given each mark's
-/// look, its line and its place there, the angle it shows at.
+/// over it, into `given` (emptied), with the lines' marks they are of.
+/// `angle`: given each mark's look, its line and its place there, the angle
+/// it shows at.
 #[inline(always)]
 fn marks_placed(
+    given: &mut Given,
     lines: &crate::editor_lines::LinesLayout,
     shown: std::ops::Range<usize>,
-    inner_width: f32,
-    moved: &[u32],
+    (inner_width, moved): (f32, &[u32]),
     mut angle: impl FnMut(&MarkLook, (usize, usize)) -> f32,
-) -> (Given, Vec<MarkAt>, Vec<MarkAt>) {
-    let mut given = Given::default();
-    let mut under = Vec::new();
-    let mut over = Vec::new();
+) {
     if !lines.has_marks() {
-        return (given, under, over);
+        return;
     }
+    let Given {
+        kept,
+        each,
+        under,
+        over,
+    } = given;
     for i in shown {
         let inset = lines.inset(i);
         if inset.hidden {
@@ -11089,14 +11107,15 @@ fn marks_placed(
             MarksOf::Kept(marks) if marks.is_empty() => continue,
             MarksOf::Each(marks) if marks.is_empty() => continue,
             MarksOf::Kept(marks) => {
-                given.kept.push(marks);
-                let line = given.kept.len() as u32 - 1;
-                (&given.kept[line as usize][..], line)
+                kept.push(marks);
+                let line = kept.len() as u32 - 1;
+                (&kept[line as usize][..], line)
             }
+            // Moved into one list, their own let go at once.
             MarksOf::Each(marks) => {
-                given.each.push(marks);
-                let line = given.each.len() as u32 - 1;
-                (&given.each[line as usize][..], line | Given::EACH)
+                let start = each.len();
+                each.extend(marks);
+                (&each[start..], start as u32 | Given::EACH)
             }
         };
         for (place, mark) in marks.iter().enumerate() {
@@ -11138,7 +11157,6 @@ fn marks_placed(
             }
         }
     }
-    (given, under, over)
 }
 impl MarkLooks {
     /// As a text area's first mark with a look is drawn, `lines` its text and
@@ -11192,23 +11210,37 @@ fn aligned_x(
 /// who gives them, shared, and those made for it.
 #[derive(Default)]
 struct Given {
+    /// Lines' marks kept by who gives them (Luau's), shared.
     kept: Vec<Rc<[LineMark]>>,
-    each: Vec<Vec<LineMark>>,
+    /// Marks made for this draw (a Rust closure's), in one list.
+    each: Vec<LineMark>,
+    /// The marks placed: under the text, and over it.
+    under: Vec<MarkAt>,
+    over: Vec<MarkAt>,
 }
 impl Given {
-    /// A `MarkAt::mark` line of `each`.
+    /// A `MarkAt::mark` of `each`: its first mark's place there.
     const EACH: u32 = 1 << 31;
     #[inline]
     fn mark(&self, (line, mark): (u32, u32)) -> &LineMark {
         if line & Self::EACH == 0 {
             &self.kept[line as usize][mark as usize]
         } else {
-            &self.each[(line & !Self::EACH) as usize][mark as usize]
+            &self.each[(line & !Self::EACH) as usize + mark as usize]
         }
+    }
+    /// Emptied, its lists' room kept.
+    fn clear(&mut self) {
+        self.kept.clear();
+        self.each.clear();
+        self.under.clear();
+        self.over.clear();
     }
 }
 /// A mark in view: where it shows, which of the given lines' marks it is (the
-/// line among those given, the mark among its own), and its turn.
+/// line among those kept and the mark among its own, or where its line's
+/// start in `Given::each` and the mark among them), and its turn.
+#[derive(Clone, Copy)]
 struct MarkAt {
     rect: Rect,
     mark: (u32, u32),
@@ -11269,7 +11301,7 @@ fn paint_line_marks(
     s: &mut Scene,
     layer: NodeId,
     nodes: &mut Vec<NodeId>,
-    (given, marks): (&Given, Vec<MarkAt>),
+    (given, marks): (&Given, &[MarkAt]),
     font: &FontStyle,
     mut looks: Option<&mut MarkLooks>,
 ) {
@@ -11284,7 +11316,7 @@ fn paint_line_marks(
         nodes.push(s.append(layer, NodeKind::Rect(Color(0, 0, 0, 0)), Style::default()));
     }
     let mut ids = nodes.iter().copied();
-    for at in marks {
+    for &at in marks {
         let MarkAt {
             rect,
             mark,
