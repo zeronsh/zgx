@@ -1948,7 +1948,14 @@ impl Page {
                                 );
                                 (api.webkit_credential_free)(credential);
                             }
-                            None => (api.webkit_authentication_request_cancel)(request),
+                            // Without credentials: the request goes on to the
+                            // server's refusal, which the page shows, as a
+                            // browser's cancelled dialog does (`_cancel` would
+                            // abort the whole load and keep the last page).
+                            None => (api.webkit_authentication_request_authenticate)(
+                                request,
+                                std::ptr::null_mut(),
+                            ),
                         }
                         (api.g_object_unref)(request);
                     }
