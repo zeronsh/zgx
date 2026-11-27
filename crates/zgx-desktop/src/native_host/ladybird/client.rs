@@ -111,12 +111,17 @@ static DELIVERIES: Mutex<Vec<Delivery>> = Mutex::new(Vec::new());
 type Waker = Arc<dyn Fn() + Send + Sync>;
 static WAKERS: Mutex<Vec<(u64, Waker)>> = Mutex::new(Vec::new());
 
-/// The host's executable in `$ZGX_LADYBIRD_DIR`, else where zgx-ladybird-sys
-/// installed it at build time: `bin/zgx-ladybird-host` (`MacOS/` on macOS).
+/// The host's executable in an install of zgx-ladybird-sys's: the one
+/// `$ZGX_LADYBIRD_DIR` names, else `zgx-ladybird` beside the app's
+/// executable (where an app ships it); `bin/zgx-ladybird-host` in it
+/// (`MacOS/` on macOS).
 pub(super) fn executable() -> Option<PathBuf> {
     let dir = std::env::var_os("ZGX_LADYBIRD_DIR")
         .map(PathBuf::from)
-        .or_else(|| zgx_ladybird_sys::install_dir().map(PathBuf::from))?;
+        .or_else(|| {
+            let exe = std::env::current_exe().ok()?;
+            Some(exe.parent()?.join("zgx-ladybird"))
+        })?;
     let bin = if cfg!(target_os = "macos") {
         "MacOS"
     } else {
@@ -132,7 +137,7 @@ pub(super) fn host() -> Option<Arc<Host>> {
     HOST.get_or_init(|| {
         let Some(path) = executable() else {
             eprintln!(
-                "zgx: Ladybird web views unavailable: no zgx-ladybird-host (build with zgx-desktop's `ladybird` feature, or set ZGX_LADYBIRD_DIR)"
+                "zgx: Ladybird web views unavailable: no zgx-ladybird-host in ZGX_LADYBIRD_DIR or zgx-ladybird beside the executable (crates/zgx-ladybird-sys builds one)"
             );
             return None;
         };

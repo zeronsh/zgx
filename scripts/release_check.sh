@@ -116,7 +116,7 @@ mkdir -p "$app/src"
     printf '[package]\nname = "zgx-fresh-app"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n\n'
     # A workspace of its own, not a member of zgx's when under its target/.
     printf '[workspace]\n\n[dependencies]\nzgx-script = "=%s"\n\n[patch.crates-io]\n' "$zgx"
-    for crate in zgx zgx-components zgx-text zgx-gpu zgx-3d zgx-audio zgx-module zgx-module-macros zgx-desktop zgx-script zgx-run zgx-terminal zgx-ghostty-sys zgx-ladybird-sys; do
+    for crate in zgx zgx-components zgx-text zgx-gpu zgx-3d zgx-audio zgx-module zgx-module-macros zgx-desktop zgx-script zgx-run zgx-terminal zgx-ghostty-sys; do
         printf '%s = { path = "../package/%s-%s" }\n' "$crate" "$crate" "$zgx"
     done
     for fork in $forks; do
@@ -168,11 +168,8 @@ ONLY = {
     "zgx-desktop/webkitgtk": {"linux"},
     # Turned on through zgx-desktop/ghostty, which gives it what it links to.
     "zgx-ghostty-sys/link": set(),
-    # Ladybird's client is Unix's; building Ladybird itself takes an hour, which
-    # a release check doesn't spend (crates/zgx-ladybird-sys builds it alone).
+    # Ladybird's client is Unix's (zgx-ladybird-sys, unpublished, builds the host).
     "zgx-desktop/ladybird": {"linux", "macos"},
-    "zgx-desktop/ladybird-build": set(),
-    "zgx-ladybird-sys/build": set(),
 }
 metadata = json.loads(subprocess.check_output(
     ["cargo", "metadata", "--format-version", "1", "--no-deps", "--locked"]))

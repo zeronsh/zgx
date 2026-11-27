@@ -5589,7 +5589,6 @@ dependencies = [
  "zgx-fingerprint",
  "zgx-ghostty-sys",
  "zgx-gpu",
- "zgx-ladybird-sys",
  "zgx-run",
  "zgx-script",
  "zgx-terminal",

@@ -11,8 +11,8 @@
 //! the same checks, in zgx's points, with AppKit's frames at the zoom.
 //! `--unaccelerated`: the page painted on the CPU (Linux;
 //! `WebViewOptions::accelerated`). `--ladybird`: the page in Ladybird (the
-//! `ladybird` feature, a host in `ZGX_LADYBIRD_DIR` or built by
-//! `ladybird-build`; `WebViewOptions::engine`). `--control`: commands read a line each
+//! `ladybird` feature and a host in `ZGX_LADYBIRD_DIR`, which
+//! crates/zgx-ladybird-sys builds; `WebViewOptions::engine`). `--control`: commands read a line each
 //! from stdin, so a probe can drive the page with no input sent:
 //! `find <text>` (prints `FIND`), `save-link` (the page's script clicks its
 //! download link), `open-download` (the app opens the same file itself), `reload` and `downloads save` or `downloads cancel` (the app's
