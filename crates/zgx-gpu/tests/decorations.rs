@@ -408,3 +408,54 @@ fn dotted_and_dashed_outlines_ring_the_box() {
     assert!((6..=12).contains(&dashed), "{dashed} changes: {line:?}");
     assert!(pixels[(14 * 140 + 10) * 4] < 25, "nothing past the outline");
 }
+
+/// A shown outline made dotted, dashed or solid again, with nothing else
+/// changed, repaints where it is: the frame drawn from the scene's damage is
+/// the one drawn whole.
+#[test]
+fn an_outline_restyled_alone_repaints() {
+    let mut scene = Scene::new(140., 80.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Quad(QuadStyle {
+            fill: Color(40, 40, 40, 255),
+            outline: Some(Outline {
+                width: 3.,
+                color: Color(255, 255, 255, 255),
+                offset: 4.,
+            }),
+            ..Default::default()
+        }),
+        Style {
+            width: Some(80.),
+            height: Some(40.),
+            ..Default::default()
+        },
+    );
+    scene.set_transform(node, Transform { x: 30., y: 20. });
+    let mut gpu = GpuRenderer::new(140, 80).unwrap();
+    let report = scene.flush();
+    gpu.render(&scene, &report.damage).unwrap();
+    for style in [
+        BorderStyle::DOTTED,
+        BorderStyle::Dashed {
+            length: 10.,
+            gap: 6.,
+        },
+        BorderStyle::Solid,
+    ] {
+        scene.set_outline_style(node, style);
+        let report = scene.flush();
+        assert!(!report.damage.is_empty(), "{style:?}: no damage");
+        gpu.render(&scene, &report.damage).unwrap();
+        let mut whole = GpuRenderer::new(140, 80).unwrap();
+        whole
+            .render(&scene, &[Rect::new(0., 0., 140., 80.)])
+            .unwrap();
+        assert!(
+            gpu.readback().unwrap() == whole.readback().unwrap(),
+            "{style:?}: drawn otherwise than whole"
+        );
+    }
+}
