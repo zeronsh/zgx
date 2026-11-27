@@ -142,6 +142,15 @@ api! {
     fn webkit_web_view_get_snapshot(Ptr, c_int, c_int, Ptr, unsafe extern "C" fn(Ptr, Ptr, Ptr), Ptr);
     fn webkit_web_view_get_snapshot_finish(Ptr, Ptr, *mut *mut GError) -> Ptr;
     fn webkit_web_view_get_favicon(Ptr) -> Ptr;
+    fn webkit_authentication_request_get_host(Ptr) -> *const c_char;
+    fn webkit_authentication_request_get_realm(Ptr) -> *const c_char;
+    fn webkit_authentication_request_get_scheme(Ptr) -> c_int;
+    fn webkit_authentication_request_is_for_proxy(Ptr) -> gboolean;
+    fn webkit_authentication_request_is_retry(Ptr) -> gboolean;
+    fn webkit_authentication_request_authenticate(Ptr, Ptr);
+    fn webkit_authentication_request_cancel(Ptr);
+    fn webkit_credential_new(*const c_char, *const c_char, c_int) -> Ptr;
+    fn webkit_credential_free(Ptr);
     fn gtk_offscreen_window_get_type() -> GType;
     fn gtk_window_get_type() -> GType;
     fn gtk_window_resize(Ptr, c_int, c_int);

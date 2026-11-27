@@ -132,6 +132,36 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+/// WebView2's certificate error status in words.
+fn certificate_status(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> String {
+    match status {
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT => "wrong host".into(),
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED => "expired".into(),
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED => "revoked".into(),
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID => "invalid".into(),
+        COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS => {
+            "client certificate".into()
+        }
+        other => format!("certificate error ({})", other.0),
+    }
+}
+/// A `WWW-Authenticate` header's scheme (lowercase) and realm.
+fn auth_header(header: &str) -> (String, String) {
+    let scheme = header
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let realm = header
+        .split("realm=")
+        .nth(1)
+        .map(|rest| {
+            let rest = rest.trim_start_matches('"');
+            rest.split(['"', ',']).next().unwrap_or("").to_owned()
+        })
+        .unwrap_or_default();
+    (scheme, realm)
+}
 fn take(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> String {
     let mut value = PWSTR::null();
     match get(&mut value) {
@@ -466,6 +496,11 @@ pub(crate) struct Page {
     serving: RefCell<Option<String>>,
     /// The URL of the last top-frame navigation that started.
     navigating: RefCell<String>,
+    /// The server the app loaded past a certificate error from, for this
+    /// page alone: its host, the certificate (PEM) and the page's URL.
+    /// That page's own further requests to it are let through until the
+    /// next top-frame navigation starts; nothing else is.
+    proceeded: RefCell<Option<(String, String, String)>>,
     /// The folder of HTML shown with a file base (see `served_url`).
     files: RefCell<Option<std::path::PathBuf>>,
     /// The app schemes it serves (its options' that WebView2 can take).
@@ -926,6 +961,7 @@ pub(crate) fn backend(web: &WebView, parent: HWND, scale: f32) -> Option<Rc<Page
         loading: Cell::new(false),
         html: RefCell::new(None),
         serving: RefCell::new(None),
+        proceeded: RefCell::new(None),
         navigating: RefCell::new(String::new()),
         files: RefCell::new(None),
         schemes: RefCell::new(Vec::new()),
@@ -1349,6 +1385,164 @@ impl Page {
                             let link = link.clone();
                             page.post(move |web| {
                                 web.update_state(|state| state.hovered_link = link)
+                            });
+                        });
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+            }
+            // Certificate errors are the app's, and proceeding is for one
+            // load alone: WebView2 keeps an allow for the host and
+            // certificate for the session, so it's cleared as soon as it's
+            // given. The same page's further requests to that server (its
+            // pictures, its scripts) go through with it; any other load, in
+            // this view or another on the profile, is asked again.
+            if let Ok(view14) = view.cast::<ICoreWebView2_14>() {
+                let page = on.clone();
+                let clearer = view14.clone();
+                let _ = view14.add_ServerCertificateErrorDetected(
+                    &ServerCertificateErrorDetectedEventHandler::create(Box::new(
+                        move |sender, args| {
+                            let Some(args) = args else { return Ok(()) };
+                            let url = take(|v| args.RequestUri(v));
+                            let host = zgx::web_view::site_host(&url).unwrap_or_default();
+                            let pem = args
+                                .ServerCertificate()
+                                .ok()
+                                .map(|certificate| take(|v| certificate.ToPemEncoding(v)))
+                                .unwrap_or_default();
+                            let source = sender
+                                .map(|sender| take(|v| sender.Source(v)))
+                                .unwrap_or_default();
+                            let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+                            let _ = args.ErrorStatus(&mut status);
+                            let clear = {
+                                let clearer = clearer.clone();
+                                move || {
+                                    let _ = clearer.ClearServerCertificateErrorActions(
+                                        &ClearServerCertificateErrorActionsCompletedHandler::create(
+                                            Box::new(|_| Ok(())),
+                                        ),
+                                    );
+                                }
+                            };
+                            // This page's own requests to the server it proceeded past.
+                            let same_page = Cell::new(false);
+                            page(&|page| {
+                                same_page.set(page.proceeded.borrow().as_ref().is_some_and(
+                                    |(h, p, at)| {
+                                        *h == host && *p == pem && (*at == source || *at == url)
+                                    },
+                                ));
+                            });
+                            if same_page.get() {
+                                let _ = args.SetAction(
+                                    COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
+                                );
+                                clear();
+                                return Ok(());
+                            }
+                            // The page proceeding: the one loading, or the one
+                            // asking for a picture or script from the server.
+                            let navigation = Cell::new(false);
+                            page(&|page| navigation.set(*page.navigating.borrow() == url));
+                            let at = if navigation.get() {
+                                url.clone()
+                            } else {
+                                source
+                            };
+                            let deferral = args.GetDeferral()?;
+                            let answer = {
+                                let page = page.clone();
+                                let (host, pem) = (host.clone(), pem);
+                                move |proceed: bool| {
+                                    let action = if proceed {
+                                        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW
+                                    } else {
+                                        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL
+                                    };
+                                    // SAFETY: WebView2 on the UI thread, where answers come.
+                                    unsafe {
+                                        let _ = args.SetAction(action);
+                                        let _ = deferral.Complete();
+                                    }
+                                    if proceed {
+                                        page(&|page| {
+                                            *page.proceeded.borrow_mut() =
+                                                Some((host.clone(), pem.clone(), at.clone()));
+                                        });
+                                        clear();
+                                    }
+                                }
+                            };
+                            let error = certificate_status(status);
+                            page(&|page| {
+                                let answer = answer.clone();
+                                let (url, host, error) = (url.clone(), host.clone(), error.clone());
+                                page.post(move |web| {
+                                    web.certificate_error(
+                                        zgx::web_view::CertificateError::new(
+                                            url, host, error, true,
+                                        ),
+                                        zgx::web_view::CertificateResponder::new(true, answer),
+                                    );
+                                });
+                            });
+                            Ok(())
+                        },
+                    )),
+                    &mut token,
+                );
+            }
+            // Credentials a server asks for are the app's, for that
+            // challenge alone; without an answer the page gets the refusal.
+            if let Ok(view10) = view.cast::<ICoreWebView2_10>() {
+                let page = on.clone();
+                let _ = view10.add_BasicAuthenticationRequested(
+                    &BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let url = take(|v| args.Uri(v));
+                        let header = take(|v| args.Challenge(v));
+                        let (scheme, realm) = auth_header(&header);
+                        let host = zgx::web_view::site_host(&url).unwrap_or_default();
+                        let deferral = args.GetDeferral()?;
+                        let answer = move |credentials: Option<(String, String)>| {
+                            // SAFETY: WebView2 on the UI thread, where answers come.
+                            unsafe {
+                                match credentials {
+                                    Some((user, password)) => {
+                                        if let Ok(response) = args.Response() {
+                                            let _ = response.SetUserName(&HSTRING::from(user));
+                                            let _ = response.SetPassword(&HSTRING::from(password));
+                                        }
+                                    }
+                                    None => {
+                                        let _ = args.SetCancel(true);
+                                    }
+                                }
+                                let _ = deferral.Complete();
+                            }
+                        };
+                        let answer = Rc::new(RefCell::new(Some(answer)));
+                        page(&|page| {
+                            let answer = answer.clone();
+                            let challenge = zgx::web_view::AuthChallenge::new(
+                                url.clone(),
+                                host.clone(),
+                                realm.clone(),
+                                scheme.clone(),
+                                false,
+                                false,
+                            );
+                            page.post(move |web| {
+                                let responder =
+                                    zgx::web_view::AuthResponder::new(move |credentials| {
+                                        if let Some(answer) = answer.borrow_mut().take() {
+                                            answer(credentials);
+                                        }
+                                    });
+                                web.auth_challenge(challenge, responder);
                             });
                         });
                         Ok(())
@@ -1799,6 +1993,8 @@ impl Page {
         if main_frame {
             self.loading.set(true);
             self.navigating.replace(url.clone());
+            // A load past a certificate error was that load alone.
+            self.proceeded.replace(None);
             self.post(move |web| {
                 web.update_state(|state| {
                     state.error = None;

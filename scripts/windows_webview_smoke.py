@@ -20,6 +20,12 @@ when a system overlay (a notification, Start) holds the foreground for 60 s.
 for and each download it starts (`WEB_PERMISSION`, `WEB_DOWNLOAD_STARTING`).
 A page's own click that starts no download fails the run; the app opening
 the file itself (`open-download`) then only lets the handler's checks run.
+Then certificates and credentials (`trust_servers`): with no handler, or a
+responder dropped, a server whose certificate isn't trusted loads nothing
+and a credentials challenge gets the refusal; proceeding loads that one
+page, and the next load from the server, in the page or in a second page on
+the same profile, is asked again, even the second page's load started the
+moment the app proceeded.
 """
 import argparse
 import os
@@ -30,6 +36,7 @@ import tempfile
 import threading
 import time
 
+import trust_servers
 import windows_input as win
 
 BACKGROUND = (0x14, 0x15, 0x19)
@@ -158,6 +165,71 @@ def controlled(proc, window, lines, heard, save_dir):
     return unclicked
 
 
+def trust_cases(proc, lines, heard):
+    """Certificate errors and credentials, through the example's stdin."""
+    def send(command):
+        proc.stdin.write(command + "\n")
+        proc.stdin.flush()
+
+    (_, tls), (_, auth) = trust_servers.https(), trust_servers.basic_auth()
+    count = lambda prefix: sum(line.startswith(prefix) for line in lines)
+    loaded = lambda prefix, path: any(line.startswith(prefix) and f'"{path}"' in line for line in lines)
+
+    def refused(path, what):
+        time.sleep(3.0)
+        assert not loaded("MESSAGE ", path), f"{what}: the page loaded past the certificate"
+
+    send(f"load {tls}/none")
+    refused("/none", "no handler")
+    assert not heard("CERT "), "a certificate error reached a handler the app never set"
+    print("ok: with no certificate handler the untrusted server loads nothing")
+    send("cert drop")
+    wait_for(lambda: heard("CERTS drop"), "the dropping handler")
+    send(f"load {tls}/drop")
+    wait_for(lambda: heard("CERT 127.0.0.1 can_proceed=true"), "the handler to hear the certificate error", 20)
+    refused("/drop", "a dropped responder")
+    print("ok: a certificate responder dropped unanswered loads nothing")
+    send("cert race")
+    wait_for(lambda: heard("CERTS race"), "the proceeding handler")
+    asked, second_asked = count("CERT "), count("SECOND_CERT ")
+    send(f"load {tls}/proceed")
+    wait_for(lambda: loaded("MESSAGE ", "/proceed"), "the page the app proceeded to", 20)
+    wait_for(lambda: count("SECOND_CERT ") > second_asked,
+             "the second page, loading the same server as the app proceeded, to be asked", 20)
+    time.sleep(2.0)
+    assert not loaded("SECOND_MESSAGE ", "/race"), "the second page loaded on the first page's proceed"
+    assert count("CERT ") == asked + 1, [line for line in lines if line.startswith("CERT ")]
+    print("ok: proceeding loads that page; a second page on the profile, loading the server at once, is still asked")
+    send("cert cancel")
+    wait_for(lambda: heard("CERTS cancel"), "the cancelling handler")
+    asked, second_asked = count("CERT "), count("SECOND_CERT ")
+    send(f"load {tls}/again")
+    wait_for(lambda: count("CERT ") > asked, "the next load from the server to be asked", 20)
+    refused("/again", "the next load, cancelled")
+    send(f"load2 {tls}/later")
+    wait_for(lambda: count("SECOND_CERT ") > second_asked, "the second page's later load to be asked", 20)
+    assert not loaded("SECOND_MESSAGE ", "/later"), "the second page loaded past the certificate"
+    print("ok: proceeding was for that load: the next ones, in either page, are asked again")
+
+    send(f"load {auth}/none")
+    wait_for(lambda: any(line.startswith("MESSAGE ") and "refused" in line for line in lines),
+             "the server's refusal with no credentials handler", 20)
+    assert not heard("AUTH "), "a challenge reached a handler the app never set"
+    send("auth answer")
+    wait_for(lambda: heard("AUTHS answer"), "the answering handler")
+    send(f"load {auth}/answered")
+    wait_for(lambda: any(line.startswith("MESSAGE ") and '"ok"' in line for line in lines),
+             "the app's credentials to load the page", 20)
+    assert heard("AUTH zgx basic"), [line for line in lines if line.startswith("AUTH ")]
+    refusals = sum(line.startswith("MESSAGE ") and "refused" in line for line in lines)
+    send("auth drop")
+    wait_for(lambda: heard("AUTHS drop"), "the dropping handler")
+    send(f"load {auth}/dropped")
+    wait_for(lambda: sum(line.startswith("MESSAGE ") and "refused" in line for line in lines) > refusals,
+             "a dropped responder to leave the server's refusal", 20)
+    print("ok: credentials: none without a handler or with a dropped responder; the app's answer loads the page")
+
+
 def key_case(proc, window, lines, at):
     """Ctrl+F from the keyboard, the one case that needs the foreground."""
     deadline = time.monotonic() + 60
@@ -209,6 +281,7 @@ def main():
             wait_for(lambda: heard("TITLE zgx web view"), "the page's title")
             print("ok: the page loaded and its title reached the state")
             unclicked = controlled(proc, window, lines, heard, save_dir)
+            trust_cases(proc, lines, heard)
             key_case(proc, window, lines, at)
             if unclicked:
                 raise AssertionError(
