@@ -124,6 +124,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
             let web = WebView::new(&cx.ui.runtime, options);
+            // Certificate errors: `CERT <host> can_proceed=<bool>`, then
+            // proceed (which cancels where it can't). Credentials:
+            // `AUTH <realm> <scheme>`, answered `zgx`/`secret`, or after
+            // Ctrl+N the responder dropped unanswered.
+            web.set_certificate_handler(|error, responder| {
+                println!("CERT {} can_proceed={}", error.host, error.can_proceed);
+                responder.proceed();
+            });
+            let answering = std::rc::Rc::new(std::cell::Cell::new(true));
+            web.set_auth_handler({
+                let answering = answering.clone();
+                move |challenge, responder| {
+                    println!("AUTH {} {}", challenge.realm, challenge.scheme);
+                    if answering.get() {
+                        responder.credentials("zgx", "secret");
+                    }
+                }
+            });
             let mut args = std::env::args();
             if let Some(url) = args
                 .by_ref()
@@ -293,6 +311,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if action.0 == "h" {
                         inspect.load_url(std::env::var("ZGX_PROBE_ICON_PAGE").unwrap_or_default());
                     }
+                    // Ctrl+T: the untrusted server (`ZGX_PROBE_TLS_URL`);
+                    // Ctrl+B, Ctrl+N: the credentials server
+                    // (`ZGX_PROBE_AUTH_URL`), answered, then not.
+                    let url = |name: &str| std::env::var(name).unwrap_or_default();
+                    match action.0.as_str() {
+                        "t" => inspect.load_url(url("ZGX_PROBE_TLS_URL") + "/tls"),
+                        "b" => {
+                            answering.set(true);
+                            inspect.load_url(url("ZGX_PROBE_AUTH_URL") + "/answered");
+                        }
+                        "n" => {
+                            answering.set(false);
+                            inspect.load_url(url("ZGX_PROBE_AUTH_URL") + "/dropped");
+                        }
+                        _ => {}
+                    }
                     // Ctrl+O: select all of the page and copy it; Ctrl+U:
                     // reload ignoring the cache (`EDIT`/`RELOAD` say how
                     // each went).
@@ -348,7 +382,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("y").reserved())
                     .bind(bind("o").reserved())
                     .bind(bind("u").reserved())
-                    .bind(bind("h").reserved()),
+                    .bind(bind("h").reserved())
+                    .bind(bind("t").reserved())
+                    .bind(bind("b").reserved())
+                    .bind(bind("n").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {

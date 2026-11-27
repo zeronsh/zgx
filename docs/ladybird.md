@@ -36,6 +36,7 @@ The host is found in the install `ZGX_LADYBIRD_DIR` names, else in `zgx-ladybird
 | Zoom (`set_zoom`) | yes |
 | `evaluate_js` | runs the script; its result comes back as an error saying Ladybird pages don't return one yet |
 | Page messages, injected scripts, app schemes, downloads, find, print, devtools, clearing a site's data | not yet: they answer as a platform that can't |
+| Certificate errors and credentials | not yet: a server whose certificate isn't trusted fails the load, and a credentials challenge gets the server's refusal; neither reaches the app's handler |
 | Platforms | Linux, built and tested; macOS, the host copies each frame's changes out of the Compositor's IOSurfaces (importing them directly is to come), not yet built here; Windows not yet |
 
 ## Notices

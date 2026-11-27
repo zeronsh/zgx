@@ -17,6 +17,15 @@
 //! `find <text>` (prints `FIND`), `save-link` (the page's script clicks its
 //! download link), `open-download` (the app opens the same file itself), `reload` and `downloads save` or `downloads cancel` (the app's
 //! download handler, as Ctrl+D sets it, or one cancelling each).
+//! `load <url>` and `load2 <url>` load the page, or a second small page on
+//! the same profile that `--control` adds (its lines start `SECOND`; it
+//! cancels each certificate error, printing `SECOND_CERT <host>`).
+//! `cert proceed|cancel|drop|race` sets the page's certificate handler:
+//! it prints `CERT <host> can_proceed=<bool>`, then proceeds, cancels or
+//! drops the responder unanswered; `race` proceeds and at once has the
+//! second page load the same server (`/race`). `auth answer|drop` sets its
+//! credentials handler: `AUTH <realm> <scheme>`, then `zgx`/`secret` or
+//! the responder dropped.
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
@@ -199,7 +208,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine,
                 ..Default::default()
             };
-            let web = WebView::new(&cx.ui.runtime, options);
+            let web = WebView::new(&cx.ui.runtime, options.clone());
+            // `--control`'s second page, on the same profile.
+            let second = controlled.then(|| {
+                let second = WebView::new(&cx.ui.runtime, options);
+                second.set_certificate_handler(|error, responder| {
+                    println!("SECOND_CERT {}", error.host);
+                    responder.cancel();
+                });
+                second.load_html("<!doctype html><body>second", None);
+                second
+            });
+            let second_events = second.as_ref().map(|second| {
+                second.on_event(|event| match event {
+                    WebViewEvent::Message { body, .. } => println!("SECOND_MESSAGE {body}"),
+                    WebViewEvent::NavigationFailed { url, error } => {
+                        println!("SECOND_FAILED {url}: {error}")
+                    }
+                    _ => {}
+                })
+            });
             let files = Rc::new(FixtureFiles::default());
             match &url {
                 Some(url) => web.load_url(url.clone()),
@@ -348,7 +376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ),
                     )
             };
-            let page = overlay()
+            let mut page = overlay()
                 .id("pane")
                 .w_full()
                 .grow()
@@ -371,6 +399,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }),
                 ))
                 .child(composer);
+            if let Some(second) = &second {
+                page = page.child(
+                    web_view(second)
+                        .id("second")
+                        .absolute()
+                        .left(24.)
+                        .bottom(24.)
+                        .w(200.)
+                        .h(120.),
+                );
+            }
             let view = cx.render(
                 column()
                     .w_full()
@@ -431,10 +470,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .reserved(),
                     ),
             );
-            let keep = Rc::new(RefCell::new(Some((subscription, keymap))));
+            let keep = Rc::new(RefCell::new(Some((subscription, second_events, keymap))));
             cx.on_closed(move || drop(keep.borrow_mut().take()));
             if controlled {
-                follow_commands(cx, web.clone());
+                follow_commands(cx, web.clone(), second.clone().expect("--control's second page"));
             }
             if fixture {
                 run_fixture(
@@ -485,9 +524,40 @@ fn handle_downloads(web: &WebView, save: bool) {
     println!("DOWNLOADS {}", if save { "on" } else { "cancelled" });
 }
 
+/// `--control`'s `cert <how>`: the page's certificate handler (see the
+/// module documentation).
+fn handle_certificates(web: &WebView, second: &WebView, how: &str) {
+    println!("CERTS {how}");
+    let (how, second) = (how.to_owned(), second.clone());
+    web.set_certificate_handler(move |error, responder| {
+        println!("CERT {} can_proceed={}", error.host, error.can_proceed);
+        match how.as_str() {
+            "proceed" => responder.proceed(),
+            "race" => {
+                responder.proceed();
+                let origin = error.url.split('/').take(3).collect::<Vec<_>>().join("/");
+                second.load_url(format!("{origin}/race"));
+            }
+            "cancel" => responder.cancel(),
+            _ => drop(responder),
+        }
+    });
+}
+
+/// `--control`'s `auth answer|drop`: the page's credentials handler.
+fn handle_auth(web: &WebView, answer: bool) {
+    web.set_auth_handler(move |challenge, responder| {
+        println!("AUTH {} {}", challenge.realm, challenge.scheme);
+        if answer {
+            responder.credentials("zgx", "secret");
+        }
+    });
+    println!("AUTHS {}", if answer { "answer" } else { "drop" });
+}
+
 /// `--control`: a command a line from stdin (see the module documentation),
 /// read on a thread of its own and carried out on the UI thread.
-fn follow_commands(cx: &mut zgx_desktop::WindowContext, web: WebView) {
+fn follow_commands(cx: &mut zgx_desktop::WindowContext, web: WebView, second: WebView) {
     let (send, commands) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lines().map_while(Result::ok) {
@@ -510,6 +580,10 @@ fn follow_commands(cx: &mut zgx_desktop::WindowContext, web: WebView) {
                     "open-download" => web.load_url(SAVED_FILE),
                     "reload" => web.reload(),
                     "downloads" => handle_downloads(&web, rest == "save"),
+                    "load" => web.load_url(rest),
+                    "load2" => second.load_url(rest),
+                    "cert" => handle_certificates(&web, &second, rest),
+                    "auth" => handle_auth(&web, rest == "answer"),
                     _ => println!("CONTROL unknown: {line}"),
                 }
             }

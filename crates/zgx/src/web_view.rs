@@ -208,6 +208,145 @@ impl std::fmt::Debug for DownloadResponder {
     }
 }
 
+/// A page's server whose certificate the engine couldn't verify
+/// ([`WebView::set_certificate_handler`]).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CertificateError {
+    /// What was being loaded.
+    pub url: String,
+    /// Its host.
+    pub host: String,
+    /// What's wrong with the certificate, as the engine says it.
+    pub error: String,
+    /// Whether [`CertificateResponder::proceed`] can load past the error for
+    /// this load alone. Where the engine could only trust the certificate
+    /// for the rest of the session (WebKitGTK, WKWebView), it can't, and
+    /// `proceed` cancels.
+    pub can_proceed: bool,
+}
+impl CertificateError {
+    /// An error loading `url` from `host` (for hosts).
+    pub fn new(
+        url: impl Into<String>,
+        host: impl Into<String>,
+        error: impl Into<String>,
+        can_proceed: bool,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            host: host.into(),
+            error: error.into(),
+            can_proceed,
+        }
+    }
+}
+/// Answers one [`CertificateError`], once, now or later. Dropping it
+/// unanswered cancels the load.
+#[doc(hidden)]
+pub struct CertificateResponder(Option<Box<dyn FnOnce(bool)>>, bool);
+impl CertificateResponder {
+    /// `deliver` hears `true` to load past the error, `false` to cancel;
+    /// `can_proceed` as the error says (for hosts).
+    pub fn new(can_proceed: bool, deliver: impl FnOnce(bool) + 'static) -> Self {
+        Self(Some(Box::new(deliver)), can_proceed)
+    }
+    /// Load past the error, this load alone: the next load of the host asks
+    /// again. Where the error can't proceed (`CertificateError::can_proceed`
+    /// false), this cancels.
+    pub fn proceed(mut self) {
+        if let Some(deliver) = self.0.take() {
+            deliver(self.1);
+        }
+    }
+    /// Cancel the load.
+    pub fn cancel(self) {}
+}
+impl Drop for CertificateResponder {
+    fn drop(&mut self) {
+        if let Some(deliver) = self.0.take() {
+            deliver(false);
+        }
+    }
+}
+impl std::fmt::Debug for CertificateResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CertificateResponder")
+    }
+}
+/// A server asking a page for credentials ([`WebView::set_auth_handler`]).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AuthChallenge {
+    /// What was being loaded.
+    pub url: String,
+    /// The server's host.
+    pub host: String,
+    /// The protection space the server names, if any.
+    pub realm: String,
+    /// The scheme: `"basic"`, `"digest"`, `"ntlm"`, `"negotiate"` or as the
+    /// engine names it.
+    pub scheme: String,
+    /// A proxy asks, not the page's server.
+    pub proxy: bool,
+    /// Credentials given before for it were refused.
+    pub retry: bool,
+}
+impl AuthChallenge {
+    /// A challenge from `host` loading `url` (for hosts).
+    pub fn new(
+        url: impl Into<String>,
+        host: impl Into<String>,
+        realm: impl Into<String>,
+        scheme: impl Into<String>,
+        proxy: bool,
+        retry: bool,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            host: host.into(),
+            realm: realm.into(),
+            scheme: scheme.into(),
+            proxy,
+            retry,
+        }
+    }
+}
+/// Answers one [`AuthChallenge`], once, now or later. Dropping it unanswered
+/// cancels: the page gets the server's refusal.
+#[doc(hidden)]
+pub struct AuthResponder(Option<AuthDeliver>);
+type AuthDeliver = Box<dyn FnOnce(Option<(String, String)>)>;
+impl AuthResponder {
+    /// `deliver` hears a user name and password, or `None` to cancel (for
+    /// hosts).
+    pub fn new(deliver: impl FnOnce(Option<(String, String)>) + 'static) -> Self {
+        Self(Some(Box::new(deliver)))
+    }
+    /// Answer with these, for this challenge alone (kept nowhere).
+    pub fn credentials(mut self, user: impl Into<String>, password: impl Into<String>) {
+        if let Some(deliver) = self.0.take() {
+            deliver(Some((user.into(), password.into())));
+        }
+    }
+    /// Cancel: the page gets the server's refusal.
+    pub fn cancel(self) {}
+}
+impl Drop for AuthResponder {
+    fn drop(&mut self) {
+        if let Some(deliver) = self.0.take() {
+            deliver(None);
+        }
+    }
+}
+impl std::fmt::Debug for AuthResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthResponder")
+    }
+}
+
 /// Serves a URL scheme of the app's own (`myapp://…`) to pages: `serve` is
 /// called on the UI thread for each request and may answer later, from
 /// another thread, through its responder.
@@ -769,7 +908,11 @@ struct Inner {
     /// What answers the page's file inputs: the latest node showing it.
     chooser: RefCell<Option<Chooser>>,
     downloads: RefCell<Option<DownloadHandler>>,
+    certificates: RefCell<Option<CertificateHandler>>,
+    auth: RefCell<Option<AuthHandler>>,
 }
+type CertificateHandler = Rc<dyn Fn(&CertificateError, CertificateResponder)>;
+type AuthHandler = Rc<dyn Fn(&AuthChallenge, AuthResponder)>;
 /// The window's file dialogs and the component that waits on them, from
 /// the node showing a page (`WebView::choose_files`).
 struct Chooser {
@@ -856,6 +999,8 @@ impl WebView {
             src: RefCell::new(None),
             policy: RefCell::new(None),
             chooser: RefCell::new(None),
+            certificates: RefCell::new(None),
+            auth: RefCell::new(None),
             downloads: RefCell::new(None),
         }))
     }
@@ -1195,6 +1340,45 @@ impl WebView {
         let handler = self.0.downloads.borrow().clone();
         match handler {
             Some(handler) => handler(request, responder),
+            None => responder.cancel(),
+        }
+    }
+    /// Decide each certificate error a load meets: `handler` gets it and a
+    /// responder to load past it (this load alone, where
+    /// `CertificateError::can_proceed`) or cancel. Without a handler, or
+    /// with a responder dropped, the load is cancelled.
+    #[doc(hidden)]
+    pub fn set_certificate_handler(
+        &self,
+        handler: impl Fn(&CertificateError, CertificateResponder) + 'static,
+    ) {
+        *self.0.certificates.borrow_mut() = Some(Rc::new(handler));
+    }
+    /// A certificate error, for the app's handler (for hosts): cancelled at
+    /// once without one.
+    #[doc(hidden)]
+    pub fn certificate_error(&self, error: CertificateError, responder: CertificateResponder) {
+        let handler = self.0.certificates.borrow().clone();
+        match handler {
+            Some(handler) => handler(&error, responder),
+            None => responder.cancel(),
+        }
+    }
+    /// Answer each server asking a page for credentials: `handler` gets the
+    /// challenge and a responder to give a user name and password (for
+    /// that challenge alone) or cancel. Without a handler, or with a
+    /// responder dropped, it's cancelled and the page gets the refusal.
+    #[doc(hidden)]
+    pub fn set_auth_handler(&self, handler: impl Fn(&AuthChallenge, AuthResponder) + 'static) {
+        *self.0.auth.borrow_mut() = Some(Rc::new(handler));
+    }
+    /// A credentials challenge, for the app's handler (for hosts): cancelled
+    /// at once without one.
+    #[doc(hidden)]
+    pub fn auth_challenge(&self, challenge: AuthChallenge, responder: AuthResponder) {
+        let handler = self.0.auth.borrow().clone();
+        match handler {
+            Some(handler) => handler(&challenge, responder),
             None => responder.cancel(),
         }
     }
@@ -1603,6 +1787,57 @@ mod tests {
         assert_eq!(
             web.reload_ignoring_cache(),
             Err("this platform's web view can't reload ignoring its cache".into())
+        );
+    }
+
+    #[test]
+    fn certificate_errors_cancel_unless_the_app_proceeds_where_it_can() {
+        let runtime = crate::reactive::Runtime::new();
+        let web = WebView::new(&runtime, WebViewOptions::default());
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let responder = |can: bool| {
+            let heard = heard.clone();
+            CertificateResponder::new(can, move |proceed| heard.borrow_mut().push(proceed))
+        };
+        let error =
+            |can: bool| CertificateError::new("https://a.test/", "a.test", "unknown issuer", can);
+        // No handler: cancelled.
+        web.certificate_error(error(true), responder(true));
+        // A handler that drops the responder: cancelled.
+        web.set_certificate_handler(|_, responder| drop(responder));
+        web.certificate_error(error(true), responder(true));
+        // Proceeding: loads past it where it can, cancels where it can't.
+        web.set_certificate_handler(|_, responder| responder.proceed());
+        web.certificate_error(error(true), responder(true));
+        web.certificate_error(error(false), responder(false));
+        // An explicit cancel.
+        web.set_certificate_handler(|_, responder| responder.cancel());
+        web.certificate_error(error(true), responder(true));
+        assert_eq!(*heard.borrow(), [false, false, true, false, false]);
+    }
+
+    #[test]
+    fn auth_challenges_cancel_unless_the_app_answers() {
+        let runtime = crate::reactive::Runtime::new();
+        let web = WebView::new(&runtime, WebViewOptions::default());
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let responder = || {
+            let heard = heard.clone();
+            AuthResponder::new(move |answer| heard.borrow_mut().push(answer))
+        };
+        let challenge =
+            || AuthChallenge::new("https://a.test/x", "a.test", "Staff", "basic", false, false);
+        web.auth_challenge(challenge(), responder());
+        web.set_auth_handler(|_, responder| drop(responder));
+        web.auth_challenge(challenge(), responder());
+        web.set_auth_handler(|challenge, responder| {
+            assert_eq!(challenge.realm, "Staff");
+            responder.credentials("ada", "secret");
+        });
+        web.auth_challenge(challenge(), responder());
+        assert_eq!(
+            *heard.borrow(),
+            [None, None, Some(("ada".to_owned(), "secret".to_owned()))]
         );
     }
 

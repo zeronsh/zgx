@@ -434,6 +434,9 @@ struct Page {
     zoom: Cell<(f64, f64)>,
     decisions: RefCell<HashMap<u64, Ptr>>,
     next_decision: Cell<u64>,
+    /// Credentials challenges the app answers (`on_authenticate`), held
+    /// (a reference each) until `Command::Authenticate`.
+    challenges: RefCell<HashMap<u64, Ptr>>,
     new_windows: bool,
     nonce: String,
     /// Buttons held, as GDK's state mask.
@@ -692,6 +695,7 @@ impl Gtk {
                 zoom: Cell::new((1., 1.)),
                 decisions: RefCell::new(HashMap::new()),
                 next_decision: Cell::new(0),
+                challenges: RefCell::new(HashMap::new()),
                 new_windows: spec.new_windows,
                 nonce,
                 buttons: Cell::new(0),
@@ -758,6 +762,22 @@ impl Gtk {
                     false,
                 );
             }
+            connect(
+                api,
+                view,
+                "load-failed-with-tls-errors",
+                handler(on_tls_errors as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
+                "authenticate",
+                handler(on_authenticate as *const ()),
+                data,
+                false,
+            );
             connect(
                 api,
                 view,
@@ -983,6 +1003,11 @@ impl Gtk {
             for (_, decision) in page.decisions.borrow_mut().drain() {
                 (api.webkit_policy_decision_ignore)(decision);
                 (api.g_object_unref)(decision);
+            }
+            // Challenges the app never answered: cancelled.
+            for (_, request) in page.challenges.borrow_mut().drain() {
+                (api.webkit_authentication_request_cancel)(request);
+                (api.g_object_unref)(request);
             }
             page.forget_images();
             page.choose(None);
@@ -1904,6 +1929,29 @@ impl Page {
                     (api.gtk_clipboard_set_text)(clipboard, c(&text).as_ptr(), -1);
                     GTK.with(|gtk| *gtk.clipboard.borrow_mut() = text);
                 }
+                Command::Authenticate {
+                    challenge,
+                    credentials,
+                } => {
+                    if let Some(request) = self.challenges.borrow_mut().remove(&challenge) {
+                        match credentials {
+                            Some((user, password)) => {
+                                // WEBKIT_CREDENTIAL_PERSISTENCE_NONE: for this challenge alone.
+                                let credential = (api.webkit_credential_new)(
+                                    c(&user).as_ptr(),
+                                    c(&password).as_ptr(),
+                                    0,
+                                );
+                                (api.webkit_authentication_request_authenticate)(
+                                    request, credential,
+                                );
+                                (api.webkit_credential_free)(credential);
+                            }
+                            None => (api.webkit_authentication_request_cancel)(request),
+                        }
+                        (api.g_object_unref)(request);
+                    }
+                }
                 Command::Decide { decision, allowed } => {
                     if let Some(decision) = self.decisions.borrow_mut().remove(&decision) {
                         if allowed {
@@ -2806,6 +2854,105 @@ unsafe extern "C" fn on_decide_policy(
             }
         });
     });
+    1
+}
+/// A load failed on its server's certificate: the app hears it. WebKitGTK
+/// could only load past it by trusting the certificate for the host for the
+/// rest of the session, so it can't proceed (`can_proceed` false), and the
+/// load stays failed as WebKit fails it.
+unsafe extern "C" fn on_tls_errors(
+    _: Ptr,
+    uri: *const c_char,
+    _: Ptr,
+    errors: c_uint,
+    data: Ptr,
+) -> gtk::gboolean {
+    // SAFETY: GTK passes the failing URI (valid for the call) and this
+    // handler's page.
+    let (page, url) = unsafe { (page(data), string(uri)) };
+    let error = tls_errors(errors);
+    page.post(move |web| {
+        let host = zgx::web_view::site_host(&url).unwrap_or_default();
+        web.certificate_error(
+            zgx::web_view::CertificateError::new(url, host, error, false),
+            zgx::web_view::CertificateResponder::new(false, |_| {}),
+        );
+    });
+    // WebKit's own handling: the load fails.
+    0
+}
+/// GLib's `GTlsCertificateFlags` in words.
+fn tls_errors(flags: c_uint) -> String {
+    let named = [
+        (1, "unknown issuer"),
+        (2, "wrong host"),
+        (4, "not yet valid"),
+        (8, "expired"),
+        (16, "revoked"),
+        (32, "insecure"),
+        (64, "invalid"),
+    ];
+    let words: Vec<&str> = named
+        .iter()
+        .filter(|(bit, _)| flags & bit != 0)
+        .map(|(_, word)| *word)
+        .collect();
+    if words.is_empty() {
+        "invalid".into()
+    } else {
+        words.join(", ")
+    }
+}
+/// A server asks for credentials: the app's handler answers, or cancels.
+unsafe extern "C" fn on_authenticate(_: Ptr, request: Ptr, data: Ptr) -> gtk::gboolean {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the request GTK passes, read now and kept with a reference
+    // until the app answers (`Command::Authenticate`); this handler's page.
+    let (page, challenge) = unsafe {
+        let page = page(data);
+        let scheme = match (api.webkit_authentication_request_get_scheme)(request) {
+            2 => "basic",
+            3 => "digest",
+            4 => "form",
+            5 => "ntlm",
+            6 => "negotiate",
+            7 | 9 => "client-certificate",
+            8 => "server-trust",
+            _ => "default",
+        };
+        let challenge = zgx::web_view::AuthChallenge::new(
+            page.uri(),
+            string((api.webkit_authentication_request_get_host)(request)),
+            string((api.webkit_authentication_request_get_realm)(request)),
+            scheme,
+            (api.webkit_authentication_request_is_for_proxy)(request) != 0,
+            (api.webkit_authentication_request_is_retry)(request) != 0,
+        );
+        (api.g_object_ref)(request);
+        (page, challenge)
+    };
+    let id = page.next_decision.get() + 1;
+    page.next_decision.set(id);
+    page.challenges.borrow_mut().insert(id, request);
+    let page_id = page.id;
+    deliver(move || {
+        let answer = move |credentials: Option<(String, String)>| {
+            on_gtk(move |gtk| {
+                if let Some(page) = gtk.page(page_id) {
+                    page.run(Command::Authenticate {
+                        challenge: id,
+                        credentials,
+                    });
+                }
+            });
+        };
+        let responder = zgx::web_view::AuthResponder::new(answer);
+        match ui_page(page_id).and_then(|page| page.web.upgrade()) {
+            Some(web) => web.auth_challenge(challenge, responder),
+            None => responder.cancel(),
+        }
+    });
+    // Answered (later): WebKit shows no dialog of its own.
     1
 }
 unsafe extern "C" fn on_terminated(_: Ptr, reason: c_int, data: Ptr) {
@@ -4219,6 +4366,12 @@ enum Command {
     Decide {
         decision: u64,
         allowed: bool,
+    },
+    /// A credentials challenge answered: a user name and password, or
+    /// cancelled.
+    Authenticate {
+        challenge: u64,
+        credentials: Option<(String, String)>,
     },
     /// An item of the `<select>` popup chosen, or none: it closed.
     Choose(Option<u32>),

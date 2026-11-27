@@ -42,6 +42,12 @@ use zgx::web_view::{
 // SAFETY: declares nothing; it only links WebKit, whose classes objc2-web-kit names.
 #[link(name = "WebKit", kind = "framework")]
 unsafe extern "C" {}
+// SAFETY: Security's trust evaluation, as its header declares it: a
+// `SecTrustRef` and an optional `CFErrorRef *` out.
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    fn SecTrustEvaluateWithError(trust: *mut c_void, error: *mut *mut c_void) -> bool;
+}
 
 /// Observed for state: navigation, title, loading and history.
 const OBSERVED: [&str; 6] = [
@@ -475,6 +481,16 @@ define_class!(
         fn navigation_error(&self, view: &WKWebView, _navigation: Option<&WKNavigation>, error: &NSError) {
             self.failed(view, error);
         }
+        // A challenge: a server's certificate (trusted as the system trusts
+        // it, else reported to the app and cancelled: WebKit could only be
+        // told to trust it beyond this load), or credentials a server asks
+        // for (the app's to give, for this challenge alone). Raw types: an
+        // `NSURLAuthenticationChallenge`, and a `void (^)(NSInteger
+        // disposition, NSURLCredential *)` block, called once.
+        #[unsafe(method(webView:didReceiveAuthenticationChallenge:completionHandler:))]
+        fn challenge(&self, view: &WKWebView, challenge: &AnyObject, handler: &block2::DynBlock<dyn Fn(isize, *mut AnyObject)>) {
+            self.challenged(view, challenge, handler.copy());
+        }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn terminated(&self, _view: &WKWebView) {
             self.post(|web| {
@@ -843,6 +859,99 @@ impl Observer {
                 delivery(&web);
             }
         });
+    }
+    /// A challenge (`webView:didReceiveAuthenticationChallenge:…`), answered
+    /// through `handler`: NSURLSessionAuthChallengeDisposition's use
+    /// credential (0), default handling (1) or cancel (2).
+    fn challenged(
+        &self,
+        view: &WKWebView,
+        challenge: &AnyObject,
+        handler: block2::RcBlock<dyn Fn(isize, *mut AnyObject)>,
+    ) {
+        // SAFETY: NSURLAuthenticationChallenge's and NSURLProtectionSpace's
+        // getters on the main thread, each result nil-checked; the trust a
+        // `SecTrustRef` the space owns, read during the call.
+        let (method, host, realm, proxy, retry, trust) = unsafe {
+            let space: Option<Retained<AnyObject>> = msg_send![challenge, protectionSpace];
+            let Some(space) = space else {
+                handler.call((1, std::ptr::null_mut()));
+                return;
+            };
+            let text =
+                |name: Option<Retained<NSString>>| name.map(|n| n.to_string()).unwrap_or_default();
+            let method: Option<Retained<NSString>> = msg_send![&*space, authenticationMethod];
+            let host: Option<Retained<NSString>> = msg_send![&*space, host];
+            let realm: Option<Retained<NSString>> = msg_send![&*space, realm];
+            let proxy: bool = msg_send![&*space, isProxy];
+            let failures: isize = msg_send![challenge, previousFailureCount];
+            let trust: *mut c_void = msg_send![&*space, serverTrust];
+            (
+                text(method),
+                text(host),
+                text(realm),
+                proxy,
+                failures > 0,
+                trust,
+            )
+        };
+        let url = url_of(view);
+        match method.as_str() {
+            "NSURLAuthenticationMethodServerTrust" => {
+                // SAFETY: the space's trust (nil-checked), evaluated as the
+                // system evaluates it, no error kept.
+                let trusted = !trust.is_null()
+                    && unsafe { SecTrustEvaluateWithError(trust, std::ptr::null_mut()) };
+                if trusted {
+                    handler.call((1, std::ptr::null_mut()));
+                    return;
+                }
+                handler.call((2, std::ptr::null_mut()));
+                self.post(move |web| {
+                    web.certificate_error(
+                        zgx::web_view::CertificateError::new(url, host, "not trusted", false),
+                        zgx::web_view::CertificateResponder::new(false, |_| {}),
+                    );
+                });
+            }
+            "NSURLAuthenticationMethodHTTPBasic"
+            | "NSURLAuthenticationMethodHTTPDigest"
+            | "NSURLAuthenticationMethodNTLM"
+            | "NSURLAuthenticationMethodNegotiate" => {
+                let scheme = match method.as_str() {
+                    "NSURLAuthenticationMethodHTTPBasic" => "basic",
+                    "NSURLAuthenticationMethodHTTPDigest" => "digest",
+                    "NSURLAuthenticationMethodNTLM" => "ntlm",
+                    _ => "negotiate",
+                };
+                let challenge =
+                    zgx::web_view::AuthChallenge::new(url, host, realm, scheme, proxy, retry);
+                let responder =
+                    zgx::web_view::AuthResponder::new(move |credentials| match credentials {
+                        Some((user, password)) => {
+                            // SAFETY: NSURLCredential's constructor on the main
+                            // thread; persistence none (0): this challenge alone.
+                            let credential: Option<Retained<AnyObject>> = unsafe {
+                                msg_send![
+                                    objc2::class!(NSURLCredential),
+                                    credentialWithUser: &*NSString::from_str(&user),
+                                    password: &*NSString::from_str(&password),
+                                    persistence: 0usize
+                                ]
+                            };
+                            match credential {
+                                Some(credential) => handler
+                                    .call((0, Retained::as_ptr(&credential) as *mut AnyObject)),
+                                None => handler.call((1, std::ptr::null_mut())),
+                            }
+                        }
+                        // WebKit's default: no credentials, the server's refusal.
+                        None => handler.call((1, std::ptr::null_mut())),
+                    });
+                self.post(move |web| web.auth_challenge(challenge, responder));
+            }
+            _ => handler.call((1, std::ptr::null_mut())),
+        }
     }
     /// Report the page's navigation state as it is now.
     fn changed(&self) {

@@ -55,6 +55,7 @@ import time
 
 from platform_smoke import private_runtime, stop, use_ibus_engine, wait_for_ibus_xim, wait_for_wm
 from sway_host import sway_config
+import trust_servers
 from wayland_keyboard import VirtualKeyboard
 from wayland_pointer import VirtualPointer
 
@@ -718,6 +719,27 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.key("ctrl+h")
     session.wait(lambda: "16x16" in session.lines("FAVICON "), "the page's icon never reached its state", 20)
     checks["favicon"] = True
+    # A server whose certificate isn't trusted: the app hears it, told it
+    # can't proceed (WebKitGTK could only trust it for the session), and
+    # proceeding still leaves the load failed: no page from it.
+    session.key("ctrl+t")
+    session.wait(lambda: any(line.startswith("127.0.0.1 can_proceed=false") for line in session.lines("CERT ")),
+                 "the certificate error never reached the app")
+    time.sleep(2)
+    if any("tls" in message for message, _, _ in session.messages()):
+        raise AssertionError("a page loaded past a certificate the app couldn't proceed past")
+    checks["certificate error"] = True
+    # Credentials: the app's answer loads the page; a responder dropped
+    # unanswered gets the server's refusal.
+    session.key("ctrl+b")
+    session.wait(lambda: any(m.get("auth") == "ok" for m, _, _ in session.messages()),
+                 "the app's credentials never loaded the page")
+    session.key("ctrl+n")
+    session.wait(lambda: any(m.get("auth") == "refused" for m, _, _ in session.messages()),
+                 "a dropped responder didn't leave the server's refusal")
+    if not any(line.startswith("zgx basic") for line in session.lines("AUTH ")):
+        raise AssertionError(f"the challenges heard were {session.lines('AUTH ')!r}")
+    checks["credentials"] = True
     return checks
 
 
@@ -1233,6 +1255,7 @@ def x11(args, output, private):
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
         env["ZGX_PROBE_ICON_PAGE"] = ICON_PAGE
+        env["ZGX_PROBE_TLS_URL"], env["ZGX_PROBE_AUTH_URL"] = TRUST[0][1], TRUST[1][1]
         ime = None
         if args.ime or args.orca:
             with (output / "dbus.log").open("w") as log:
@@ -1330,6 +1353,7 @@ def wayland(args, output, private):
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
         env["ZGX_PROBE_ICON_PAGE"] = ICON_PAGE
+        env["ZGX_PROBE_TLS_URL"], env["ZGX_PROBE_AUTH_URL"] = TRUST[0][1], TRUST[1][1]
         # A private session bus: Fcitx5 talks on it, and nothing else starts.
         bus_config = pathlib.Path(private, "dbus.conf")
         bus_config.write_text("<busconfig><type>session</type><listen>unix:tmpdir=" + private + "</listen><auth>EXTERNAL</auth>"
@@ -1446,6 +1470,9 @@ def serve_icon_page():
 
 
 ICON_PAGE = serve_icon_page()
+# The certificate and credentials cases' servers (`trust_servers`), for the
+# probe's Ctrl+T, Ctrl+B and Ctrl+N.
+TRUST = (trust_servers.https(), trust_servers.basic_auth())
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
