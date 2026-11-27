@@ -34,6 +34,19 @@ impl InlineAction {
         (self.0.borrow_mut())(held)
     }
 }
+/// A span's colour read on its own (`TextSpan::text_color_live`).
+#[derive(Clone)]
+pub(crate) struct LiveColor(pub(crate) Rc<dyn Fn() -> Option<crate::theme::Themed<Color>>>);
+impl std::fmt::Debug for LiveColor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveColor")
+    }
+}
+impl PartialEq for LiveColor {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
 /// A span's own context menu (`TextSpan::context_menu`).
 #[derive(Clone)]
 pub(crate) struct SpanMenu(Rc<RefCell<MenuBuild>>);
@@ -181,6 +194,8 @@ pub(crate) struct SpanExtras {
     pub boxed: bool,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
+    /// Its colour read on its own (`TextSpan::text_color_live`).
+    pub live_color: Option<LiveColor>,
 }
 /// A run's text fading in (`TextSpan::fade_in`): from clear at `start`
 /// (milliseconds since the Unix epoch, as `ui.now()` says, on the thread's
@@ -255,6 +270,30 @@ impl TextSpan {
     /// frame at a time while it lasts, recolouring its glyphs only.
     pub fn fade_in(mut self, fade: TextFade) -> Self {
         self.extras.get_or_insert_default().fade = Some(fade);
+        self
+    }
+    /// Its colour as `color` says it is now, read on its own: an animated
+    /// colour, a script's words fading in. When what `color` reads changes,
+    /// the paragraph is recoloured, shaped as it was, rather than its spans
+    /// made again: nothing lays out, and the renderer recolours glyphs.
+    /// `None` is the paragraph's own colour. (zgx-script's way of lowering a
+    /// span's colour function; not yet an interface of zgx's own.)
+    #[doc(hidden)]
+    pub fn text_color_live(
+        self,
+        color: impl Fn() -> Option<crate::theme::Themed<Color>> + 'static,
+    ) -> Self {
+        self.text_color_live_shared(Rc::new(color))
+    }
+    /// `text_color_live` with `color` as given: a paragraph made again with
+    /// the same function keeps the effect reading it, rather than make
+    /// another (zgx-script's lowering, which keeps each span's).
+    #[doc(hidden)]
+    pub fn text_color_live_shared(
+        mut self,
+        color: Rc<dyn Fn() -> Option<crate::theme::Themed<Color>>>,
+    ) -> Self {
+        self.extras.get_or_insert_default().live_color = Some(LiveColor(color));
         self
     }
     /// Restyled under the pointer, once it's a link (`on_click`), in place

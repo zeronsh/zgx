@@ -1637,6 +1637,12 @@ fn inline(
     if link && !styled_hover && !extras.plain {
         span.underline.get_or_insert_with(Default::default);
     }
+    // Read where the paragraph is made: a change makes it again.
+    if let Some(live) = &extras.live_color
+        && let Some(color) = (live.0)()
+    {
+        span.styles = std::mem::take(&mut span.styles).text_color(color);
+    }
     if span.styles.has_tokens() {
         crate::theme::resolve(&mut span.styles, theme);
         span.background = span.background.or(span.styles.background);

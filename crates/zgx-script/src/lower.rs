@@ -9410,6 +9410,10 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         font: Option<crate::Str>,
         lang: Option<crate::Str>,
         followed: Vec<(&'static str, Ty, Owned)>,
+        /// Its `color` when a function or state says it: read on its own
+        /// (`TextSpan::text_color_live`), so a change recolours the
+        /// paragraph rather than make its spans again.
+        live_color: Option<Rc<dyn Fn() -> Option<zgx::theme::Themed<Color>>>>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
         rare: Option<Rc<crate::node::SpanRare>>,
@@ -9476,8 +9480,21 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 font: s.font.clone(),
                 lang: s.lang.clone(),
                 followed: (s.followed.iter())
+                    .filter(|(name, _, _)| *name != "color")
                     .map(|(name, ty, source)| (*name, *ty, resolve_owned(source)))
                     .collect(),
+                live_color: (!s.followed.is_empty())
+                    .then(|| s.followed.iter().find(|(name, _, _)| *name == "color"))
+                    .flatten()
+                    .map(|(_, ty, source)| {
+                        let (ty, source, vm) = (*ty, resolve_owned(source), vm.clone());
+                        Rc::new(move || match resolve(&source, ty, None, &vm) {
+                            Some(Lit::Color(color)) => Some(zgx::theme::Themed::Value(color)),
+                            Some(Lit::Token(token)) => Some(zgx::theme::Themed::Token(token)),
+                            _ => None,
+                        })
+                            as Rc<dyn Fn() -> Option<zgx::theme::Themed<Color>>>
+                    }),
                 click: s.click.clone(),
                 href: s.href.clone(),
                 rare: s.rare.clone(),
@@ -9526,7 +9543,6 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     };
                     let on = matches!(lit, Some(Lit::Bool(true)));
                     match *name {
-                        "color" => style.color = themed,
                         "bg" => style.background = themed,
                         "text_size" => style.size = number,
                         "weight" => style.weight = number.map(|weight| weight as u16),
@@ -9570,6 +9586,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 let mut out: TextSpan = text_span(render_text(&span.text, &vm));
                 if let Some(c) = color {
                     out = out.text_color(c);
+                }
+                if let Some(live) = &span.live_color {
+                    out = out.text_color_live_shared(live.clone());
                 }
                 if let Some(c) = background {
                     out = out.background(c);
