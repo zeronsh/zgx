@@ -698,9 +698,9 @@ As with WebKit without delegates for them, pages get no permission (camera,
 microphone, location, notifications, clipboard reads). A download is the app's
 (`WebView::set_download_handler`): saved where it says, with WebView2's
 download bar hidden, or cancelled, as with no handler. A certificate error
-is the app's (`WebView::set_certificate_handler`): proceeding loads past it
-for that load alone, and zgx clears WebView2's session-long allow as it's
-given; with no handler, or a responder dropped, the load is cancelled
+reaches the app (`WebView::set_certificate_handler`) and is cancelled: a
+proceed can't be held to one load in WebView2 (the same view's next load
+went through unasked), so `can_proceed` is false
 ([the details](native-surfaces.md#certificate-errors-and-credentials)). So
 are the Basic credentials a server asks for (`WebView::set_auth_handler`):
 the app's answer is stored nowhere, though the engine may reuse it for
