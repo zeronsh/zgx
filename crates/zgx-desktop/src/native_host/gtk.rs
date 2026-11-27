@@ -46,6 +46,12 @@ macro_rules! api {
             pub atk_bridge_adaptor_init:
                 Option<unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char) -> c_int>,
             pub atk_bridge_adaptor_cleanup: Option<unsafe extern "C" fn()>,
+            /// `webkit_website_data_manager_set_favicons_enabled`: WebKitGTK
+            /// 2.30; before it, `webkit_web_context_set_favicon_database_directory`.
+            pub webkit_website_data_manager_set_favicons_enabled:
+                Option<unsafe extern "C" fn(Ptr, gboolean)>,
+            pub webkit_web_context_set_favicon_database_directory:
+                Option<unsafe extern "C" fn(Ptr, *const c_char)>,
             /// `webkit_web_view_get_theme_color(view, rgba)`: WebKitGTK 2.38.
             pub webkit_web_view_get_theme_color:
                 Option<unsafe extern "C" fn(Ptr, *mut GdkRGBA) -> gboolean>,
@@ -81,6 +87,16 @@ macro_rules! api {
                     atk_bridge_adaptor_init: find(&libraries, "atk_bridge_adaptor_init").ok(),
                     atk_bridge_adaptor_cleanup: find(&libraries, "atk_bridge_adaptor_cleanup").ok(),
                     webkit_web_view_get_theme_color: find(&libraries, "webkit_web_view_get_theme_color").ok(),
+                    webkit_website_data_manager_set_favicons_enabled: find(
+                        &libraries,
+                        "webkit_website_data_manager_set_favicons_enabled",
+                    )
+                    .ok(),
+                    webkit_web_context_set_favicon_database_directory: find(
+                        &libraries,
+                        "webkit_web_context_set_favicon_database_directory",
+                    )
+                    .ok(),
                     _libraries: libraries,
                 })
             }
@@ -125,6 +141,7 @@ api! {
     fn webkit_web_resource_get_data_finish(Ptr, Ptr, *mut usize, *mut *mut GError) -> *mut u8;
     fn webkit_web_view_get_snapshot(Ptr, c_int, c_int, Ptr, unsafe extern "C" fn(Ptr, Ptr, Ptr), Ptr);
     fn webkit_web_view_get_snapshot_finish(Ptr, Ptr, *mut *mut GError) -> Ptr;
+    fn webkit_web_view_get_favicon(Ptr) -> Ptr;
     fn gtk_offscreen_window_get_type() -> GType;
     fn gtk_window_get_type() -> GType;
     fn gtk_window_resize(Ptr, c_int, c_int);

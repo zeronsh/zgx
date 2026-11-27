@@ -45,7 +45,7 @@ use zgx::{
 };
 use zgx_desktop::{Application, MenuAction, WindowOptions};
 
-const PAGE: &str = r#"<!doctype html><html><head><title>probe page</title><meta name="theme-color" content="rgb(51,102,153)"><style>
+const PAGE: &str = r#"<!doctype html><html><head><title>probe page</title><meta name="theme-color" content="rgb(51,102,153)"><link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg=="><style>
 html, body { margin: 0; background: rgb(0, 0, 255); height: 3000px; }
 #field { position: absolute; left: 20px; top: 20px; width: 300px; height: 40px; font-size: 20px; box-sizing: border-box; }
 #choice { position: absolute; left: 360px; top: 20px; width: 200px; height: 30px; }
@@ -120,6 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 transparent,
                 inspectable: true,
                 accelerated: !std::env::args().any(|arg| arg == "--unaccelerated"),
+                favicons: true,
                 ..Default::default()
             };
             let web = WebView::new(&cx.ui.runtime, options);
@@ -353,6 +354,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 })
             };
+            // `FAVICON <w>x<h>` as the page's icon arrives.
+            let favicon = {
+                let web = web.clone();
+                let shown = std::cell::Cell::new(None);
+                cx.ui.runtime.effect(move || {
+                    let size = web.state().with(|state| {
+                        state
+                            .favicon
+                            .as_ref()
+                            .map(|icon| (icon.width(), icon.height()))
+                    });
+                    if shown.replace(size) != size
+                        && let Some((width, height)) = size
+                    {
+                        println!("FAVICON {width}x{height}");
+                    }
+                })
+            };
             // `HOVERED <link or ->` and `THEME <#rrggbbaa or ->` as they change.
             let page_state = {
                 let web = web.clone();
@@ -377,7 +396,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
             };
             cx.tasks.spawn(async move {
-                let _keep = (events, keymap, web, full_screen, page_state);
+                let _keep = (events, keymap, web, full_screen, page_state, favicon);
                 std::future::pending::<()>().await;
             });
         })

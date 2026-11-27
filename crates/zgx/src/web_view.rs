@@ -342,6 +342,11 @@ pub struct WebViewOptions {
     /// page shows its placeholder.
     #[doc(hidden)]
     pub engine: WebEngine,
+    /// Load each page's icon and keep it in [`WebViewState::favicon`], as a
+    /// browser's tab shows it. Off by default: WebKitGTK then fetches a
+    /// site's icon only for apps that show it.
+    #[doc(hidden)]
+    pub favicons: bool,
 }
 /// The engine a web view's page runs in (see [`WebViewOptions::engine`]).
 #[doc(hidden)]
@@ -369,6 +374,7 @@ impl Default for WebViewOptions {
             schemes: Vec::new(),
             accelerated: true,
             engine: WebEngine::Platform,
+            favicons: false,
         }
     }
 }
@@ -432,6 +438,11 @@ pub struct WebViewState {
     /// `WebViewEvent::ProcessTerminated`).
     #[doc(hidden)]
     pub termination: Option<Termination>,
+    /// The page's icon, as its engine loaded it, with
+    /// [`WebViewOptions::favicons`] on (`WebViewEvent::FaviconChanged`).
+    /// `None` without one, and on macOS: WKWebView doesn't give it.
+    #[doc(hidden)]
+    pub favicon: Option<std::sync::Arc<crate::image::ImageData>>,
 }
 /// Why a page's process ended (see [`WebViewState::termination`]).
 #[doc(hidden)]
@@ -529,6 +540,9 @@ pub enum WebViewEvent {
     /// had then, on every engine alike (sent by the controller after each
     /// `NavigationFinished`). What a browser's history records; a title the
     /// page sets later comes as `TitleChanged`.
+    /// The page's icon changed (see [`WebViewState::favicon`]).
+    #[doc(hidden)]
+    FaviconChanged,
     /// The page's process stopped answering (see
     /// [`WebViewState::unresponsive`]).
     #[doc(hidden)]

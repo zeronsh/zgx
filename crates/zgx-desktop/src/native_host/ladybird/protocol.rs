@@ -144,6 +144,12 @@ pub(super) enum FromHost {
         text: String,
         html: String,
     },
+    /// The page's icon: width, height, pitch, format, premultiplied and its
+    /// bytes, or none.
+    Favicon {
+        view: u64,
+        image: Option<(u32, u32, u32, u8, bool, Vec<u8>)>,
+    },
     /// A page pastes: the app answers `request` with its clipboard
     /// (`ToHost::ClipboardData`).
     ClipboardRead {
@@ -204,6 +210,14 @@ impl Fields<'_> {
     }
     fn f64(&mut self) -> Option<f64> {
         self.take().map(f64::from_le_bytes)
+    }
+    fn bytes(&mut self, length: usize) -> Option<Vec<u8>> {
+        if self.0.len() < length {
+            return None;
+        }
+        let (bytes, rest) = self.0.split_at(length);
+        self.0 = rest;
+        Some(bytes.to_vec())
     }
     fn str(&mut self) -> Option<String> {
         let length = self.u32()? as usize;
@@ -281,6 +295,18 @@ pub(super) fn parse(kind: u8, fields: &[u8]) -> Option<FromHost> {
             html: f.str()?,
         },
         117 => FromHost::ClipboardRead { request: f.u64()? },
+        118 => FromHost::Favicon {
+            view,
+            image: if f.u8()? != 0 {
+                let (width, height, pitch, format, premultiplied) =
+                    (f.u32()?, f.u32()?, f.u32()?, f.u8()?, f.u8()? != 0);
+                let length = f.u32()? as usize;
+                let bytes = f.bytes(length)?;
+                Some((width, height, pitch, format, premultiplied, bytes))
+            } else {
+                None
+            },
+        },
         112 => FromHost::Editing {
             view,
             editing: f.u8()? != 0,

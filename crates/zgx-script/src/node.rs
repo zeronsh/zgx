@@ -263,6 +263,14 @@ impl UserData for WebUd {
                 })
             }))
         });
+        // The page's icon as a bitmap, with `favicons = true`; nil without
+        // one, and on macOS.
+        fields.add_field_method_get("favicon", |_, w| {
+            Ok(w.0
+                .state()
+                .with(|state| state.favicon.clone())
+                .map(Value::Image))
+        });
         // The link under the pointer, or nil (WKWebView doesn't say).
         fields.add_field_method_get("hovered_link", |_, w| Ok(w.0.hovered_link()));
         // The page's theme colour as "#rrggbbaa", or nil.
@@ -502,6 +510,9 @@ fn web_options(table: &Table) -> mlua::Result<zgx::web_view::WebViewOptions> {
     };
     Ok(WebViewOptions {
         engine,
+        favicons: table
+            .get::<Option<bool>>("favicons")?
+            .unwrap_or(defaults.favicons),
         transparent: table
             .get::<Option<bool>>("transparent")?
             .unwrap_or(defaults.transparent),
@@ -6989,6 +7000,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 "new_windows",
                 "accelerated",
                 "engine",
+                "favicons",
                 "on_navigate",
                 "on_load",
                 "on_title",
