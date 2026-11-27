@@ -70,7 +70,7 @@ fn note(
     ui.prepare_frame();
     let editor = ui.editor(view.node()).unwrap();
     editor.set_line_insets(Some(Rc::new(move |i, _, _| match i {
-        1 | 2 if grouped => LineInset::new(30., 0., 0.).in_group(GROUP).unwrapped(),
+        1 | 2 if grouped => LineInset::new(30., 0., 0.).scroll_group(GROUP).nowrap(true),
         1 | 2 => LineInset::new(30., 0., 0.),
         _ => LineInset::default(),
     })));
@@ -419,7 +419,7 @@ fn a_group_cut_short_tells_its_listener_after_the_draw() {
             .text_wrap(true)
             .line_insets(|_, line: &str, _| {
                 if line.starts_with('c') {
-                    LineInset::new(30., 0., 0.).in_group(GROUP).unwrapped()
+                    LineInset::new(30., 0., 0.).scroll_group(GROUP).nowrap(true)
                 } else {
                     LineInset::default()
                 }
@@ -473,7 +473,7 @@ fn a_theme_change_remeasures_nothing_and_a_new_highlighter_does() {
             .line_insets(move |_, line: &str, state| {
                 r.set(r.get() + 1);
                 if state == 1 && line != "```" {
-                    LineInset::new(0., 0., 0.).in_group(GROUP)
+                    LineInset::new(0., 0., 0.).scroll_group(GROUP)
                 } else {
                     LineInset::default()
                 }

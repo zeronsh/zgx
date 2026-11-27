@@ -6307,20 +6307,20 @@ fn line_insets_of(
                 let mut inset =
                     zgx::widgets::LineInset::new(number("left"), number("above"), number("below"));
                 if table.raw_get::<Option<bool>>("hidden").ok().flatten() == Some(true) {
-                    inset = zgx::widgets::LineInset::hidden();
+                    inset = zgx::widgets::LineInset::default().hidden(true);
                 }
                 // A code block's lines: one scroll group, never wrapped.
                 if let Ok(Some(group)) = table.raw_get::<Option<f64>>("group")
                     && group.is_finite()
                     && group >= 0.
                 {
-                    inset = inset.in_group(group.min(u32::MAX as f64) as u32);
+                    inset = inset.scroll_group(group.min(u32::MAX as f64) as u32);
                 }
                 if matches!(
                     table.raw_get::<mlua::Value>("nowrap"),
                     Ok(mlua::Value::Boolean(true))
                 ) {
-                    inset = inset.unwrapped();
+                    inset = inset.nowrap(true);
                 }
                 inset
             }
