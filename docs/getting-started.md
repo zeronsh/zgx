@@ -229,7 +229,7 @@ LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-script --bin zgx
 
 (For what is not released yet, `--git https://github.com/zeronsh/zgx` before the crate's name installs from the repository.)
 
-(`zgx-run` uses mimalloc as its allocator, for 6–10% less CPU on script, text and layout work at about 2 MB more memory; add `--no-default-features` to keep the system's. `LUAU_CXXFLAGS=-DNDEBUG` builds Luau without its asserts, a fifth faster: the repository's own builds set it in `.cargo/config.toml`, which an install doesn't read. Without it, `zgx-run` says so as it starts.)
+(`zgx-run` uses mimalloc as its allocator, for 6–10% less CPU on script, text and layout work at about 2 MB more memory; add `--no-default-features` to keep the system's. `LUAU_CXXFLAGS=-DNDEBUG` builds Luau without its asserts, a fifth faster: 0.2.0 from crates.io needs it; the repository's own builds define it with nothing set, as 0.2.1 will. Without it, `zgx-run` says so as it starts.)
 
 The quickest start is an app made for you:
 

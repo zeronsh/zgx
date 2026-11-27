@@ -82,7 +82,10 @@ zgx-components = { path = "../zgx-components", version = "0.2.0", optional = tru
 zgx-3d = { path = "../zgx-3d", version = "0.2.0", optional = true }
 zgx-audio = { path = "../zgx-audio", version = "0.2.0", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
-mlua = { package = "zgx-mlua", version = "0.12.10", path = "../../vendor/mlua", features = ["luau"] }
+mlua = { package = "zgx-mlua", version = "0.12.11", path = "../../vendor/mlua", features = ["luau"] }
+# Named so build.rs reads whether Luau was built without its asserts (its
+# `ndebug` metadata reaches only the crates depending on it themselves).
+mlua-sys = { package = "zgx-mlua-sys", version = "0.13.1", path = "../../vendor/mlua-sys", features = ["luau"] }
 memchr = "2.7"
 # The system's loader for native modules (`modules`).
 libloading = { version = "0.8", optional = true }
