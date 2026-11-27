@@ -16,6 +16,8 @@ WebView2's browser keys read back off, `ZGX_WEB_SETTINGS`), and have the
 page's own script start its download, with no handler, one cancelling and
 one saving. Then the real Ctrl+F, a case of its own: BLOCKED, not failed,
 when a system overlay (a notification, Start) holds the foreground for 60 s.
+`--only trust` runs only the page loading and the certificate and
+credentials cases below (as CI's Windows job does).
 `ZGX_WEB_SETTINGS=1` has the app also print each permission WebView2 asks
 for and each download it starts (`WEB_PERMISSION`, `WEB_DOWNLOAD_STARTING`).
 A page's own click that starts no download fails the run; the app opening
@@ -255,6 +257,8 @@ def main():
     parser.add_argument("--shots", type=pathlib.Path, help="save captures here")
     parser.add_argument("--no-foreground", action="store_true",
                         help="send no input: drive the page through the example's stdin")
+    parser.add_argument("--only", choices=["trust"],
+                        help="with --no-foreground, only the page loading and these cases (CI's Windows job)")
     args = parser.parse_args()
     lines = []
     save_dir = pathlib.Path(tempfile.mkdtemp(prefix="zgx-downloads-"))
@@ -282,6 +286,10 @@ def main():
             wait_for(lambda: heard("FINISHED https://zgx.example/"), "the page to load", 30)
             wait_for(lambda: heard("TITLE zgx web view"), "the page's title")
             print("ok: the page loaded and its title reached the state")
+            if args.only == "trust":
+                trust_cases(proc, lines, heard)
+                print("webview smoke (no foreground, trust) passed")
+                return
             unclicked = controlled(proc, window, lines, heard, save_dir)
             trust_cases(proc, lines, heard)
             key_case(proc, window, lines, at)
