@@ -1035,9 +1035,12 @@ pub(crate) fn mount_links(
                     if !scene.contains(node) {
                         return;
                     }
+                    // Painted over the link's lines (`border_over`): a ring
+                    // taking room would move the boxes inside it.
                     let quad = QuadStyle {
                         border_width: border,
                         border_color: ring.color_untracked(crate::theme::tok::FOCUS_RING),
+                        border_over: true,
                         ..Default::default()
                     };
                     scene.set_kind(
@@ -1119,6 +1122,7 @@ pub(crate) fn mount_links(
                     0.
                 },
                 border_color: theme.color(crate::theme::tok::FOCUS_RING),
+                border_over: true,
                 ..Default::default()
             };
             for (i, rect) in rects.iter().skip(1).enumerate() {

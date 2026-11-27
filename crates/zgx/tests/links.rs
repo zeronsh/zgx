@@ -739,3 +739,67 @@ fn a_links_boxes_come_from_the_lines_laid_out_where_its_host_says() {
     }
     assert_eq!(*shaped.borrow(), [], "nothing shaped for the links' boxes");
 }
+
+#[test]
+fn a_links_ring_moves_none_of_its_boxes() {
+    let mut ui = Ui::new(600., 400.);
+    let words = "Read the docs for the details of the layout below.";
+    let _mounted = ui.mount(
+        column().child(
+            rich_text_signal(move || {
+                vec![
+                    text_span("Start: "),
+                    text_span(words).href("https://example.org/docs"),
+                ]
+            })
+            .text_wrap(true)
+            .reactive_style(|| Styles::new().w(120.)),
+        ),
+    );
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    let range = "Start: ".len().."Start: ".len() + words.len();
+    let root = ui.scene.borrow().root();
+    let paragraph = paragraph_under(&ui, root).expect("the paragraph");
+    let link = links(&ui)[0];
+    let ring = |ui: &Ui| match ui.scene.borrow().kind(link) {
+        zgx::scene::NodeKind::Panel { quad, .. } => quad.border_width,
+        // Not yet hovered or focused: no ring made.
+        zgx::scene::NodeKind::Container(_) => 0.,
+        other => panic!("a link's box, not {other:?}"),
+    };
+    let rest = link_rects(&ui, link);
+    assert!(rest.len() > 2, "its words on several lines: {rest:?}");
+    assert_eq!(rest, words_at(&ui, paragraph, range.clone()));
+    assert_eq!(ring(&ui), 0.);
+    // Under the pointer, then focused from the keyboard: its ring shows,
+    // and every box stays on its words.
+    let first = rest[0];
+    ui.dispatch(InputEvent::PointerMove {
+        x: first.x + first.width / 2.,
+        y: first.y + first.height / 2.,
+    });
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    assert_eq!(ring(&ui), 1., "hovered: its ring");
+    assert_eq!(
+        link_rects(&ui, link),
+        rest,
+        "hovered: its boxes where they were"
+    );
+    ui.dispatch(InputEvent::PointerMove { x: 590., y: 390. });
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Tab,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    assert_eq!(ui.input.focused(), Some(link));
+    assert_eq!(ring(&ui), 1., "tabbed to: its ring");
+    assert_eq!(
+        link_rects(&ui, link),
+        rest,
+        "focused: its boxes where they were"
+    );
+}
