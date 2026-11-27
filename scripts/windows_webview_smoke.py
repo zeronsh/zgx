@@ -16,8 +16,8 @@ WebView2's browser keys read back off, `ZGX_WEB_SETTINGS`), and have the
 page's own script start its download, with no handler, one cancelling and
 one saving. Then the real Ctrl+F, a case of its own: BLOCKED, not failed,
 when a system overlay (a notification, Start) holds the foreground for 60 s.
-`--only trust` runs only the page loading and the certificate and
-credentials cases below (as CI's Windows job does).
+`--only trust` runs only the page loading and the certificate,
+credentials and permission cases below (as CI's Windows job does).
 `ZGX_WEB_SETTINGS=1` has the app also print each permission WebView2 asks
 for and each download it starts (`WEB_PERMISSION`, `WEB_DOWNLOAD_STARTING`).
 A page's own click that starts no download fails the run; the app opening
@@ -30,6 +30,7 @@ server, in the page or in a second page on the same profile, is asked
 again, even the second page's load started the moment the app proceeded.
 """
 import argparse
+import json
 import os
 import pathlib
 import subprocess
@@ -246,6 +247,53 @@ def trust_cases(proc, lines, heard):
     print("ok: credentials: none without a handler or with a dropped responder; the app's answer loads the page")
 
 
+def permission_cases(proc, lines, heard):
+    """Permissions (the location, notifications, a camera with a microphone:
+    Chromium's fake devices) through the example's stdin: denied with no
+    handler, denied when the handler drops its responder, given only when it
+    allows. Each ask from an origin of its own (`askN.zgx.example`)."""
+    def send(command):
+        proc.stdin.write(command + "\n")
+        proc.stdin.flush()
+
+    def answered(host):
+        for line in list(lines):
+            if line.startswith("MESSAGE "):
+                try:
+                    message = json.loads(line[len("MESSAGE "):])
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and message.get("at") == host:
+                    return message["perm"]
+        return None
+
+    def ask(step):
+        host = f"ask{step}.zgx.example"
+        send(f"ask {step}")
+        wait_for(lambda: answered(host), f"the page at {host} to say what its permissions answered", 30)
+        heard_here = [line.strip() for line in lines if line.startswith("PERMISSION ") and line.strip().endswith("https://" + host)]
+        return answered(host), heard_here
+
+    denied = {"geo": 1, "notify": "denied", "media": "NotAllowedError"}
+    got, asked = ask(0)
+    assert got == denied and not asked, f"with no permission handler the page got {got}, the app heard {asked}"
+    print("ok: with no permission handler the location, notifications and a camera are denied")
+    send("perm drop")
+    wait_for(lambda: heard("PERMS drop"), "the dropping handler")
+    got, asked = ask(1)
+    assert got == denied and asked, f"with each responder dropped the page got {got}, the app heard {asked}"
+    print(f"ok: each permission responder dropped denies (the app heard {len(asked)})")
+    send("perm allow")
+    wait_for(lambda: heard("PERMS allow"), "the allowing handler")
+    got, asked = ask(2)
+    kinds = " ".join(asked)
+    assert all(kind in kinds for kind in ("Geolocation", "Notifications", "Camera", "Microphone")), asked
+    assert got["notify"] == "granted" and got["media"] == "ok", f"with each request allowed the page got {got}"
+    # The location itself may be off on the runner (Windows' own setting):
+    # allowed, the page gets past the permission, to whatever it finds.
+    print(f"ok: allowed, notifications are granted and the fake camera opens (the location answered {got['geo']})")
+
+
 def key_case(proc, window, lines, at):
     """Ctrl+F from the keyboard, the one case that needs the foreground."""
     deadline = time.monotonic() + 60
@@ -278,7 +326,10 @@ def main():
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         stdin=subprocess.PIPE if args.no_foreground else None,
-        env=dict(os.environ, ZGX_EXAMPLE_SAVE_DIR=str(save_dir), ZGX_WEB_SETTINGS="1"),
+        # Chromium's fake camera and microphone, for the permission cases
+        # (never its fake UI, which would answer the app's prompts itself).
+        env=dict(os.environ, ZGX_EXAMPLE_SAVE_DIR=str(save_dir), ZGX_WEB_SETTINGS="1",
+                 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--use-fake-device-for-media-stream"),
     )
     threading.Thread(target=lambda: lines.extend(proc.stdout), daemon=True).start()
     heard = lambda prefix: any(line.startswith(prefix) for line in lines)
@@ -305,10 +356,12 @@ def main():
             print("ok: the page loaded and its title reached the state")
             if args.only == "trust":
                 trust_cases(proc, lines, heard)
+                permission_cases(proc, lines, heard)
                 print("webview smoke (no foreground, trust) passed")
                 return
             unclicked = controlled(proc, window, lines, heard, save_dir)
             trust_cases(proc, lines, heard)
+            permission_cases(proc, lines, heard)
             key_case(proc, window, lines, at)
             if unclicked:
                 raise AssertionError(

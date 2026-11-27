@@ -743,6 +743,34 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     if not any(line.startswith("zgx basic") for line in session.lines("AUTH ")):
         raise AssertionError(f"the challenges heard were {session.lines('AUTH ')!r}")
     checks["credentials"] = True
+    # Permissions (the location, notifications, a camera with a
+    # microphone: WebKit's mock devices, ZGX_WEB_MOCK_CAPTURE): denied with
+    # no handler, denied when the handler drops its responder, given only
+    # when it allows. Each ask from an origin of its own (`askN.zgx.test`).
+    def ask(step):
+        session.key("ctrl+w")
+        origin = f"https://ask{step}.zgx.test"
+        # WebKit asks about notifications only for a click's request.
+        session.wait(lambda: origin + "/" in session.lines("FINISHED "), f"the page at {origin} never loaded", 20)
+        time.sleep(.5)
+        session.click(*COLOURS["page"][0])
+        found = session.wait(lambda: [m["perm"] for m, at, _ in session.messages() if "perm" in m and at == origin],
+                             f"the page at {origin} never said what its permissions answered", 30)
+        return found[0], [line for line in session.lines("PERMISSION ") if line.endswith(" " + origin)]
+    denied = {"geo": 1, "notify": "denied", "media": "NotAllowedError"}
+    answered, heard = ask(0)
+    if answered != denied or heard:
+        raise AssertionError(f"with no permission handler the page got {answered}, the app heard {heard}")
+    answered, heard = ask(1)
+    if answered != denied or len(heard) < 3:
+        raise AssertionError(f"with each responder dropped the page got {answered}, the app heard {heard}")
+    answered, heard = ask(2)
+    if answered["geo"] == 1 or answered["notify"] != "granted" or answered["media"] != "ok":
+        raise AssertionError(f"with each request allowed the page got {answered}, the app heard {heard}")
+    kinds = " ".join(heard)
+    if not all(kind in kinds for kind in ("Geolocation", "Notifications", "Camera", "Microphone")):
+        raise AssertionError(f"the app heard {heard}")
+    checks["permissions"] = True
     return checks
 
 
@@ -1258,6 +1286,7 @@ def x11(args, output, private):
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
         env["ZGX_PROBE_ICON_PAGE"] = ICON_PAGE
+        env["ZGX_WEB_MOCK_CAPTURE"] = "1"
         env["ZGX_PROBE_TLS_URL"], env["ZGX_PROBE_AUTH_URL"] = TRUST[0][1], TRUST[1][1]
         ime = None
         if args.ime or args.orca:
@@ -1356,6 +1385,7 @@ def wayland(args, output, private):
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
         env["ZGX_PROBE_ICON_PAGE"] = ICON_PAGE
+        env["ZGX_WEB_MOCK_CAPTURE"] = "1"
         env["ZGX_PROBE_TLS_URL"], env["ZGX_PROBE_AUTH_URL"] = TRUST[0][1], TRUST[1][1]
         # A private session bus: Fcitx5 talks on it, and nothing else starts.
         bus_config = pathlib.Path(private, "dbus.conf")

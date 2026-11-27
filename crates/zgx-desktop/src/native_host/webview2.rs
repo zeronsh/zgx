@@ -1334,36 +1334,82 @@ impl Page {
                 )),
                 &mut token,
             );
-            // As WebKit with no delegate for them: pages get no permission
-            // (camera, location, notifications, the clipboard) in the app's
-            // name. All but a page's further downloads, should WebView2 ask
-            // to let a page start more on its own: each is the app's to save
-            // or cancel (`DownloadStarting` below). (WebView2 also holds a
-            // page's second download started without a gesture back until
-            // it navigates, asking nothing: that is its own.)
+            // What a page asks to use is the app's to allow
+            // (`WebView::set_permission_handler`), for that request alone:
+            // nothing is saved in the profile, so the next request asks
+            // again. Without a handler, or with its responder dropped, it's
+            // denied. A page's further downloads, should WebView2 ask to let
+            // a page start more on its own, are allowed: each is the app's
+            // to save or cancel (`DownloadStarting` below). (WebView2 also
+            // holds a page's second download started without a gesture back
+            // until it navigates, asking nothing: that is its own.)
             // `ZGX_WEB_SETTINGS=1` also tells each permission asked and each
             // download started, on stderr (`windows_webview_smoke.py`).
             let report = std::env::var_os("ZGX_WEB_SETTINGS").is_some();
+            let page = on.clone();
             let _ = view.add_PermissionRequested(
                 &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
-                    if let Some(args) = args {
-                        let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
-                        let _ = args.PermissionKind(&mut kind);
-                        let allow =
-                            kind == COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS;
-                        if report {
-                            eprintln!("WEB_PERMISSION kind={} allowed={allow}", kind.0);
-                        }
-                        let _ = args.SetState(if allow {
+                    let Some(args) = args else { return Ok(()) };
+                    let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                    let _ = args.PermissionKind(&mut kind);
+                    if report {
+                        eprintln!("WEB_PERMISSION kind={}", kind.0);
+                    }
+                    if kind == COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS {
+                        let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+                        return Ok(());
+                    }
+                    let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY);
+                    if let Ok(args) = args.cast::<ICoreWebView2PermissionRequestedEventArgs3>() {
+                        let _ = args.SetSavesInProfile(false);
+                    }
+                    let url = take(|v| args.Uri(v));
+                    let deferral = args.GetDeferral()?;
+                    let answer = move |allowed: bool| {
+                        // WebView2 on the UI thread, where answers come
+                        // (inside the handlers' `unsafe` block).
+                        let _ = args.SetState(if allowed {
                             COREWEBVIEW2_PERMISSION_STATE_ALLOW
                         } else {
                             COREWEBVIEW2_PERMISSION_STATE_DENY
                         });
-                    }
+                        let _ = deferral.Complete();
+                    };
+                    ask_permission(&page, url, vec![permission_kind(kind)], answer);
                     Ok(())
                 })),
                 &mut token,
             );
+            // A page's `getDisplayMedia`: WebView2's own picker shows only
+            // once the app allows it; denied, the page's call fails.
+            if let Ok(view27) = view.cast::<ICoreWebView2_27>() {
+                let page = on.clone();
+                let _ = view27.add_ScreenCaptureStarting(
+                    &ScreenCaptureStartingEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let _ = args.SetCancel(true);
+                        let url = args
+                            .OriginalSourceFrameInfo()
+                            .ok()
+                            .map(|frame| take(|v| frame.Source(v)))
+                            .unwrap_or_default();
+                        let deferral = args.GetDeferral()?;
+                        let answer = move |allowed: bool| {
+                            // As above.
+                            let _ = args.SetCancel(!allowed);
+                            let _ = deferral.Complete();
+                        };
+                        ask_permission(
+                            &page,
+                            url,
+                            vec![zgx::web_view::PermissionKind::ScreenCapture],
+                            answer,
+                        );
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+            }
             // The status bar's text (hidden above) is the link under the
             // pointer: the page's hovered link.
             if let Ok(view) = view.cast::<ICoreWebView2_12>() {
@@ -2666,6 +2712,65 @@ fn origin_of(url: &str) -> String {
         scheme.to_ascii_lowercase(),
         host.to_ascii_lowercase()
     )
+}
+
+/// WebView2's permission kind as zgx's.
+fn permission_kind(kind: COREWEBVIEW2_PERMISSION_KIND) -> zgx::web_view::PermissionKind {
+    use zgx::web_view::PermissionKind as Kind;
+    match kind {
+        COREWEBVIEW2_PERMISSION_KIND_CAMERA => Kind::Camera,
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => Kind::Microphone,
+        COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION => Kind::Geolocation,
+        COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS => Kind::Notifications,
+        COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ => Kind::ClipboardRead,
+        COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES => Kind::Midi,
+        COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS => Kind::Other("sensors".into()),
+        COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE => Kind::Other("file-read-write".into()),
+        COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY => Kind::Other("autoplay".into()),
+        COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS => Kind::Other("local-fonts".into()),
+        COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT => Kind::Other("window-management".into()),
+        other => Kind::Other(format!("permission {}", other.0)),
+    }
+}
+
+/// Hand a page's permission request to the app's handler, on the UI
+/// thread's next turn; `answer` hears its decision. A request no handler
+/// ever sees (the page or its controller gone first) is denied.
+fn ask_permission(
+    page: &impl Fn(&dyn Fn(&Rc<Page>)),
+    url: String,
+    kinds: Vec<zgx::web_view::PermissionKind>,
+    answer: impl FnOnce(bool) + 'static,
+) {
+    let answer = Rc::new(DenyUnanswered(RefCell::new(Some(Box::new(answer)))));
+    page(&|page| {
+        let answer = answer.clone();
+        let (url, kinds) = (url.clone(), kinds.clone());
+        page.post(move |web| {
+            let origin = origin_of(&url);
+            let responder =
+                zgx::web_view::PermissionResponder::new(move |allowed| answer.answer(allowed));
+            web.permission_request(
+                zgx::web_view::PermissionRequest::new(url, origin, kinds),
+                responder,
+            );
+        });
+    });
+}
+
+/// A permission answer, given once: denied if it's dropped unanswered.
+struct DenyUnanswered(RefCell<Option<Box<dyn FnOnce(bool)>>>);
+impl DenyUnanswered {
+    fn answer(&self, allowed: bool) {
+        if let Some(answer) = self.0.borrow_mut().take() {
+            answer(allowed);
+        }
+    }
+}
+impl Drop for DenyUnanswered {
+    fn drop(&mut self) {
+        self.answer(false);
+    }
 }
 
 /// What a navigation's failure says.

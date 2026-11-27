@@ -45,6 +45,27 @@ use zgx::{
 };
 use zgx_desktop::{Application, MenuAction, WindowOptions};
 
+/// A page asking for the location and a camera with a microphone as it
+/// loads, and notifications on a click, then posting what each answered
+/// (Ctrl+W).
+const PERMISSIONS: &str = r#"<!doctype html><title>permissions</title><body>asking<script>
+const out = {};
+const done = (key, value) => {
+  out[key] = value;
+  if (Object.keys(out).length == 3) window.zgx.postMessage({ perm: out });
+};
+navigator.geolocation.getCurrentPosition(() => done("geo", "ok"), (e) => done("geo", e.code), { timeout: 8000 });
+// WebKit asks about notifications only for a click's request.
+document.addEventListener("click", () => {
+  Notification.requestPermission().then((p) => done("notify", p), (e) => done("notify", String(e)));
+}, { once: true });
+if (navigator.mediaDevices) {
+  navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(
+    (s) => { s.getTracks().forEach((t) => t.stop()); done("media", "ok"); },
+    (e) => done("media", e.name));
+} else done("media", "none");
+</script>"#;
+
 const PAGE: &str = r#"<!doctype html><html><head><title>probe page</title><meta name="theme-color" content="rgb(51,102,153)"><style>
 html, body { margin: 0; background: rgb(0, 0, 255); height: 3000px; }
 #field { position: absolute; left: 20px; top: 20px; width: 300px; height: 40px; font-size: 20px; box-sizing: border-box; }
@@ -133,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 responder.proceed();
             });
             let answering = std::rc::Rc::new(std::cell::Cell::new(true));
+            let asks = std::rc::Rc::new(std::cell::Cell::new(0_u32));
             web.set_auth_handler({
                 let answering = answering.clone();
                 move |challenge, responder| {
@@ -327,6 +349,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         _ => {}
                     }
+                    // Ctrl+W: a page asking for the location, notifications
+                    // and a camera with a microphone, each press from an
+                    // origin of its own (WebKit holds a denial for the
+                    // document, and notifications' for the origin): first
+                    // with no permission handler, then one dropping each
+                    // responder, then one allowing. `PERMISSION <kinds>
+                    // <origin>` as the handler hears each; the page posts
+                    // `{"perm": {"geo", "notify", "media"}}`.
+                    if action.0 == "w" {
+                        let step = asks.get();
+                        asks.set(step + 1);
+                        if step > 0 {
+                            let allow = step > 1;
+                            inspect.set_permission_handler(move |request, responder| {
+                                println!("PERMISSION {:?} {}", request.kinds, request.origin);
+                                if allow {
+                                    responder.allow();
+                                }
+                            });
+                        }
+                        inspect
+                            .load_html(PERMISSIONS, Some(&format!("https://ask{step}.zgx.test/")));
+                    }
                     // Ctrl+O: select all of the page and copy it; Ctrl+U:
                     // reload ignoring the cache (`EDIT`/`RELOAD` say how
                     // each went).
@@ -385,7 +430,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("h").reserved())
                     .bind(bind("t").reserved())
                     .bind(bind("b").reserved())
-                    .bind(bind("n").reserved()),
+                    .bind(bind("n").reserved())
+                    .bind(bind("w").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {

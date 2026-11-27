@@ -25,7 +25,11 @@
 //! drops the responder unanswered; `race` proceeds and at once has the
 //! second page load the same server (`/race`). `auth answer|drop` sets its
 //! credentials handler: `AUTH <realm> <scheme>`, then `zgx`/`secret` or
-//! the responder dropped.
+//! the responder dropped. `perm drop|allow` sets the page's permission
+//! handler (`PERMISSION <kinds> <origin>`, then the responder dropped or
+//! allowed; before any, there is none) and `ask <n>` loads a page from
+//! `https://ask<n>.zgx.example/` asking for the location, notifications
+//! and a camera with a microphone, which posts what each answered.
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
@@ -544,6 +548,35 @@ fn handle_certificates(web: &WebView, second: &WebView, how: &str) {
     });
 }
 
+/// `--control`'s `perm drop|allow`: the page's permission handler.
+fn handle_permissions(web: &WebView, allow: bool) {
+    web.set_permission_handler(move |request, responder| {
+        println!("PERMISSION {:?} {}", request.kinds, request.origin);
+        if allow {
+            responder.allow();
+        }
+    });
+    println!("PERMS {}", if allow { "allow" } else { "drop" });
+}
+
+/// `--control`'s `ask <n>`: a page asking for the location, notifications
+/// and a camera with a microphone as it loads, posting what each answered
+/// with its host.
+const PERMISSIONS: &str = r#"<!doctype html><title>permissions</title><body>asking<script>
+const out = {};
+const done = (key, value) => {
+  out[key] = value;
+  if (Object.keys(out).length == 3) window.zgx.postMessage({ perm: out, at: location.host });
+};
+navigator.geolocation.getCurrentPosition(() => done("geo", "ok"), (e) => done("geo", e.code), { timeout: 8000 });
+Notification.requestPermission().then((p) => done("notify", p), (e) => done("notify", String(e)));
+if (navigator.mediaDevices) {
+  navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(
+    (s) => { s.getTracks().forEach((t) => t.stop()); done("media", "ok"); },
+    (e) => done("media", e.name));
+} else done("media", "none");
+</script>"#;
+
 /// `--control`'s `auth answer|drop`: the page's credentials handler.
 fn handle_auth(web: &WebView, answer: bool) {
     web.set_auth_handler(move |challenge, responder| {
@@ -584,6 +617,11 @@ fn follow_commands(cx: &mut zgx_desktop::WindowContext, web: WebView, second: We
                     "load2" => second.load_url(rest),
                     "cert" => handle_certificates(&web, &second, rest),
                     "auth" => handle_auth(&web, rest == "answer"),
+                    "perm" => handle_permissions(&web, rest == "allow"),
+                    "ask" => web.load_html(
+                        PERMISSIONS,
+                        Some(&format!("https://ask{rest}.zgx.example/")),
+                    ),
                     _ => println!("CONTROL unknown: {line}"),
                 }
             }

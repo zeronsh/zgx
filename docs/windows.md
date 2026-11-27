@@ -694,8 +694,12 @@ Unlike macOS:
   `https://zgx-file.invalid/` along with the files of its folder (WebView2
   asks the app for no `file:` request), so its origin is that host.
 
-As with WebKit without delegates for them, pages get no permission (camera,
-microphone, location, notifications, clipboard reads). A download is the app's
+What a page asks to use (a camera, a microphone, the location,
+notifications, the clipboard, the screen) is the app's to allow
+(`WebView::set_permission_handler`), for that request alone: WebView2 keeps
+no decision in the profile (`SavesInProfile` off), and with no handler, or a
+responder dropped, it's denied
+([the details](native-surfaces.md#permissions)). A download is the app's
 (`WebView::set_download_handler`): saved where it says, with WebView2's
 download bar hidden, or cancelled, as with no handler. A certificate error
 reaches the app (`WebView::set_certificate_handler`) and is cancelled: a

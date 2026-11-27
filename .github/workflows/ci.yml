@@ -892,8 +892,10 @@ jobs:
       # the example's stdin: certificate errors (no handler and a dropped
       # responder cancel; a proceed loads nothing, and later loads, in the
       # page and a second page on the profile, are still asked) and
-      # credentials (scripts/windows_webview_smoke.py).
-      - name: WebView2 certificates and credentials
+      # credentials, and permissions (denied with no handler and with a
+      # dropped responder; allowed, Chromium's fake camera opens)
+      # (scripts/windows_webview_smoke.py).
+      - name: WebView2 certificates, credentials and permissions
         timeout-minutes: 20
         run: |
           cargo build -p zgx-desktop --features webview2 --example web_view --locked

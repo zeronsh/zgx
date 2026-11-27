@@ -348,6 +348,94 @@ impl std::fmt::Debug for AuthResponder {
         f.write_str("AuthResponder")
     }
 }
+/// What a page asks to use ([`PermissionRequest::kinds`]).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PermissionKind {
+    /// A camera (`getUserMedia` video).
+    Camera,
+    /// A microphone (`getUserMedia` audio).
+    Microphone,
+    /// The screen or a window (`getDisplayMedia`).
+    ScreenCapture,
+    /// The device's location (`navigator.geolocation`).
+    Geolocation,
+    /// Showing notifications (`Notification.requestPermission`).
+    Notifications,
+    /// Reading the clipboard from script (`navigator.clipboard.read`).
+    ClipboardRead,
+    /// MIDI devices, with system-exclusive messages (`requestMIDIAccess`).
+    Midi,
+    /// Locking the pointer (`requestPointerLock`).
+    PointerLock,
+    /// Anything else, as the engine names it.
+    Other(String),
+}
+/// A page asking to use something only the app may grant
+/// ([`WebView::set_permission_handler`]).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PermissionRequest {
+    /// The page asking (its frame's URL where the engine says).
+    pub url: String,
+    /// The origin asking: scheme, host and port.
+    pub origin: String,
+    /// What it asks for, together (a camera and a microphone for one
+    /// `getUserMedia` call).
+    pub kinds: Vec<PermissionKind>,
+}
+impl PermissionRequest {
+    /// A request from `url` (for hosts).
+    pub fn new(
+        url: impl Into<String>,
+        origin: impl Into<String>,
+        kinds: Vec<PermissionKind>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            origin: origin.into(),
+            kinds,
+        }
+    }
+}
+/// Answers one [`PermissionRequest`], once, now or later. Dropping it
+/// unanswered denies.
+#[doc(hidden)]
+pub struct PermissionResponder(Option<Box<dyn FnOnce(bool)>>);
+impl PermissionResponder {
+    /// `deliver` hears `true` to allow, `false` to deny (for hosts).
+    pub fn new(deliver: impl FnOnce(bool) + 'static) -> Self {
+        Self(Some(Box::new(deliver)))
+    }
+    /// Allow it, for this request: no engine keeps the decision in its
+    /// profile, so the next request asks again. What the page then holds
+    /// may last longer: [`PermissionKind::Notifications`] allowed stays
+    /// granted for that origin for the session on WebKit
+    /// (`Notification.permission` is "granted" until the app quits), and
+    /// a camera or microphone stream the page opened stays open until it
+    /// stops it or navigates away.
+    pub fn allow(mut self) {
+        if let Some(deliver) = self.0.take() {
+            deliver(true);
+        }
+    }
+    /// Deny it.
+    pub fn deny(self) {}
+}
+impl Drop for PermissionResponder {
+    fn drop(&mut self) {
+        if let Some(deliver) = self.0.take() {
+            deliver(false);
+        }
+    }
+}
+impl std::fmt::Debug for PermissionResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PermissionResponder")
+    }
+}
 
 /// Serves a URL scheme of the app's own (`myapp://…`) to pages: `serve` is
 /// called on the UI thread for each request and may answer later, from
@@ -912,9 +1000,11 @@ struct Inner {
     downloads: RefCell<Option<DownloadHandler>>,
     certificates: RefCell<Option<CertificateHandler>>,
     auth: RefCell<Option<AuthHandler>>,
+    permissions: RefCell<Option<PermissionHandler>>,
 }
 type CertificateHandler = Rc<dyn Fn(&CertificateError, CertificateResponder)>;
 type AuthHandler = Rc<dyn Fn(&AuthChallenge, AuthResponder)>;
+type PermissionHandler = Rc<dyn Fn(&PermissionRequest, PermissionResponder)>;
 /// The window's file dialogs and the component that waits on them, from
 /// the node showing a page (`WebView::choose_files`).
 struct Chooser {
@@ -1003,6 +1093,7 @@ impl WebView {
             chooser: RefCell::new(None),
             certificates: RefCell::new(None),
             auth: RefCell::new(None),
+            permissions: RefCell::new(None),
             downloads: RefCell::new(None),
         }))
     }
@@ -1384,6 +1475,28 @@ impl WebView {
         match handler {
             Some(handler) => handler(&challenge, responder),
             None => responder.cancel(),
+        }
+    }
+    /// Decide what a page asks to use: a camera, a microphone, the screen,
+    /// the location, notifications, the clipboard (see [`PermissionKind`]).
+    /// `handler` gets each request and a responder to allow or deny it.
+    /// Without a handler, or with a responder dropped, it's denied. What an
+    /// engine has no way to ask about is denied without asking.
+    #[doc(hidden)]
+    pub fn set_permission_handler(
+        &self,
+        handler: impl Fn(&PermissionRequest, PermissionResponder) + 'static,
+    ) {
+        *self.0.permissions.borrow_mut() = Some(Rc::new(handler));
+    }
+    /// A permission request, for the app's handler (for hosts): denied at
+    /// once without one.
+    #[doc(hidden)]
+    pub fn permission_request(&self, request: PermissionRequest, responder: PermissionResponder) {
+        let handler = self.0.permissions.borrow().clone();
+        match handler {
+            Some(handler) => handler(&request, responder),
+            None => responder.deny(),
         }
     }
     /// Open Web Inspector, when [`WebViewOptions::inspectable`].
@@ -1843,6 +1956,41 @@ mod tests {
             *heard.borrow(),
             [None, None, Some(("ada".to_owned(), "secret".to_owned()))]
         );
+    }
+
+    #[test]
+    fn permissions_are_denied_unless_the_app_allows() {
+        let runtime = crate::reactive::Runtime::new();
+        let web = WebView::new(&runtime, WebViewOptions::default());
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let responder = || {
+            let heard = heard.clone();
+            PermissionResponder::new(move |allowed| heard.borrow_mut().push(allowed))
+        };
+        let request = || {
+            PermissionRequest::new(
+                "https://a.test/call",
+                "https://a.test",
+                vec![PermissionKind::Camera, PermissionKind::Microphone],
+            )
+        };
+        // No handler: denied.
+        web.permission_request(request(), responder());
+        // A handler that drops the responder: denied.
+        web.set_permission_handler(|_, responder| drop(responder));
+        web.permission_request(request(), responder());
+        // An explicit deny, then an allow.
+        web.set_permission_handler(|_, responder| responder.deny());
+        web.permission_request(request(), responder());
+        web.set_permission_handler(|request, responder| {
+            assert_eq!(
+                request.kinds,
+                [PermissionKind::Camera, PermissionKind::Microphone]
+            );
+            responder.allow();
+        });
+        web.permission_request(request(), responder());
+        assert_eq!(*heard.borrow(), [false, false, false, true]);
     }
 
     #[test]
