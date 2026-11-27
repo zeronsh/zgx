@@ -509,19 +509,20 @@ fn audio_without_an_engine_says_how_to_give_one() {
     );
 }
 
+/// A script beside the root plays on the normal buses, with the whole
+/// `audio` API, at most as many voices as its `Limits::voices`.
 #[test]
-fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
-    let tone = wav("plugin", 1.);
+fn a_script_beside_the_root_plays_on_the_normal_buses_within_its_voices() {
+    let tone = wav("beside", 1.);
     let dir = tone.parent().unwrap().to_path_buf();
-    let entry = dir.join("init.luau");
-    std::fs::write(
-        &entry,
-        format!(
+    let mut s = with_script(
+        &dir,
+        &format!(
             "{READY}
-            local tone = audio.sound(\"plugin.wav\")
+            local tone = audio.sound(\"beside.wav\")
             ui.contribute(\"bar\", ui.column {{
                 ui.text {{ id = \"ready\", count_ready(tone) }},
-                ui.text {{ id = \"reach\", tostring(audio.bus(\"music\") == nil and audio.prewarm == nil and audio.ui_sounds_enabled == nil) }},
+                ui.text {{ id = \"reach\", tostring(audio.bus(\"music\") ~= nil and audio.prewarm ~= nil and audio.ui_sounds_enabled ~= nil) }},
                 ui.button {{
                     id = \"nine\",
                     on_click = function()
@@ -533,109 +534,23 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
                 }},
             }})"
         ),
-    )
-    .unwrap();
-    let mut s = Sounding::with(move |runtime| {
-        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })");
-        host.set_plugins(vec![zgx_script::Plugin {
-            name: "sfx".into(),
-            entry,
-            grants: vec![zgx_script::Capability::Audio],
-        }]);
-        host
-    });
-    s.ready(1);
-    assert_eq!(
-        s.app.text("reach"),
-        "true",
-        "no other bus, prewarm or setting"
+        zgx_script::Limits {
+            voices: Some(8),
+            ..Default::default()
+        },
     );
+    s.ready(1);
+    assert_eq!(s.app.text("reach"), "true", "every bus and setting");
     s.app.click("nine");
-    assert_eq!(s.audio.voices_playing(), 8, "the ninth is refused");
+    assert_eq!(s.audio.voices_playing(), 8, "the ninth is past its voices");
     let level = s.render(0.05);
     assert!((level.last().unwrap() - 0.4).abs() < 0.01, "{level:?}");
-    assert!(s.audio.bus("plugin:sfx").is_some());
-    // Under `ui`: the user's interface-sound setting silences it.
-    s.audio.set_ui_sounds(false).unwrap();
-    let level = s.render(0.05);
-    assert_eq!(*level.last().unwrap(), 0.);
+    assert!(s.audio.bus("plugin:sfx").is_none(), "no bus of its own");
+    assert!(s.audio.bus("script:sfx").is_none(), "no bus of its own");
 }
 
-/// Without the `audio` grant a plugin's `audio` calls are errors saying
-/// so: it loads nothing, plays nothing and has no bus.
-#[test]
-fn a_plugin_not_granted_audio_is_refused() {
-    let tone = wav("refused", 0.1);
-    let dir = tone.parent().unwrap().join("refused-plugin");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(&tone, dir.join("tone.wav")).unwrap();
-    let entry = dir.join("init.luau");
-    std::fs::write(
-        &entry,
-        "local _, said = pcall(audio.sound, \"tone.wav\")
-        local _, now = pcall(audio.now)
-        ui.contribute(\"bar\", ui.column {
-            ui.text { id = \"said\", tostring(said) },
-            ui.text { id = \"now\", tostring(now) },
-        })",
-    )
-    .unwrap();
-    let mut s = Sounding::with(move |runtime| {
-        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })");
-        host.set_plugins(vec![zgx_script::Plugin {
-            name: "sfx".into(),
-            entry,
-            grants: vec![],
-        }]);
-        host
-    });
-    s.app.frames(2);
-    for (id, call) in [("said", "audio.sound"), ("now", "audio.now")] {
-        let said = s.app.text(id);
-        assert!(
-            said.contains(&format!(
-                "{call}: a plugin does this only if the host grants it"
-            )),
-            "{said}"
-        );
-    }
-    assert!(s.audio.bus("plugin:sfx").is_none());
-    assert_eq!(s.audio.voices_playing(), 0);
-}
-
-/// `"audio"` in a plugin's `allow` (zgx.json) is the grant.
-#[test]
-fn the_audio_grant_is_read_from_zgx_json() {
-    let tone = wav("granted", 0.1);
-    let dir = tone.parent().unwrap().join("granted-app");
-    std::fs::create_dir_all(dir.join("plugins/sfx")).unwrap();
-    std::fs::copy(&tone, dir.join("plugins/sfx/tone.wav")).unwrap();
-    std::fs::write(
-        dir.join("app.luau"),
-        "return ui.slot(\"bar\", { id = \"bar\" })",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("plugins/sfx/init.luau"),
-        "local ok = pcall(audio.sound, \"tone.wav\")
-        ui.contribute(\"bar\", ui.text { id = \"ok\", tostring(ok) })",
-    )
-    .unwrap();
-    let config = |allow: &str| {
-        format!(r#"{{ "plugins": {{ "sfx": {{ "path": "plugins/sfx", "allow": [{allow}] }} }} }}"#)
-    };
-    for (allow, ok) in [("\"audio\"", "true"), ("", "false")] {
-        std::fs::write(dir.join("zgx.json"), config(allow)).unwrap();
-        let config = zgx_script::app_config::read(&dir).unwrap();
-        let app = dir.join("app.luau");
-        let mut s = Sounding::with(move |runtime| config.apply(ScriptHost::new(runtime, app)));
-        s.app.frames(2);
-        assert_eq!(s.app.text("ok"), ok, "allow [{allow}]");
-    }
-}
-
-/// The plugin example: its zgx.json grants `audio` and `scene3d`, and its
-/// plugin's button chimes on the plugin's own bus and turns its box.
+/// The plugin example: the script its zgx.json loads beside the app chimes
+/// and turns its box.
 #[cfg(feature = "scene3d")]
 #[test]
 fn the_plugin_media_example_chimes_and_draws() {
@@ -651,7 +566,6 @@ fn the_plugin_media_example_chimes_and_draws() {
             .audio_engine()
             .is_some_and(|a| a.voices_playing() > 0)
     }));
-    assert!(s.audio.bus("plugin:chime").is_some());
     assert!(s.render(0.05).iter().any(|&l| l > 0.01), "a chime");
     assert!(
         s.app.text("spins").starts_with("Chimed "),
@@ -798,80 +712,16 @@ fn sound_takes_a_sound_its_with_or_a_choice_alone() {
     }
 }
 
-/// A plugin `sfx` in a directory of its own (with `init.luau` from
-/// `code`), loaded beside an app with a `bar` slot.
-fn with_plugin(dir: &std::path::Path, code: &str) -> Sounding {
+/// A script `sfx` in a directory of its own (with `init.luau` from
+/// `code`), within `limits`, loaded beside an app with a `bar` slot.
+fn with_script(dir: &std::path::Path, code: &str, limits: zgx_script::Limits) -> Sounding {
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
     Sounding::with(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })");
-        host.set_plugins(vec![zgx_script::Plugin {
-            name: "sfx".into(),
-            entry,
-            grants: vec![zgx_script::Capability::Audio],
-        }]);
+        host.set_scripts(vec![zgx_script::Script::file("sfx", entry).limits(limits)]);
         host
     })
-}
-
-#[test]
-fn a_plugin_loads_sounds_from_its_own_directory_alone() {
-    // A sound outside the plugin's directory, and a link to it inside.
-    let outside = wav("secret", 0.05);
-    let dir = std::env::temp_dir().join(format!("zgx-audio-confined-{}", std::process::id()));
-    let plugin = dir.join("plugin");
-    std::fs::create_dir_all(&plugin).unwrap();
-    std::fs::copy(&outside, dir.join("beside.wav")).unwrap();
-    std::fs::copy(&outside, plugin.join("own.wav")).unwrap();
-    let link = plugin.join("link.wav");
-    let _ = std::fs::remove_file(&link);
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let mut s = with_plugin(
-        &plugin,
-        &format!(
-            "local said = {{}}
-            local function try(call, src)
-                local ok, why = pcall(call, src)
-                table.insert(said, if ok then \"loaded\" else tostring(why))
-            end
-            try(audio.sound, \"{outside}\")
-            try(audio.sound, \"../beside.wav\")
-            try(audio.sound, \"link.wav\")
-            try(audio.sound, \"{missing}\")
-            {music}
-            try(audio.sound, \"own.wav\")
-            ui.contribute(\"bar\", ui.text {{ id = \"said\", table.concat(said, \"|\") }})",
-            outside = outside.display(),
-            missing = dir.join("nothing-here.wav").display(),
-            // `audio.music` with `audio-streams`.
-            music = if cfg!(feature = "audio-streams") {
-                "try(audio.music, \"../beside.wav\")"
-            } else {
-                ""
-            },
-        ),
-    );
-    let said = s.app.text("said");
-    let said: Vec<&str> = said.split('|').collect();
-    let calls = if cfg!(feature = "audio-streams") {
-        6
-    } else {
-        5
-    };
-    assert_eq!(said.len(), calls, "{said:?}");
-    assert_eq!(said[calls - 1], "loaded", "its own sound");
-    for refused in &said[..calls - 1] {
-        assert!(
-            refused.contains("a plugin's sounds come from its directory or below"),
-            "{said:?}"
-        );
-    }
-    // A refusal says nothing of what's there: a file and no file read alike.
-    let tail = |s: &str| s.rsplit(':').next().unwrap_or_default().to_string();
-    assert_eq!(tail(said[0]), tail(said[3]), "{said:?}");
-    s.render(0.01);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -919,11 +769,11 @@ fn a_binding_given_nan_lets_the_window_go_idle() {
 // Streamed music: zgx-script's `audio-streams`.
 #[cfg(feature = "audio-streams")]
 #[test]
-fn a_plugins_streams_count_among_its_voices() {
+fn a_scripts_streams_count_among_its_voices() {
     let dir = std::env::temp_dir().join(format!("zgx-audio-streams-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(wav("stream", 1.), dir.join("loop.wav")).unwrap();
-    let mut s = with_plugin(
+    let mut s = with_script(
         &dir,
         "local played = {}
         ui.contribute(\"bar\", ui.button {
@@ -935,45 +785,39 @@ fn a_plugins_streams_count_among_its_voices() {
             end,
             \"Many\",
         })",
+        zgx_script::Limits {
+            voices: Some(8),
+            ..Default::default()
+        },
     );
     s.app.click("many");
-    assert_eq!(s.audio.voices_playing(), 8, "streams count against the 8");
+    assert_eq!(s.audio.voices_playing(), 8, "streams count against its 8");
     s.render(0.01);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn a_plugins_sounds_count_against_its_memory() {
+fn a_scripts_sounds_count_against_its_memory() {
     let dir = std::env::temp_dir().join(format!("zgx-audio-memory-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     // 16 s of mono at 48 kHz decodes to 3 MB of floats, past the 2 MiB.
     std::fs::copy(wav("big", 16.), dir.join("big.wav")).unwrap();
-    let entry = dir.join("init.luau");
-    std::fs::write(
-        &entry,
+    let mut s = with_script(
+        &dir,
         "local big = audio.sound(\"big.wav\")
         ui.contribute(\"bar\", ui.text { id = \"error\", function() return tostring(big.error:get()) end })",
-    )
-    .unwrap();
-    let mut s = Sounding::with(move |runtime| {
-        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })")
-            .limits(zgx_script::Limits {
-                plugin_memory: 2 << 20,
-                ..Default::default()
-            });
-        host.set_plugins(vec![zgx_script::Plugin {
-            name: "sfx".into(),
-            entry,
-            grants: vec![zgx_script::Capability::Audio],
-        }]);
-        host
-    });
+        zgx_script::Limits {
+            memory: Some(2 << 20),
+            count_state: true,
+            ..Default::default()
+        },
+    );
     assert!(
         s.app.wait_until(|app| app.text("error") != "nil"),
         "the decode is refused"
     );
     assert!(
-        s.app.text("error").contains("plugin's memory"),
+        s.app.text("error").contains("script's memory"),
         "{}",
         s.app.text("error")
     );
@@ -1246,65 +1090,24 @@ fn a_voice_crossfades_to_another() {
 // The mixer's effects: zgx-script's `audio-effects`.
 #[cfg(feature = "audio-effects")]
 #[test]
-fn a_plugin_puts_effects_on_its_own_bus_within_its_limits() {
-    let dir = std::env::temp_dir().join(format!("zgx-audio-plugin-fx-{}", std::process::id()));
+fn a_scripts_effects_count_against_its_memory() {
+    let dir = std::env::temp_dir().join(format!("zgx-audio-script-fx-mem-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let mut s = with_plugin(
+    let mut s = with_script(
         &dir,
-        "local said = {}
-        local own = audio.bus()
-        table.insert(said, tostring(audio.bus(\"music\") == nil))
-        local function try(f)
-            local ok, why = pcall(f)
-            table.insert(said, if ok then \"ok\" else tostring(why))
-        end
-        for _ = 1, 5 do
-            try(function() own:add_effect(audio.low_pass { cutoff = 8000 }) end)
-        end
-        try(function() own:duck(own, {}) end)
-        ui.contribute(\"bar\", ui.text { id = \"said\", table.concat(said, \"|\") })",
-    );
-    let said = s.app.text("said");
-    let said: Vec<&str> = said.split('|').collect();
-    assert_eq!(said[0], "true", "no other bus");
-    assert_eq!(&said[1..5], ["ok"; 4], "{said:?}");
-    assert!(said[5].contains("at most 4 effects"), "{said:?}");
-    assert!(said[6].contains("ducks under no other"), "{said:?}");
-    s.render(0.01);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-// The mixer's effects: zgx-script's `audio-effects`.
-#[cfg(feature = "audio-effects")]
-#[test]
-fn a_plugins_effects_count_against_its_memory() {
-    let dir = std::env::temp_dir().join(format!("zgx-audio-plugin-fx-mem-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let entry = dir.join("init.luau");
-    std::fs::write(
-        &entry,
         "local ok, why = pcall(function()
-            audio.bus():add_effect(audio.delay { time = 0.5, longest = 10 })
+            audio.bus(\"music\"):add_effect(audio.delay { time = 0.5, longest = 10 })
         end)
         ui.contribute(\"bar\", ui.text { id = \"said\", if ok then \"ok\" else tostring(why) })",
-    )
-    .unwrap();
-    let mut s = Sounding::with(move |runtime| {
-        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })")
-            .limits(zgx_script::Limits {
-                plugin_memory: 2 << 20,
-                ..Default::default()
-            });
-        host.set_plugins(vec![zgx_script::Plugin {
-            name: "sfx".into(),
-            entry,
-            grants: vec![zgx_script::Capability::Audio],
-        }]);
-        host
-    });
+        zgx_script::Limits {
+            memory: Some(2 << 20),
+            count_state: true,
+            ..Default::default()
+        },
+    );
     // 10 s of stereo line is 3.8 MB.
     assert!(
-        s.app.text("said").contains("plugin's memory"),
+        s.app.text("said").contains("script's memory"),
         "{}",
         s.app.text("said")
     );

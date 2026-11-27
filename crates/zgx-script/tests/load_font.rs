@@ -1,6 +1,6 @@
 //! `ui.load_font`: a font file a script loads is shaped with by name, where
 //! text in its family fell back before; a file that is not a font is an
-//! error; a plugin loads one only if its host grants `Capability::Fonts`.
+//! error; a script beside the root loads one as the root does.
 mod common;
 use common::Harness;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -42,7 +42,7 @@ impl Platform for Fonts {
     }
 }
 
-fn app(code: String, plugin: Option<(String, bool)>) -> Harness {
+fn app(code: String, beside: Option<String>) -> Harness {
     let fonts = Rc::new(Fonts {
         services: zgx_gpu::TextServices::new(),
         scene: RefCell::new(None),
@@ -51,13 +51,10 @@ fn app(code: String, plugin: Option<(String, bool)>) -> Harness {
     let h = Harness::wrapped(
         move |runtime| {
             let host = ScriptHost::inline(runtime, "app", code);
-            match plugin {
-                Some((code, true)) => host
-                    .plugin("fonts.luau", code)
-                    .grant("fonts.luau", zgx_script::Capability::Fonts),
-                Some((code, false)) => host.plugin("fonts.luau", code),
-                None => host,
+            if let Some(code) = beside {
+                host.set_scripts(vec![zgx_script::Script::code("fonts.luau", code)]);
             }
+            host
         },
         move |view| zgx::compose::provide(PlatformService(platform), view),
     );
@@ -186,20 +183,17 @@ fn a_file_that_is_not_a_font_is_an_error() {
     );
 }
 
+/// A script beside the root loads a font from anywhere, as the root does.
 #[test]
-fn a_plugin_loads_a_font_only_if_granted_and_only_its_own() {
-    let plugin = format!("local _ = ui.task(function() ui.load_font({FONT:?}):await() end)");
-    let shown = "return ui.text { \"app\" }".to_owned();
-    let mut h = app(shown.clone(), Some((plugin.clone(), false)));
-    settled(&mut h);
-    let error = h.host.error().get().unwrap_or_default();
-    assert!(error.contains("Capability::Fonts"), "{error}");
-    // Granted, it still reads only inside its own directory.
-    let mut h = app(shown, Some((plugin, true)));
-    settled(&mut h);
-    let error = h.host.error().get().unwrap_or_default();
-    assert!(
-        error.contains("a plugin's fonts come from its directory"),
-        "{error}"
+fn a_script_beside_the_root_loads_a_font() {
+    let beside = format!(
+        "local said = ui.state(\"said\", \"\")
+local _ = ui.task(function() said:set(table.concat(ui.load_font({FONT:?}):await(), \",\")) end)
+ui.contribute(\"bar\", ui.text {{ id = \"families\", function() return said:get() end }})"
     );
+    let shown = "return ui.column { ui.text { \"app\" }, ui.slot(\"bar\") }".to_owned();
+    let mut h = app(shown, Some(beside));
+    h.wait_until(|h| !h.text("families").is_empty() || h.host.error().get().is_some());
+    assert_eq!(h.host.error().get(), None);
+    assert_eq!(h.text("families"), "Instrument Serif");
 }

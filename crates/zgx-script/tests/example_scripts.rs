@@ -5,20 +5,17 @@ mod common;
 use common::Harness;
 use zgx_script::ScriptHost;
 
-fn runs(app: &str, plugins: Option<&str>) {
+fn runs(app: &str, beside: Option<&str>) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let path = dir.join(app);
-    let plugins = plugins.map(|p| dir.join(p));
+    let beside = beside.map(|p| dir.join(p));
     let h = Harness::new(move |runtime| {
         let host = ScriptHost::new(runtime, path);
-        // What hot_reload.rs publishes for its plugins.
+        // What hot_reload.rs publishes for its scripts.
         host.shared("window", "400 × 300");
         host.action("quit", |_| {});
-        host.expose_shared("window", None);
-        host.expose_shared("count", None);
-        host.expose_action("quit", None);
-        match plugins {
-            Some(dir) => host.plugins(dir),
+        match beside {
+            Some(dir) => host.scripts_in(dir, zgx_script::Limits::default()),
             None => host,
         }
     });
@@ -29,7 +26,7 @@ fn runs(app: &str, plugins: Option<&str>) {
 }
 
 #[test]
-fn hot_reload_runs_with_its_plugins() {
+fn hot_reload_runs_with_its_scripts() {
     runs("hot_reload/app.luau", Some("hot_reload/plugins"));
 }
 #[test]

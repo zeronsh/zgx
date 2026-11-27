@@ -261,7 +261,7 @@ fn check_with(
     )
     .map_err(CheckError::Io)?;
     // An app whose scripts require `@app/…` (its own modules, which a
-    // plugin may replace) or `@app-original/…` (a replacement's original)
+    // script may replace) or `@app-original/…` (a replacement's original)
     // is checked with both aliases naming its directory: the nearest
     // holding an `app.luau`. All its scripts are, since luau-lsp checks a
     // module again with each script requiring it (a component using
@@ -277,7 +277,7 @@ fn check_with(
         .filter_map(|(file, _)| app_root(file))
         .collect();
     // Grouped too by the packages zgx.json gives them (`aliases_for`): a
-    // plugin's files see only those lent to it.
+    // script's files see only those lent to it.
     type Group = (Option<PathBuf>, bool, Vec<(String, PathBuf)>, Vec<PathBuf>);
     let mut groups: Vec<Group> = Vec::new();
     for file in &files {
@@ -327,7 +327,7 @@ fn check_with(
             aliases.insert("app".into(), app.clone());
             aliases.insert("app-original".into(), app);
         }
-        // The packages zgx.json gives: a plugin's, those lent to it.
+        // The packages zgx.json gives: a script's, those lent to it.
         for (name, folder) in packages {
             aliases.insert(name.clone(), folder.to_string_lossy().into_owned().into());
         }

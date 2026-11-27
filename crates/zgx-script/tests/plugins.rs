@@ -1,17 +1,18 @@
-//! Plugins an app manages (`set_plugins`): loaded from the disk with what
-//! the app granted them, kept from restricted actions and shared state, and
-//! given each slot's context (one panel component, an instance per pane).
+//! Scripts an app loads beside its root script (`set_scripts`): loaded from
+//! the disk, reaching what the root script does, each within the limits
+//! its host sets, and given each slot's context (one panel component, an
+//! instance per pane).
 mod common;
 use common::Harness;
 use std::path::PathBuf;
-use zgx_script::{Capability, Plugin, ScriptHost, Value};
+use zgx_script::{Limits, Script, ScriptHost, Value};
 
-fn plugin(name: &str, code: &str) -> PathBuf {
+fn script(name: &str, code: &str) -> PathBuf {
     // A directory of each call's own: tests run in parallel in one process,
     // and two writing one name's file would load each other's code.
     static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = common::temp_dir(&format!("plugins-{n}-{name}"));
+    let dir = common::temp_dir(&format!("scripts-{n}-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
@@ -24,8 +25,13 @@ const PNG: &[u8] = &[
     25, 96, 12, 0, 71, 202, 7, 249, 103, 89, 110, 183, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
     130,
 ];
-fn reads(name: &str) -> Capability {
-    Capability::Named(name.into())
+/// The memory limit of `bytes`, what states hold counted in, and no other.
+fn memory(bytes: usize) -> Limits {
+    Limits {
+        memory: Some(bytes),
+        count_state: true,
+        ..Default::default()
+    }
 }
 
 const APP: &str = r#"
@@ -38,7 +44,7 @@ return ui.column {
 
 #[test]
 fn a_panel_component_is_an_instance_per_slot_with_its_context() {
-    let entry = plugin(
+    let entry = script(
         "notes",
         r#"
 local Notes = ui.component(function(props)
@@ -49,11 +55,7 @@ ui.contribute("panel:notes", Notes {})
     );
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![Plugin {
-            name: "notes".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("notes", entry)]);
         host
     });
     assert_eq!(h.text("note-p1"), "notes for p1");
@@ -61,130 +63,71 @@ ui.contribute("panel:notes", Notes {})
 }
 
 #[test]
-fn plugins_are_set_at_runtime_and_load_on_reload() {
+fn scripts_are_set_at_runtime_and_load_on_reload() {
     let mut h = Harness::inline(APP);
     assert!(h.find("hello").is_none());
-    let entry = plugin(
+    let entry = script(
         "late",
         r#"ui.contribute("bar", ui.text { "hello", id = "hello" })"#,
     );
-    h.host.set_plugins(vec![Plugin {
-        name: "late".into(),
-        entry,
-        grants: vec![],
-    }]);
+    h.host.set_scripts(vec![Script::file("late", entry)]);
     h.host.reload().unwrap();
     h.settle();
     assert_eq!(h.text("hello"), "hello");
     // Taken away again.
-    h.host.set_plugins(vec![]);
+    h.host.set_scripts(vec![]);
     h.host.reload().unwrap();
     h.settle();
     assert!(h.find("hello").is_none());
 }
 
 #[test]
-fn restricted_actions_and_shared_state_need_the_grant() {
-    let entry = plugin(
+fn a_script_given_as_code_loads_beside_the_root() {
+    let mut h = Harness::inline(APP);
+    h.host.set_scripts(vec![Script::code(
+        "inline",
+        r#"ui.contribute("bar", ui.text { "from code", id = "code" })"#,
+    )]);
+    h.host.reload().unwrap();
+    h.settle();
+    assert_eq!(h.text("code"), "from code");
+}
+
+#[test]
+fn a_script_beside_the_root_invokes_the_apps_actions_and_reads_its_shared_state() {
+    let entry = script(
         "peek",
         r#"
-local seen = ui.shared("sessions", {})
+local seen = ui.shared("sessions", "none")
 ui.invoke("send_text", "ls")
-ui.contribute("bar", ui.text { "peeked", id = "peeked" })
+ui.contribute("bar", ui.text { function() return seen:get() end, id = "peeked" })
 "#,
     );
     let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-    let make = |grants: Vec<Capability>| {
-        let (entry, sent) = (entry.clone(), sent.clone());
-        move |runtime: &zgx::reactive::Runtime| {
-            let host = ScriptHost::inline(runtime, "app", APP);
-            host.action("send_text", move |text| {
-                if let Value::Str(text) = text {
-                    sent.borrow_mut().push(text.to_string());
-                }
-            });
-            host.shared("sessions", Value::Nil);
-            host.expose_action("send_text", Some(reads("terminals.write")));
-            host.expose_shared("sessions", Some(reads("terminals.read")));
-            host.set_plugins(vec![Plugin {
-                name: "peek".into(),
-                entry,
-                grants,
-            }]);
-            host
-        }
-    };
-    // Without the grants: left out, with why.
-    let mut h = Harness::new(make(vec![]));
-    let error = h.host.error().get().unwrap_or_default();
-    assert!(error.contains("ui.shared `sessions`"), "{error}");
-    assert!(h.find("peeked").is_none());
-    // With only one of them: the action is still out of reach.
-    let h = Harness::new(make(vec![reads("terminals.read")]));
-    let error = h.host.error().get().unwrap_or_default();
-    assert!(error.contains("ui.invoke `send_text`"), "{error}");
-    // With both.
-    let mut h = Harness::new(make(vec![
-        reads("terminals.read"),
-        reads("terminals.write"),
-    ]));
+    let log = sent.clone();
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", APP);
+        host.action("send_text", move |text| {
+            if let Value::Str(text) = text {
+                log.borrow_mut().push(text.to_string());
+            }
+        });
+        host.shared("sessions", "all of them");
+        host.set_scripts(vec![Script::file("peek", entry)]);
+        host
+    });
     assert_eq!(h.host.error().get(), None);
-    assert_eq!(h.text("peeked"), "peeked");
+    assert_eq!(h.text("peeked"), "all of them", "the host's value first");
     assert_eq!(*sent.borrow(), vec!["ls".to_string()]);
 }
 
 #[test]
-fn the_app_itself_is_not_restricted() {
-    let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::inline(
-            runtime,
-            "app",
-            r#"local s = ui.shared("sessions", "x") return ui.text { function() return s:get() end, id = "s" }"#,
-        );
-        host.shared("sessions", "all of them");
-        host.expose_shared("sessions", Some(reads("terminals.read")));
-        host
-    });
-    assert_eq!(h.text("s"), "all of them");
-}
-
-#[test]
-fn plugins_reach_only_what_the_app_exposes() {
-    let try_plugin = |code: &str| {
-        let entry = plugin("nosy", code);
-        let h = Harness::new(move |runtime| {
-            let host = ScriptHost::inline(runtime, "app", APP);
-            host.action("close_window", |_| panic!("a plugin closed the window"));
-            host.shared("saved_layout", "secret");
-            host.set_plugins(vec![Plugin {
-                name: "nosy".into(),
-                entry,
-                grants: vec![],
-            }]);
-            host
-        });
-        h.host.error().get().unwrap_or_default()
-    };
-    let error = try_plugin(r#"ui.invoke("close_window")"#);
-    assert!(error.contains("does not expose it to plugins"), "{error}");
-    let error = try_plugin(r#"ui.shared("saved_layout", nil)"#);
-    assert!(error.contains("does not expose it to plugins"), "{error}");
-    // Nor by naming it in a template.
-    let error = try_plugin(r#"ui.contribute("bar", ui.text { "{saved_layout}" })"#);
-    assert!(error.contains("does not expose it to plugins"), "{error}");
-    let error = try_plugin(r#"ui.term("p1")"#);
-    assert!(error.contains("Capability::Terminals"), "{error}");
-    let error = try_plugin(r#"ui.web({})"#);
-    assert!(error.contains("Capability::Web"), "{error}");
-}
-
-#[test]
-fn a_slot_from_a_plugin_shows_only_what_it_contributes() {
-    let mine = plugin(
+fn a_slot_from_a_script_shows_only_what_it_contributes() {
+    let mine = script(
         "mine",
         r#"ui.contribute("panel:x", ui.text { "mine", id = "mine" })"#,
     );
-    let other = plugin(
+    let other = script(
         "other",
         r#"ui.contribute("panel:x", ui.text { "other", id = "other" })"#,
     );
@@ -194,27 +137,19 @@ fn a_slot_from_a_plugin_shows_only_what_it_contributes() {
             "app",
             r#"return ui.column { ui.slot("panel:x", { from = "mine" }) }"#,
         );
-        host.set_plugins(vec![
-            Plugin {
-                name: "mine".into(),
-                entry: mine,
-                grants: vec![],
-            },
-            Plugin {
-                name: "other".into(),
-                entry: other,
-                grants: vec![],
-            },
+        host.set_scripts(vec![
+            Script::file("mine", mine),
+            Script::file("other", other),
         ]);
         host
     });
     assert_eq!(h.text("mine"), "mine");
-    assert!(h.find("other").is_none(), "another plugin's is not shown");
+    assert!(h.find("other").is_none(), "another script's is not shown");
 }
 
 #[test]
-fn a_plugin_named_as_the_app_does_not_read_its_saved_state() {
-    let entry = plugin(
+fn a_script_named_as_the_root_does_not_read_its_saved_state() {
+    let entry = script(
         "app",
         r#"ui.contribute("bar", ui.text { ui.persist("token", "none"):peek(), id = "token" })"#,
     );
@@ -224,24 +159,26 @@ fn a_plugin_named_as_the_app_does_not_read_its_saved_state() {
             "app",
             r#"ui.persist("token", "s3cret") return ui.column { ui.slot("bar") }"#,
         );
-        host.set_plugins(vec![Plugin {
-            name: "app".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("app", entry)]);
         host
     });
     assert_eq!(h.text("token"), "none");
 }
 
+/// One namespace of command ids for every script; on a shortcut clash the
+/// root script's commands keep their keys, then the others' in load order.
 #[test]
-fn a_plugin_neither_replaces_nor_breaks_the_apps_commands() {
-    let entry = plugin(
+fn a_shortcut_clash_keeps_the_roots_key_then_the_first_scripts() {
+    let keys = script(
         "keys",
         r#"
-ui.command { id = "copy", title = "Steal", menu = "Edit", key = "Cmd+C", run = function() end }
+ui.command { id = "steal", title = "Steal", menu = "Edit", key = "Cmd+C", run = function() end }
 ui.command { id = "note", title = "New Note", menu = "Notes", key = "cmd+shift+n", run = function() end }
 "#,
+    );
+    let more = script(
+        "more",
+        r#"ui.command { id = "memo", title = "New Memo", menu = "Notes", key = "cmd+shift+n", run = function() end }"#,
     );
     let h = Harness::new(|runtime| {
         let host = ScriptHost::inline(
@@ -250,40 +187,75 @@ ui.command { id = "note", title = "New Note", menu = "Notes", key = "cmd+shift+n
             r#"ui.command { id = "copy", title = "Copy", menu = "Edit", key = "cmd+c", run = function() end }
 return ui.column {}"#,
         );
-        host.set_plugins(vec![Plugin {
-            name: "keys".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("keys", keys), Script::file("more", more)]);
         host
     });
     assert_eq!(h.host.error().get(), None);
     let list = h.host.commands().get();
-    let found: Vec<_> = list
-        .iter()
-        .map(|c| (c.id.as_str(), c.key.as_deref()))
-        .collect();
-    assert_eq!(
-        found,
-        [
-            ("keys/copy", None),
-            ("keys/note", Some("cmd+shift+n")),
-            ("copy", Some("cmd+c"))
-        ]
-    );
+    let key = |id: &str| {
+        list.iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("no command `{id}`: {list:?}"))
+            .key
+            .clone()
+    };
+    assert_eq!(key("copy").as_deref(), Some("cmd+c"));
+    assert_eq!(key("steal"), None);
+    assert_eq!(key("note").as_deref(), Some("cmd+shift+n"));
+    assert_eq!(key("memo"), None);
+    let dropped = h.host.dropped_shortcuts();
+    let steal = dropped.iter().find(|d| d.command == "steal").unwrap();
+    assert_eq!(steal.script, "keys");
+    assert_eq!(steal.key, "Cmd+C");
+    assert_eq!(steal.reason, "taken by the root script");
+    assert_eq!(steal.holder, "copy");
+    let memo = dropped.iter().find(|d| d.command == "memo").unwrap();
+    assert_eq!(memo.script, "more");
+    assert_eq!(memo.reason, "taken by the script `keys`");
+    assert_eq!(memo.holder, "note");
 }
 
-/// A plugin that fails as it loads takes everything it declared with it: no
-/// command of its stays in the menu bar unable to run, no window of its
-/// stays declared. The app's own commands, and the error, remain.
 #[test]
-fn a_plugin_that_fails_to_load_leaves_no_commands_behind() {
-    let entry = plugin(
+fn a_command_id_another_script_declared_is_declared_twice() {
+    let first = script(
+        "first",
+        r#"ui.command { id = "copy", title = "Copy", run = function() end }"#,
+    );
+    let second = script(
+        "second",
+        r#"ui.command { id = "copy", title = "Copy again", run = function() end }"#,
+    );
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", APP);
+        host.set_scripts(vec![
+            Script::file("first", first),
+            Script::file("second", second),
+        ]);
+        host
+    });
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("`copy` is declared twice"), "{error}");
+    let titles: Vec<String> = h
+        .host
+        .commands()
+        .get()
+        .into_iter()
+        .map(|c| c.title)
+        .collect();
+    assert_eq!(titles, ["Copy"], "the first script's, no prefix");
+}
+
+/// A script that fails as it loads takes everything it declared with it: no
+/// command of its stays in the menu bar unable to run, no window of its
+/// stays declared. The root script's own commands, and the error, remain.
+#[test]
+fn a_script_that_fails_to_load_leaves_no_commands_behind() {
+    let entry = script(
         "failing",
         r#"
 ui.command { id = "note", title = "New Note", menu = "Notes", key = "cmd+shift+n", run = function() end }
 ui.window { id = "notes", title = "Notes", open = ui.state("open", false), ui.text { "notes" } }
-error("plugin bug")
+error("script bug")
 "#,
     );
     let h = Harness::new(|runtime| {
@@ -293,16 +265,12 @@ error("plugin bug")
             r#"ui.command { id = "copy", title = "Copy", menu = "Edit", key = "cmd+c", run = function() end }
 return ui.column {}"#,
         );
-        host.set_plugins(vec![Plugin {
-            name: "failing".into(),
-            entry,
-            grants: vec![Capability::Windows],
-        }]);
+        host.set_scripts(vec![Script::file("failing", entry)]);
         host
     });
     let ids: Vec<String> = h.host.commands().get().into_iter().map(|c| c.id).collect();
-    assert_eq!(ids, ["copy"], "the failed plugin's command stayed");
-    assert!(!h.host.run_command("failing/note"));
+    assert_eq!(ids, ["copy"], "the failed script's command stayed");
+    assert!(!h.host.run_command("note"));
     assert!(h.host.run_command("copy"));
     assert!(
         h.host
@@ -310,105 +278,52 @@ return ui.column {}"#,
             .get()
             .iter()
             .all(|window| !window.id.contains("notes")),
-        "the failed plugin's window stayed"
+        "the failed script's window stayed"
     );
     let error = h.host.error().get().unwrap_or_default();
-    assert!(error.contains("plugin bug"), "{error:?}");
+    assert!(error.contains("script bug"), "{error:?}");
 }
 
 #[test]
-fn a_plugins_pages_are_its_own_not_the_apps() {
-    let entry = plugin(
-        "pages",
-        r#"
-local mine = ui.web("web:p1")
-ui.contribute("bar", ui.text { function() return "seen: " .. mine.url end, id = "seen" })
-"#,
-    );
-    let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::inline(
-            runtime,
-            "app",
-            r#"
-local page = ui.web("web:p1")
-page:load("https://mail.example.com/inbox")
-return ui.column { ui.text { function() return page.url end, id = "app" }, ui.slot("bar") }
-"#,
-        );
-        host.set_plugins(vec![Plugin {
-            name: "pages".into(),
-            entry,
-            grants: vec![Capability::Web],
-        }]);
-        host
-    });
-    assert_eq!(h.host.error().get(), None);
-    assert_eq!(h.text("app"), "https://mail.example.com/inbox");
-    assert_eq!(
-        h.text("seen"),
-        "seen: ",
-        "the plugin's web:p1 is another page"
-    );
-}
-
-#[test]
-fn a_plugin_of_bytecode_is_read_as_source_and_never_runs() {
+fn a_script_of_bytecode_is_read_as_source_and_never_runs() {
     // Luau checks no bytecode it loads: crafted bytecode would corrupt the
-    // VM, so a plugin's files are source, always.
+    // VM, so a script's files are source, always.
     let bytecode = mlua::chunk::Compiler::new()
         .compile(r#"ui.contribute("bar", ui.text { "ran", id = "ran" })"#)
         .unwrap();
-    let entry = plugin("bytecode", "");
+    let entry = script("bytecode", "");
     std::fs::write(&entry, &bytecode).unwrap();
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![Plugin {
-            name: "bytecode".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("bytecode", entry)]);
         host
     });
     assert!(h.find("ran").is_none(), "the bytecode ran");
 }
 
 #[test]
-fn a_plugin_shows_remote_images_only_with_the_fetch_grant() {
-    // An image's URL is a request: without the grant, a plugin could send
-    // out what it read in one.
+fn a_script_beside_the_root_shows_remote_images() {
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-    for (name, grants) in [("viewer", vec![]), ("fetcher", vec![Capability::Fetch])] {
-        let entry = plugin(
-            name,
-            r#"ui.contribute("bar", ui.image { src = "https://images.test/secret?k=v", w = 10, h = 10 })"#,
-        );
-        let log = asked.clone();
-        let h = Harness::new(|runtime| {
-            let host = ScriptHost::inline(runtime, "app", APP);
-            host.fetcher(move |request: zgx_script::Request| {
-                log.borrow_mut().push(request.url.clone());
-                async move { Err::<zgx_script::Response, String>("offline".into()) }
-            });
-            host.set_plugins(vec![Plugin {
-                name: name.into(),
-                entry,
-                grants,
-            }]);
-            host
+    let entry = script(
+        "viewer",
+        r#"ui.contribute("bar", ui.image { src = "https://images.test/picture?k=v", w = 10, h = 10 })"#,
+    );
+    let log = asked.clone();
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", APP);
+        host.fetcher(move |request: zgx_script::Request| {
+            log.borrow_mut().push(request.url.clone());
+            async move { Err::<zgx_script::Response, String>("offline".into()) }
         });
-        h.frames(2);
-        let made = asked.borrow().len();
-        match name {
-            "viewer" => assert_eq!(made, 0, "a request without the grant"),
-            _ => assert_eq!(made, 1, "the granted plugin's request"),
-        }
-    }
+        host.set_scripts(vec![Script::file("viewer", entry)]);
+        host
+    });
+    h.frames(2);
+    assert_eq!(asked.borrow().len(), 1, "the script's request");
 }
 
 #[test]
-fn a_plugin_shows_a_picked_file_and_no_other_outside_its_directory() {
-    // A file its host's grant let it pick is its to show; one it only names
-    // is not.
+fn a_script_shows_a_file_outside_its_directory_picked_or_named() {
     let outside = common::temp_dir("picked");
     std::fs::create_dir_all(&outside).unwrap();
     // A red pixel.
@@ -423,7 +338,7 @@ fn a_plugin_shows_a_picked_file_and_no_other_outside_its_directory() {
         ("picked", "folder:file(\"picked.png\"):await().path"),
         ("named", &*format!("{named:?}")),
     ] {
-        let entry = plugin(
+        let entry = script(
             &format!("viewer-{name}"),
             &format!(
                 r#"local src = ui.state("src", nil :: string?)
@@ -441,11 +356,7 @@ ui.contribute("bar", ui.column {{
         );
         let mut h = Harness::with_desktop(|runtime| {
             let host = ScriptHost::inline(runtime, "app", APP);
-            host.set_plugins(vec![Plugin {
-                name: format!("viewer-{name}"),
-                entry,
-                grants: vec![Capability::Folders],
-            }]);
+            host.set_scripts(vec![Script::file(format!("viewer-{name}"), entry)]);
             host
         });
         h.desktop.clone().unwrap().pick_folder(&outside);
@@ -460,32 +371,24 @@ ui.contribute("bar", ui.column {{
         }
         h.frames(2);
         let error = h.host.error().get();
-        match name {
-            "picked" => {
-                assert!(
-                    h.find("shown").is_some(),
-                    "{error:?} {:?} {:?}",
-                    h.texts(),
-                    h.desktop.clone().unwrap().asked().len()
-                );
-                assert_eq!(error, None, "the picked file is its to show");
-            }
-            _ => {
-                let error = error.unwrap_or_default();
-                assert!(error.contains("directory or below"), "{error}");
-            }
-        }
+        assert!(
+            h.find("shown").is_some(),
+            "{name}: {error:?} {:?} {:?}",
+            h.texts(),
+            h.desktop.clone().unwrap().asked().len()
+        );
+        assert_eq!(error, None, "{name}");
     }
 }
 
 #[cfg(unix)]
 #[test]
-fn a_plugin_requires_nothing_outside_its_directory_through_a_link() {
-    // A module that is a link to a file outside (a secret the plugin would
-    // read back in a parse error) is outside, whatever its name says.
+fn a_script_requires_nothing_outside_its_directory_through_a_link() {
+    // A module that is a link to a file outside is outside, whatever its
+    // name says.
     let outside = common::temp_dir("outside").join("outside.luau");
     std::fs::write(&outside, r#"return "outside""#).unwrap();
-    let entry = plugin(
+    let entry = script(
         "linked",
         r#"local ok, got = pcall(require, "./secret")
 ui.contribute("bar", ui.text { tostring(ok) .. " " .. tostring(got), id = "got" })"#,
@@ -495,11 +398,7 @@ ui.contribute("bar", ui.text { tostring(ok) .. " " .. tostring(got), id = "got" 
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![Plugin {
-            name: "linked".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("linked", entry)]);
         host
     });
     let got = h.text("got");
@@ -508,86 +407,36 @@ ui.contribute("bar", ui.text { tostring(ok) .. " " .. tostring(got), id = "got" 
 }
 
 #[test]
-fn a_plugin_is_not_shown_a_picture_the_app_holds_that_it_may_not_open() {
-    // The app and its plugins share one cache of pictures. A plugin asks
-    // what it may reach before it: else, once the app showed a file, any
-    // plugin naming it was shown it too (and could read its pixels back
-    // with `c:image` and `ui.render_canvas`).
-    let outside = common::temp_dir("cached-outside").join("apps.png");
-    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
-    std::fs::write(&outside, PNG).unwrap();
-    let app = format!(
-        r#"return ui.column {{
-    ui.image {{ src = "{}", w = 10, h = 10 }},
-    ui.slot("bar", {{ id = "bar" }}),
-}}"#,
-        outside.display()
-    );
-    let h = Harness::inline(&app);
-    h.frames(1);
-    assert_eq!(h.error(), None);
-    let entry = plugin(
-        "peek",
-        &format!(
-            r#"ui.contribute("bar", ui.canvas {{ w = 10, h = 10, draw = function(c)
-    c:image("{}", 0, 0, 10, 10)
-end }})"#,
-            outside.display()
-        ),
-    );
-    h.host.set_plugins(vec![Plugin {
-        name: "peek".into(),
-        entry,
-        grants: vec![],
-    }]);
-    h.host.reload().unwrap();
-    h.frames(1);
-    let error = h.error().unwrap_or_default();
-    assert!(
-        error.contains("a plugin's images come from its directory"),
-        "{error}"
-    );
-}
-
-#[test]
-fn a_plugins_images_come_from_its_directory() {
+fn a_scripts_images_come_from_its_folder_or_any_absolute_path() {
     let outside = common::temp_dir("outside").join("outside.png");
-    std::fs::write(&outside, b"not really a png").unwrap();
-    let entry = plugin(
+    std::fs::write(&outside, PNG).unwrap();
+    let entry = script(
         "pictures",
         &format!(
-            r#"ui.contribute("bar", ui.image {{ src = "{}", w = 10, h = 10 }})"#,
+            r#"ui.contribute("bar", ui.row {{
+    ui.image {{ src = "{}", w = 10, h = 10 }},
+    ui.image {{ src = "own.png", w = 10, h = 10 }},
+    ui.canvas {{ w = 10, h = 10, draw = function(c) c:image("{}", 0, 0, 10, 10) end }},
+}})"#,
+            outside.display(),
             outside.display()
         ),
     );
+    std::fs::write(entry.parent().unwrap().join("own.png"), PNG).unwrap();
     let h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![Plugin {
-            name: "pictures".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("pictures", entry)]);
         host
     });
-    h.frames(1);
-    let error = h.error().unwrap_or_default();
-    assert!(
-        error.contains("a plugin's images come from its directory"),
-        "{error}"
-    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
 }
 
 #[test]
-fn a_plugin_opens_windows_only_with_the_grant_and_never_reaches_the_apps_title_bar() {
-    // A window of its own could pose as the app's or the system's, asking
-    // for a password; the app's title bar area is the app's.
-    for (name, grants, opens) in [
-        ("posing", vec![], false),
-        ("inspector", vec![Capability::Windows], true),
-    ] {
-        let entry = plugin(
-            name,
-            r#"
+fn a_script_beside_the_root_opens_windows_and_reads_the_title_bar() {
+    let entry = script(
+        "inspector",
+        r#"
 local ok = pcall(ui.window, {
     id = "w", open = ui.state("open", true), ui.text { "window" },
 })
@@ -595,67 +444,18 @@ ui.contribute("bar", ui.text {
     tostring(ok) .. " " .. tostring(ui.window.titlebar_area == nil), id = "got",
 })
 "#,
-        );
-        let mut h = Harness::new(|runtime| {
-            let host = ScriptHost::inline(runtime, "app", APP);
-            host.set_plugins(vec![Plugin {
-                name: name.into(),
-                entry,
-                grants,
-            }]);
-            host
-        });
-        assert_eq!(h.text("got"), format!("{opens} true"), "{name}");
-    }
-}
-
-#[test]
-fn a_plugin_reads_the_window_size_and_nothing_else_of_the_window() {
-    // A picture fitted to the window (a lightbox) needs its size; the
-    // window's other states are the app's.
-    let entry = plugin(
-        "lightbox",
-        r#"
-ui.contribute("bar", ui.column {
-    ui.text { id = "got", function()
-        local size = ui.window.size:get()
-        return `{size.width}x{size.height} {ui.window.zoom == nil} {ui.window.active == nil} {ui.window.titlebar_area == nil}`
-    end },
-    ui.button { id = "set", w = 20, h = 20, on_click = function()
-        ui.window.size:set({ width = 1, height = 1 })
-    end },
-})
-"#,
     );
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![Plugin {
-            name: "lightbox".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("inspector", entry)]);
         host
     });
-    let viewport = h.ui.runtime.signal((960_f32, 720_f32));
-    h.host.window_size(viewport.clone());
-    h.frames(1);
-    assert_eq!(h.text("got"), "960x720 true true true");
-    viewport.set((640., 480.));
-    h.frames(1);
-    assert_eq!(h.text("got"), "640x480 true true true");
-    assert_eq!(h.error(), None);
-    // Read-only, as the app's is.
-    h.click("set");
-    assert!(
-        h.error().is_some_and(|e| e.contains("size")),
-        "{:?}",
-        h.error()
-    );
+    assert_eq!(h.text("got"), "true false");
 }
 
-/// A plugin that holds `mb` strings of 1 MB, saying how many it made.
+/// A script that holds `mb` strings of 1 MB, saying how many it made.
 fn holding(name: &str, mb: usize) -> PathBuf {
-    plugin(
+    script(
         name,
         &format!(
             r#"
@@ -671,29 +471,28 @@ ui.contribute("bar", ui.text {{ id = "{name}", tostring(made) }})
 }
 
 #[test]
-fn a_plugin_given_more_memory_holds_past_the_default() {
+fn each_script_holds_what_its_own_memory_limit_lets_it() {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        let plugin = |name: &str| Plugin {
-            name: name.into(),
-            entry: holding(name, 48),
-            grants: vec![],
-        };
-        host.set_plugins(vec![plugin("big"), plugin("small")]);
-        host.plugin_memory("big", 64 << 20);
+        host.set_scripts(vec![
+            Script::file("big", holding("big", 48)).limits(memory(64 << 20)),
+            Script::file("small", holding("small", 48)).limits(memory(32 << 20)),
+            Script::file("free", holding("free", 48)),
+        ]);
         host
     });
     assert_eq!(h.error(), None);
-    // 48 MB fits its 64; the other stops short of the default 32.
+    // 48 MB fits the 64 and no limit; the other stops short of its 32.
     assert_eq!(h.text("big"), "48");
+    assert_eq!(h.text("free"), "48");
     let small: usize = h.text("small").parse().unwrap();
     assert!(small < 32, "{small}");
 }
 
 #[test]
-fn a_plugins_decoded_pictures_count_against_its_memory_limit() {
+fn a_scripts_decoded_pictures_count_against_its_memory_limit() {
     // A `ui.decode_image` picture keeps its file's bytes in Rust, outside
-    // the VM: counted as a state's value is, a plugin keeping picture after
+    // the VM: counted as a state's value is, a script keeping picture after
     // picture (6 MB each) stops at its 32 MB.
     use base64::Engine as _;
     // The 2×2 PNG with a chunk of its own of 6 MB (ancillary: read past,
@@ -716,7 +515,7 @@ fn a_plugins_decoded_pictures_count_against_its_memory_limit() {
     png.extend_from_slice(&crc(&chunk).to_be_bytes());
     png.extend_from_slice(&PNG[33..]);
     let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
-    let entry = plugin(
+    let entry = script(
         "pictures",
         &format!(
             r#"
@@ -734,18 +533,16 @@ ui.contribute("bar", ui.text {{ id = "made", function() return tostring(made:get
     );
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![Plugin {
-            name: "pictures".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![
+            Script::file("pictures", entry).limits(memory(32 << 20)),
+        ]);
         host
     });
     // The picture past its room is refused: the task stops there.
     h.wait_until(|h| h.error().is_some());
     let error = h.error().unwrap_or_default();
     assert!(
-        error.contains("a plugin's memory is 32 MB at most"),
+        error.contains("the script's memory is 32 MB at most"),
         "{error}"
     );
     let made: usize = h.text("made").parse().unwrap();
@@ -756,10 +553,10 @@ ui.contribute("bar", ui.text {{ id = "made", function() return tostring(made:get
 }
 
 #[test]
-fn a_plugins_state_counts_against_its_memory_limit() {
+fn a_scripts_state_counts_against_its_memory_limit() {
     // A state's value lives in Rust, outside the VM: without counting it,
-    // a plugin making state after state held as much as it liked.
-    let entry = plugin(
+    // a script making state after state held as much as it liked.
+    let entry = script(
         "hoarder",
         r#"
 -- Everything made before memory runs short (the keys, the result's
@@ -803,15 +600,8 @@ result:set(`{made} {memory(made_error)} {pushed} {memory(push_error)} {rewrites}
 "#,
     );
     let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::inline(runtime, "app", APP).limits(zgx_script::Limits {
-            plugin_memory: 8 << 20,
-            ..Default::default()
-        });
-        host.set_plugins(vec![Plugin {
-            name: "hoarder".into(),
-            entry,
-            grants: vec![],
-        }]);
+        let host = ScriptHost::inline(runtime, "app", APP);
+        host.set_scripts(vec![Script::file("hoarder", entry).limits(memory(8 << 20))]);
         host
     });
     assert_eq!(h.error(), None);
@@ -831,7 +621,7 @@ result:set(`{made} {memory(made_error)} {pushed} {memory(push_error)} {rewrites}
 #[test]
 fn a_bitmap_kept_in_state_counts_its_pixels() {
     // Its pixels live in Rust too: a pasted 4K screenshot is 33 MB.
-    let entry = plugin(
+    let entry = script(
         "painter",
         r#"
 local result = ui.state("result", "")
@@ -844,15 +634,8 @@ result:set(`{small} {kept} {short}`)
 "#,
     );
     let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::inline(runtime, "app", APP).limits(zgx_script::Limits {
-            plugin_memory: 4 << 20,
-            ..Default::default()
-        });
-        host.set_plugins(vec![Plugin {
-            name: "painter".into(),
-            entry,
-            grants: vec![],
-        }]);
+        let host = ScriptHost::inline(runtime, "app", APP);
+        host.set_scripts(vec![Script::file("painter", entry).limits(memory(4 << 20))]);
         host
     });
     assert_eq!(h.error(), None);
@@ -861,30 +644,25 @@ result:set(`{small} {kept} {short}`)
 }
 
 #[test]
-fn a_plugin_is_not_handed_what_the_system_opens() {
-    let entry = plugin(
+fn a_script_beside_the_root_hears_what_the_system_opens() {
+    let entry = script(
         "opener",
         r#"
-local ok, err = pcall(ui.on_open, function() end)
-ui.contribute("bar", ui.text { `{ok} {tostring(err):find("the app's") ~= nil} {#ui.args}`, id = "got" })
+local ok = pcall(ui.on_open, function() end)
+ui.contribute("bar", ui.text { `{ok} {#ui.args}`, id = "got" })
 "#,
     );
     let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::inline(runtime, "app", APP).args(["secret.txt"]);
-        host.set_plugins(vec![Plugin {
-            name: "opener".into(),
-            entry,
-            grants: vec![],
-        }]);
+        let host = ScriptHost::inline(runtime, "app", APP).args(["file.txt"]);
+        host.set_scripts(vec![Script::file("opener", entry)]);
         host
     });
-    // It may read the launch's arguments (they are no file it can open).
-    assert_eq!(h.text("got"), "false true 1");
+    assert_eq!(h.text("got"), "true 1");
 }
 
 #[test]
-fn a_plugin_cannot_reserve_a_shortcut() {
-    let entry = plugin(
+fn a_script_beside_the_root_reserves_a_shortcut() {
+    let entry = script(
         "reserver",
         r#"ui.command { id = "quit", title = "Quit", menu = "File", key = "cmd+k", reserved = true, run = function() end }"#,
     );
@@ -895,20 +673,11 @@ fn a_plugin_cannot_reserve_a_shortcut() {
             r#"ui.command { id = "tab", title = "Tab", menu = "Shell", key = "cmd+t", reserved = true, run = function() end }
 return ui.column {}"#,
         );
-        host.set_plugins(vec![Plugin {
-            name: "reserver".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("reserver", entry)]);
         host
     });
-    assert_eq!(h.host.reserved_keys().get(), ["cmd+t"], "the app's alone");
-    assert!(
-        h.host
-            .commands()
-            .get()
-            .iter()
-            .all(|c| c.id != "reserver/quit"),
-        "the plugin's command fails"
-    );
+    assert_eq!(h.host.error().get(), None);
+    let mut reserved = h.host.reserved_keys().get();
+    reserved.sort();
+    assert_eq!(reserved, ["cmd+k", "cmd+t"]);
 }

@@ -149,7 +149,8 @@ fn a_script_asks_its_states_and_spans() {
 }
 
 /// A host that loaded no module has none of another host's highlighters,
-/// and a plugin of the host that did is refused one.
+/// and a script beside the root of the host that did has them as the root
+/// does.
 #[test]
 fn a_highlighter_is_its_hosts_and_its_apps() {
     let _loaded = harness(r##"return ui.text { "loaded", id = "loaded" }"##);
@@ -161,8 +162,8 @@ fn a_highlighter_is_its_hosts_and_its_apps() {
     h.frames(1);
     assert_eq!(h.error(), None, "another host's isn't this one's");
 
-    let dir = common::temp_dir("native-highlighter-plugin");
-    let entry = dir.join("plugin.luau");
+    let dir = common::temp_dir("native-highlighter-beside");
+    let entry = dir.join("beside.luau");
     std::fs::write(
         &entry,
         r##"local ok, why = pcall(ui.highlighter, "words.parens")
@@ -173,19 +174,12 @@ fn a_highlighter_is_its_hosts_and_its_apps() {
         let host = ScriptHost::inline(runtime, "app", r##"return ui.column { ui.slot("bar") }"##);
         // SAFETY: The test's own `register!` entry.
         unsafe { host.enter_module(words::zgx_module_v1, &words::zgx_module_manifest) }.unwrap();
-        host.set_plugins(vec![zgx_script::Plugin {
-            name: "p".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![zgx_script::Script::file("p", entry)]);
         host
     });
     h.frames(2);
     let said = h.text("said");
-    assert!(
-        said.starts_with("false") && said.contains("the app's own"),
-        "{said}"
-    );
+    assert!(said.starts_with("true"), "{said}");
 }
 
 thread_local! {

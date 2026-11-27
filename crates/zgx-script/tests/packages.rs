@@ -1,10 +1,10 @@
 //! Packages (`ScriptHost::package`, zgx.json's `"packages"`): module folders
-//! outside the app's directory it may require, as `@name/…` or through its
-//! `.luaurc` aliases, and nothing else outside it.
+//! outside the app's directory every script may require, as `@name/…` or
+//! through the app's `.luaurc` aliases, and nothing else outside it.
 mod common;
 use common::Harness;
 use std::path::PathBuf;
-use zgx_script::{Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 /// A directory of files, made fresh for one test.
 fn files(name: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -70,7 +70,7 @@ fn an_alias_outside_the_app_needs_a_package() {
     let runtime = zgx::reactive::Runtime::new();
     let error = ScriptHost::new(&runtime, &app).reload().unwrap_err();
     assert!(
-        error.contains("directory or below, or a package"),
+        error.contains("directory or below, the root script's, or a package"),
         "{error}"
     );
 }
@@ -88,7 +88,7 @@ fn a_package_reaches_nothing_outside_its_folder() {
     let host = ScriptHost::new(&runtime, &escape).package("kit", &kit);
     let error = host.reload().unwrap_err();
     assert!(
-        error.contains("directory or below, or a package"),
+        error.contains("directory or below, the root script's, or a package"),
         "{error}"
     );
     #[cfg(unix)]
@@ -102,37 +102,37 @@ fn a_package_reaches_nothing_outside_its_folder() {
         let host = ScriptHost::new(&runtime, &app).package("kit", &kit);
         let error = host.reload().unwrap_err();
         assert!(
-            error.contains("directory or below, or a package"),
+            error.contains("directory or below, the root script's, or a package"),
             "{error}"
         );
     }
 }
 
-/// Packages are the app's: a plugin requires none it isn't lent.
+/// A script beside the root requires the app's packages as the root does.
 #[test]
-fn plugins_do_not_reach_the_apps_packages() {
-    let kit = kit("plugin");
-    let app = app("plugin", r#"return ui.text { id = "t", "Hi" }"#);
-    let plugin = files(
-        "plugin-plugin",
-        &[("init.luau", r#"local button = require("@kit/button")"#)],
+fn a_script_beside_the_root_requires_its_packages() {
+    let kit = kit("beside");
+    let app = app(
+        "beside",
+        r#"return ui.column { ui.text { id = "t", "Hi" } }"#,
+    );
+    let script = files(
+        "beside-script",
+        &[(
+            "init.luau",
+            r##"local button = require("@kit/button")
+ui.contribute { target = "#t", after = button("Beside") }"##,
+        )],
     );
     let mut h = Harness::new(move |runtime| {
         let host = ScriptHost::new(runtime, &app).package("kit", &kit);
-        host.set_plugins(vec![Plugin {
-            name: "reach".into(),
-            entry: plugin.join("init.luau"),
-            grants: Vec::new(),
-        }]);
+        host.set_scripts(vec![Script::file("reach", script.join("init.luau"))]);
         host
     });
     h.ui.prepare_frame();
-    let error = h.error().unwrap_or_default();
-    assert!(
-        error.contains("package `@kit` isn't lent to plugin `reach`"),
-        "{error}"
-    );
+    assert_eq!(h.error(), None);
     assert_eq!(h.text("t"), "Hi");
+    assert_eq!(h.text("button"), "Beside #8b7cf6");
 }
 
 /// A package takes none of zgx's aliases, and agrees with a `.luaurc` alias

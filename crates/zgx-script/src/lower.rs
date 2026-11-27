@@ -51,25 +51,16 @@ pub(crate) struct Assets {
     files: std::cell::RefCell<HashMap<String, (std::path::PathBuf, Option<std::time::SystemTime>)>>,
     /// Where they are read from: the disk, or the app's bundle.
     source: std::cell::RefCell<Option<crate::Files>>,
-    /// Remote sources (`https://…`) by `remote_key`: fetched once by each
-    /// asking (the app, or a plugin), so each request is its own to allow, and
-    /// what comes is shared (`images`, `svgs`). What shows one follows its
-    /// status (`LOADING`, `READY`, `FAILED`).
+    /// Remote sources (`https://…`) by URL: fetched once, and what
+    /// comes is shared (`images`, `svgs`). What shows one follows its status
+    /// (`LOADING`, `READY`, `FAILED`).
     remote: std::cell::RefCell<HashMap<String, zgx::reactive::Signal<u8>>>,
-    /// Failed remote sources by `remote_key`: when, how many times in a row,
-    /// why. Asked for again after a backoff, they're fetched again (as a
-    /// browser retries a broken image when a new element shows it). A plugin's
-    /// failure is its own: refused by the app's policy, or without the proxy
-    /// the app's requests take, it holds up no one else showing the URL.
+    /// Failed remote sources by URL: when, how many times in a row, why.
+    /// Asked for again after a backoff, they're fetched again (as a browser
+    /// retries a broken image when a new element shows it).
     failed: std::cell::RefCell<HashMap<String, Failure>>,
     /// The host's tasks and transport, which remote sources go through.
-    links: std::cell::RefCell<
-        Option<(
-            Rc<crate::timers::Timers>,
-            crate::calls::SharedFetcher,
-            crate::fetch_policy::SharedPolicy,
-        )>,
-    >,
+    links: std::cell::RefCell<Option<(Rc<crate::timers::Timers>, crate::calls::SharedFetcher)>>,
     /// Images the host made (`ScriptHost::image`), as `host:<name>`
     /// sources: what shows one follows its version.
     hosted: std::cell::RefCell<HashMap<String, zgx::reactive::Signal<u64>>>,
@@ -382,9 +373,8 @@ impl Assets {
         &self,
         timers: Rc<crate::timers::Timers>,
         fetcher: crate::calls::SharedFetcher,
-        policy: crate::fetch_policy::SharedPolicy,
     ) {
-        *self.links.borrow_mut() = Some((timers, fetcher, policy));
+        *self.links.borrow_mut() = Some((timers, fetcher));
     }
     pub(crate) fn set_files(&self, files: crate::Files) {
         *self.source.borrow_mut() = Some(files);
@@ -435,11 +425,11 @@ impl Assets {
     }
 }
 
-/// What plugins add at the app's elements (`ui.contribute { target }`),
+/// What scripts add at the app's elements (`ui.contribute { target }`),
 /// indexed so an element looks up only what could match it: the targets
 /// naming its id, its declared hook, and those naming neither (a role or a
 /// name alone). Matched as the interface is built, never per frame; empty,
-/// as without plugins, it costs a length compare per element.
+/// as without scripts, it costs a length compare per element.
 #[derive(Default)]
 pub(crate) struct Hooks {
     all: Vec<crate::node::HookContribution>,
@@ -454,7 +444,7 @@ pub(crate) struct Hooks {
     /// or that are private.
     pub(crate) mounted: std::cell::RefCell<HashMap<zgx::scene::NodeId, Rc<Node>>>,
     /// The application's script: only its elements are targets, not what
-    /// plugins add (a replacement that matched its own target would
+    /// scripts add (a replacement that matched its own target would
     /// replace itself without end).
     app: std::rc::Weak<Vm>,
 }
@@ -486,7 +476,7 @@ impl Hooks {
             self.all.push(hook);
         }
     }
-    /// The application script's VM, whose elements plugins target.
+    /// The application script's VM, whose elements scripts target.
     pub(crate) fn set_app(&mut self, app: &Rc<Vm>) {
         self.app = Rc::downgrade(app);
     }
@@ -509,26 +499,23 @@ impl Hooks {
             && (node.id.is_some()
                 || !node.classes.is_empty()
                 || node.hook().is_some()
-                || node.rare().provide.is_some()
-                || node.private)
+                || node.rare().provide.is_some())
     }
     /// Every contribution, in the order the scripts made them.
     pub(crate) fn all(&self) -> &[crate::node::HookContribution] {
         &self.all
     }
     /// What is added at `node`, in the order the scripts added it: none at
-    /// a `private` element, inside one, or at one a plugin made.
+    /// one another script added (a replacement that matched its own target
+    /// would replace itself without end).
     /// `by_name`: whether its name may match (not the text that names its
     /// parent, the button and its label being one thing).
     fn at(
         &self,
         node: &Node,
         by_name: bool,
-        low: &Lowering,
     ) -> smallvec::SmallVec<[&crate::node::HookContribution; 2]> {
         if (node.id.is_none() && node.hook().is_none() && self.loose.is_empty())
-            || node.private
-            || low.sealed.get() > 0
             || !std::rc::Weak::ptr_eq(&node.owner, &self.app)
         {
             return smallvec::SmallVec::new();
@@ -546,53 +533,7 @@ impl Hooks {
             .into_iter()
             .map(|at| &self.all[at])
             .filter(|hook| (by_name || hook.target.text.is_none()) && targets(&hook.target, node))
-            .filter(|hook| !removes_decision(hook, node))
             .collect()
-    }
-}
-/// Whether `hook` would take away a decision control `node` declares
-/// (`ui.decision`) by replacing, hiding or disabling it: it does nothing
-/// then, and the plugin is told. What only a builder knows of is for
-/// `ScriptHost::decision_shown`.
-fn removes_decision(hook: &crate::node::HookContribution, node: &Node) -> bool {
-    use crate::node::{Adds, Filtered, Place};
-    let removes = match &hook.adds {
-        Adds::Node(place, _) => *place == Place::Replace,
-        Adds::Filters(filters) => filters
-            .iter()
-            .any(|(what, _)| matches!(what, Filtered::Hidden | Filtered::Disabled)),
-    };
-    if !removes || !holds_decision(node) {
-        return false;
-    }
-    if hook.stats.error.borrow().is_none() {
-        let message = format!(
-            "{}ui.contribute {{ target = \"{}\" }}: refused, it holds a decision control \
-             (ui.decision), which no plugin removes",
-            site_of(hook),
-            hook.target_text()
-        );
-        *hook.stats.error.borrow_mut() = Some(message.clone());
-        if let Some(vm) = hook.vm.upgrade() {
-            vm.report(mlua::Error::runtime(message));
-        }
-    }
-    true
-}
-/// Whether `node`'s declared tree has a decision control in it.
-fn holds_decision(node: &Node) -> bool {
-    if matches!(node.kind, Kind::Decision(_)) || node.children.iter().any(|c| holds_decision(c)) {
-        return true;
-    }
-    match &node.kind {
-        Kind::Show {
-            then, otherwise, ..
-        } => holds_decision(then) || otherwise.as_deref().is_some_and(holds_decision),
-        Kind::Switch { cases, default, .. } => {
-            cases.iter().any(|(_, case)| holds_decision(case))
-                || default.as_deref().is_some_and(holds_decision)
-        }
-        _ => false,
     }
 }
 /// Whether `node` is what `target` names, by what is known of it before it
@@ -719,15 +660,14 @@ fn static_name(node: &Node) -> Option<&str> {
     }
     literal(node).or_else(|| node.children.first().and_then(|child| literal(child)))
 }
-/// A plugin's node at an element of the app's: lowered as its own, and
-/// told apart as the plugin's, so a contributed "Confirm" beside the app's
-/// is traced to it (assistive technology hears whose it is; the layout
-/// inspector shows the plugin's line that made it).
+/// A script's node at an element of the app's: lowered as its own, and
+/// counted for its script (`ScriptHost::contributions`); the layout
+/// inspector shows the script's line that made it.
 fn contributed(hook: &crate::node::HookContribution, node: &Rc<Node>, low: &Rc<Lowering>) -> View {
     if !hook.chain.is_empty() {
         return chained_contribution(hook, node, low);
     }
-    contributed_now(&hook.owner, &hook.stats, node, low)
+    contributed_now(&hook.stats, node, low)
 }
 /// `contributed` for a chained target (`a >> b`): drawn where its
 /// ancestors hold, as it mounts; else nothing, not even a flex item.
@@ -738,229 +678,39 @@ fn chained_contribution(
     node: &Rc<Node>,
     low: &Rc<Lowering>,
 ) -> View {
-    let (owner, stats, chain) = (hook.owner.clone(), hook.stats.clone(), hook.chain.clone());
+    let (stats, chain) = (hook.stats.clone(), hook.chain.clone());
     let (node, low) = (node.clone(), low.clone());
     component(
         move |cx| match chain_holds(&chain, cx.try_service::<Ancestry>()) {
-            true => contributed_now(&owner, &stats, &node, &low),
+            true => contributed_now(&stats, &node, &low),
             false => div().hidden(),
         },
     )
 }
 fn contributed_now(
-    owner: &str,
     stats: &Rc<crate::node::ContributionStats>,
     node: &Rc<Node>,
     low: &Rc<Lowering>,
 ) -> View {
-    let view = counted(lower(node, low), stats);
-    let from = format!("from the plugin {owner}");
-    let described = match node
-        .a11y
-        .as_ref()
-        .and_then(|a11y| a11y.description.as_deref())
-    {
-        Some(own) => format!("{own}, {from}"),
-        None => format!("From the plugin {owner}"),
-    };
-    plugin_view(view.accessible_description(described), low)
-}
-/// `view`, a plugin's among the app's: its popups stay in the window while a
-/// decision control shows (`Decisions::showing`).
-fn plugin_view(view: View, low: &Lowering) -> View {
-    zgx::compose::provide(
-        zgx::compose::PopupsInWindow(low.decisions.showing.clone()),
-        view,
-    )
-}
-/// Whether `node` is a plugin's, not the application's.
-fn plugin_owned(node: &Node) -> bool {
-    node.owner.upgrade().is_some_and(|vm| {
-        crate::node::env(&vm.lua).is_ok_and(|env| matches!(&*env.grants, crate::Grants::Only(_)))
-    })
-}
-/// Whether a decision key's control shows, and how many are mounted.
-type DecisionKey = (Signal<bool>, u32);
-/// The decision controls mounted (`ui.decision`), for
-/// `ScriptHost::decision_shown`, and across loads.
-pub(crate) struct Decisions {
-    runtime: zgx::reactive::Runtime,
-    keys: std::cell::RefCell<HashMap<Rc<str>, DecisionKey>>,
-    /// Whether one is mounted, a plugin's popups held in the window then.
-    showing: Signal<bool>,
-}
-impl Decisions {
-    pub(crate) fn new(runtime: &zgx::reactive::Runtime) -> Self {
-        Self {
-            runtime: runtime.clone(),
-            keys: Default::default(),
-            showing: runtime.signal(false),
-        }
-    }
-    /// Whether at least half of decision `key` shows (false until it does).
-    pub(crate) fn shown(&self, key: &str) -> Signal<bool> {
-        let mut keys = self.keys.borrow_mut();
-        if let Some((shown, _)) = keys.get(key) {
-            return shown.clone();
-        }
-        let shown = self.runtime.signal(false);
-        keys.insert(key.into(), (shown.clone(), 0));
-        shown
-    }
-    fn mounted(self: &Rc<Self>, key: &Rc<str>) -> impl Drop + 'static {
-        struct Mounted(Rc<Decisions>, Rc<str>);
-        impl Drop for Mounted {
-            fn drop(&mut self) {
-                let mut keys = self.0.keys.borrow_mut();
-                if let Some((shown, count)) = keys.get_mut(&self.1) {
-                    *count -= 1;
-                    if *count == 0 {
-                        shown.set(false);
-                    }
-                }
-                let any = keys.values().any(|(_, count)| *count > 0);
-                drop(keys);
-                if !any {
-                    self.0.showing.set(false);
-                }
-            }
-        }
-        self.shown(key);
-        self.keys.borrow_mut().get_mut(key).expect("just made").1 += 1;
-        if self.showing.with_untracked(|on| !*on) {
-            self.showing.set(true);
-        }
-        Mounted(self.clone(), key.clone())
-    }
+    counted(lower(node, low), stats)
 }
 /// What a slot shows for one contribution. Apart from `kind_view`, as few
 /// elements are a slot.
 #[cold]
 #[inline(never)]
 fn slot_item(n: &Rc<Node>, context: Option<&Value>, low: &Rc<Lowering>) -> View {
-    let view = match context {
+    match context {
         // What is contributed here hears it (`props.slot`).
         Some(context) => zgx::compose::provide(SlotContext(context.clone()), lower(n, low)),
         None => lower(n, low),
-    };
-    match plugin_owned(n) {
-        true => plugin_view(view, low),
-        false => view,
     }
 }
-/// `ui.decision`: what it holds lowered out of plugins' reach, hoisted over
-/// the box in flow its own props style.
-#[cold]
-#[inline(never)]
-fn decision(node: &Node, held: &crate::node::Decision, low: &Rc<Lowering>) -> View {
-    let crate::node::Decision {
-        key,
-        label,
-        content,
-        sealed,
-    } = held;
-    let has = |props: &[Prop]| node.props.iter().any(|(prop, _)| props.contains(prop));
-    let fills = (
-        has(&[Prop::W, Prop::WFull, Prop::Size]),
-        has(&[Prop::H, Prop::HFull, Prop::Size]),
-    );
-    // Lowered without what plugins add, then and whenever a part of it builds
-    // later (a row, a branch, a component).
-    let alone = Rc::new(Lowering {
-        slots: match *sealed {
-            // Under a name no script can write: no `ui.slot` shows them.
-            true => Some(low.slots.get(PLUGIN_PAGE).cloned().unwrap_or_default()),
-            false => low.slots.get(PAGES).cloned(),
-        }
-        .map(|pages| [(PAGES.to_owned(), pages)].into())
-        .unwrap_or_default(),
-        hooks: None,
-        sealed: Default::default(),
-        decisions: low.decisions.clone(),
-        actions: low.actions.clone(),
-        elements: low.elements.clone(),
-        runtime: low.runtime.clone(),
-        assets: low.assets.clone(),
-        inspector: low.inspector.clone(),
-        depth: std::cell::Cell::new(low.depth.get()),
-        #[cfg(feature = "components")]
-        commands: low.commands.clone(),
-    });
-    let mut held = column().children(content.iter().map(|child| lower(child, &alone)));
-    if fills.0 {
-        held = held.w_full();
-    }
-    if fills.1 {
-        held = held.h_full();
-    }
-    let decisions = low.decisions.clone();
-    let key = key.clone();
-    zgx::compose::hoist(
-        &low.runtime,
-        div(),
-        held,
-        label.as_str(),
-        fills,
-        Some(low.decisions.shown(&key)),
-    )
-    .on_mount(move |handle| handle.retain(decisions.mounted(&key)))
-}
-/// `ui.plugin_page`: what `plugin` alone gave its page, confined to this box:
-/// clipped, its portals with it, and its popups in the window. Lowered as the
-/// rest of its region, with no hook of another plugin's on it.
-#[cold]
-#[inline(never)]
-fn plugin_page(plugin: &Rc<str>, node: &Node, low: &Rc<Lowering>) -> View {
-    let Some(pages) = low.slots.get(PAGES) else {
-        if let Some(vm) = node.owner.upgrade() {
-            let at = node
-                .source
-                .as_deref()
-                .map(|at| format!("{at}: "))
-                .unwrap_or_default();
-            vm.report(mlua::Error::runtime(format!(
-                "{at}ui.plugin_page: it shows in a ui.sealed region alone"
-            )));
-        }
-        return div();
-    };
-    let page = column().w_full().h_full().children(
-        pages
-            .iter()
-            .filter(|(owner, _, _)| **owner == **plugin)
-            .map(|(_, n, stats)| counted(lower(n, low), stats)),
-    );
-    // An isolated group: all it can read of what's behind it (`zgx_backdrop`,
-    // a backdrop blur) is its own, never the sealed region's under it.
-    div().child(zgx::compose::confined(plugin_view(
-        page.isolated(true),
-        low,
-    )))
-}
-/// The slot a plugin's page goes to: `ui.contribute("plugin_page", …)`.
-const PLUGIN_PAGE: &str = "plugin_page";
-/// Where a `ui.sealed` region holds them, for the `ui.plugin_page`s in it.
-const PAGES: &str = "\0plugin_pages";
-/// A component inside a `private` element: built later, as it mounts,
-/// and still sealed from plugins then.
-#[cold]
-#[inline(never)]
-fn sealed_component(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, sealed: u32) -> View {
-    let (node, low, vm) = (node.clone(), low.clone(), vm.clone());
-    component(move |cx| {
-        let outer = low.sealed.replace(sealed);
-        let view = build(&node, &vm, &low, Some(cx));
-        low.sealed.set(outer);
-        view
-    })
-}
-/// `node`'s children, with what plugins add before and after each or in
-/// its place (the last script's replacement if several); none inside a
-/// `private` element, which seals what it holds as it lowers. A child whose
+/// `node`'s children, with what scripts add before and after each or in
+/// its place (the last script's replacement if several). A child whose
 /// text is its parent's name is not matched by that name (the parent is: a
 /// button and its label are one thing). `flow`: the container's, for
 /// regions among them. Apart from `build`, which lowers children without
-/// plugins as before.
+/// contributions as before.
 #[cold]
 #[inline(never)]
 fn hooked_children(
@@ -977,17 +727,11 @@ fn hooked_children(
             _ => view,
         }
     };
-    if node.private {
-        low.sealed.set(low.sealed.get() + 1);
-        let view = view.children(node.children.iter().map(lowered));
-        low.sealed.set(low.sealed.get() - 1);
-        return view;
-    }
     let parent = static_name(node);
     let mut children = Vec::with_capacity(node.children.len());
     for child in &node.children {
         let names_parent = parent.is_some_and(|name| static_name(child) == Some(name));
-        let at = hooks.at(child, !names_parent, low);
+        let at = hooks.at(child, !names_parent);
         let place = |place| {
             at.iter()
                 .filter_map(move |hook| Some((*hook, hook.placed(place)?)))
@@ -1052,7 +796,7 @@ fn chained_element(
             return lowered(&child);
         };
         let at: Vec<_> = hooks
-            .at(&child, by_name, &low)
+            .at(&child, by_name)
             .into_iter()
             .filter(|hook| chain_holds(&hook.chain, above.clone()))
             .collect();
@@ -1061,7 +805,7 @@ fn chained_element(
             .rev()
             .find_map(|hook| Some((*hook, hook.placed(crate::node::Place::Replace)?)))
         {
-            return contributed_now(&hook.owner, &hook.stats, node, &low);
+            return contributed_now(&hook.stats, node, &low);
         }
         let filters = filters_in(&at);
         match filters.is_empty() {
@@ -1087,7 +831,7 @@ fn filters_in<'a>(
         .flat_map(|(hook, filters)| filters.iter().map(move |(what, f)| (hook, *what, f)))
         .collect()
 }
-/// What a `ui.show` or `ui.switch` shows now, with what plugins put in its
+/// What a `ui.show` or `ui.switch` shows now, with what scripts put in its
 /// place or filter of it. Nothing goes before or after it: it lays out as
 /// the one element it shows.
 fn shown(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
@@ -1099,9 +843,9 @@ fn shown(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
 #[cold]
 #[inline(never)]
 fn hooked_shown(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
-    // Plugins add beside it: in a node of the app's laid out in its place,
+    // Scripts add beside it: in a node of the app's laid out in its place,
     // where it is a child as any other (`beside_a_branch`).
-    if adds_beside(hooks, node, low) {
+    if adds_beside(hooks, node) {
         return lower(&Rc::new(in_place(node)), low);
     }
     let marks = hooks.marks_of(node);
@@ -1112,7 +856,7 @@ fn hooked_shown(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
     }
 }
 fn shown_element(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
-    let at = hooks.at(node, true, low);
+    let at = hooks.at(node, true);
     if at.iter().any(|hook| !hook.chain.is_empty()) {
         return chained_element(node, low, None, true);
     }
@@ -1129,23 +873,23 @@ fn shown_element(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
         false => counted_filters(filtered(node, &filters, low, None), &filters),
     }
 }
-/// A value passed through a plugin's filter, by its script: what it
+/// A value passed through a script's filter, by its script: what it
 /// returns, or (when it fails, reported as its error) the value as it was.
-fn passed(plugin: &std::rc::Weak<Vm>, f: &mlua::Function, value: Value) -> Value {
-    let Some(vm) = plugin.upgrade() else {
+fn passed(filterer: &std::rc::Weak<Vm>, f: &mlua::Function, value: Value) -> Value {
+    let Some(vm) = filterer.upgrade() else {
         return value;
     };
     match vm.call::<Value>(f, value.clone()) {
         Ok(returned) => returned,
         Err(error) => {
-            vm.report_as(error, "a plugin's filter function", f);
+            vm.report_as(error, "a filter function", f);
             value
         }
     }
 }
 /// A function of the app's script returning what `value` returns now: a
 /// computed source of its, followed as any is (what `value` reads, the
-/// app's state and the plugin's, makes it run again).
+/// app's state and the script's, makes it run again).
 fn computed_fn(app: &Vm, value: impl Fn() -> Value + 'static) -> Option<mlua::Function> {
     app.lua
         .create_function(move |_, ()| Ok(value()))
@@ -1166,13 +910,13 @@ fn filtered_source(
     source: Option<&Source>,
     default: Value,
     ty: Ty,
-    plugin: &std::rc::Weak<Vm>,
+    filterer: &std::rc::Weak<Vm>,
     f: &mlua::Function,
     app: &Rc<Vm>,
 ) -> Option<Source> {
-    let (source, plugin, f, vm) = (
+    let (source, filterer, f, vm) = (
         source.map(resolve_owned),
-        plugin.clone(),
+        filterer.clone(),
         f.clone(),
         Rc::downgrade(app),
     );
@@ -1181,20 +925,20 @@ fn filtered_source(
             (Some(source), Some(vm)) => value_now(source, ty, &vm),
             _ => default.clone(),
         };
-        passed(&plugin, &f, now)
+        passed(&filterer, &f, now)
     })
     .map(Source::Computed)
 }
 /// `text` passed through `f`, as text the app's script computes.
 fn filtered_text(
     text: &Text,
-    plugin: &std::rc::Weak<Vm>,
+    filterer: &std::rc::Weak<Vm>,
     f: &mlua::Function,
     app: &Rc<Vm>,
 ) -> Option<Text> {
-    let (text, plugin, f, vm) = (
+    let (text, filterer, f, vm) = (
         copy_text(text),
-        plugin.clone(),
+        filterer.clone(),
         f.clone(),
         Rc::downgrade(app),
     );
@@ -1203,7 +947,7 @@ fn filtered_text(
             .upgrade()
             .map(|vm| render_text(&text, &vm))
             .unwrap_or_default();
-        match passed(&plugin, &f, Value::Str(now.into())) {
+        match passed(&filterer, &f, Value::Str(now.into())) {
             Value::Str(text) => Value::Str(text),
             Value::Nil => Value::Str("".into()),
             other => Value::Str(other.to_string().into()),
@@ -1211,7 +955,7 @@ fn filtered_text(
     })
     .map(|f| Text::Computed(Computed::Script(f)))
 }
-/// `node` lowered with its props passed through plugins' filters
+/// `node` lowered with its props passed through scripts' filters
 /// (`ui.filter`), in the order the scripts filter them: a copy of it, the
 /// app's own node left as it is. Its text is its own or (a button's, an
 /// item's) its first child's.
@@ -1242,18 +986,18 @@ fn filtered(
     let mut copy = (**node).clone();
     let (mut items, mut order) = (Vec::new(), Vec::new());
     for &(hook, what, f) in filters {
-        let plugin = &hook.vm;
+        let filterer = &hook.vm;
         match what {
             Filtered::Text => match &copy.kind {
                 Kind::Text(text) => {
-                    if let Some(text) = filtered_text(text, plugin, f, &app) {
+                    if let Some(text) = filtered_text(text, filterer, f, &app) {
                         copy.kind = Kind::Text(text);
                     }
                 }
                 _ => {
                     if let Some(first) = copy.children.first()
                         && let Kind::Text(text) = &first.kind
-                        && let Some(text) = filtered_text(text, plugin, f, &app)
+                        && let Some(text) = filtered_text(text, filterer, f, &app)
                     {
                         let mut child = (**first).clone();
                         child.kind = Kind::Text(text);
@@ -1268,14 +1012,15 @@ fn filtered(
                     .map(|label| Source::Lit(Lit::Str(label.into())));
                 let a11y = copy.a11y.get_or_insert_default();
                 let source = a11y.label.take().or(written);
-                a11y.label = filtered_source(source.as_ref(), Value::Nil, Ty::Str, plugin, f, &app);
+                a11y.label =
+                    filtered_source(source.as_ref(), Value::Nil, Ty::Str, filterer, f, &app);
             }
             Filtered::Disabled => {
                 copy.rare_mut().disabled = filtered_source(
                     copy.rare().disabled.as_ref(),
                     Value::Bool(false),
                     Ty::Bool,
-                    plugin,
+                    filterer,
                     f,
                     &app,
                 );
@@ -1287,7 +1032,7 @@ fn filtered(
                     .position(|(prop, _)| *prop == Prop::Hidden);
                 let source = at.map(|at| &copy.props[at].1);
                 if let Some(source) =
-                    filtered_source(source, Value::Bool(false), Ty::Bool, plugin, f, &app)
+                    filtered_source(source, Value::Bool(false), Ty::Bool, filterer, f, &app)
                 {
                     match at {
                         Some(at) => copy.props[at].1 = source,
@@ -1301,7 +1046,7 @@ fn filtered(
                 if let Some(tooltip) = copy.rare.as_deref_mut().and_then(|r| r.tooltip.as_mut())
                     && let Some(TooltipContent::Text(text)) = &mut tooltip.content
                 {
-                    let value = passed(plugin, f, Value::Str(text.as_str().into()));
+                    let value = passed(filterer, f, Value::Str(text.as_str().into()));
                     *text = match value {
                         Value::Str(passed) => passed.to_string(),
                         Value::Nil => String::new(),
@@ -1311,12 +1056,12 @@ fn filtered(
             }
             Filtered::Items => {
                 if items_of(&mut copy.kind).is_some() {
-                    items.push((plugin.clone(), f.clone()));
+                    items.push((filterer.clone(), f.clone()));
                 }
             }
             Filtered::Order => {
                 if !copy.children.is_empty() {
-                    order.push((plugin.clone(), f.clone()));
+                    order.push((filterer.clone(), f.clone()));
                 }
             }
         }
@@ -1344,8 +1089,8 @@ fn filtered(
     switch(
         move || {
             let mut value = Value::List(Slice::from(ids.as_slice()));
-            for (plugin, f) in &order {
-                value = passed(plugin, f, value);
+            for (filterer, f) in &order {
+                value = passed(filterer, f, value);
             }
             reordered(&ids, &value)
         },
@@ -1411,8 +1156,8 @@ fn filtered_items(
         let out = shown.clone();
         let effect = runtime.effect_now(move || {
             let mut value = original.get();
-            for (plugin, f) in &items {
-                value = passed(plugin, f, value);
+            for (filterer, f) in &items {
+                value = passed(filterer, f, value);
             }
             out.set(value);
         });
@@ -1425,12 +1170,8 @@ fn filtered_items(
 pub(crate) struct Lowering {
     /// What each slot shows: its contributions and who made them.
     pub slots: crate::node::Slots,
-    /// What plugins add at the app's elements.
+    /// What scripts add at the root script's elements.
     pub hooks: Option<Box<Hooks>>,
-    /// How many `private` elements the lowering running now is inside:
-    /// nothing in them is a plugin's target.
-    pub sealed: std::cell::Cell<u32>,
-    pub decisions: Rc<Decisions>,
     pub actions: Actions,
     pub elements: Rc<crate::element::Elements>,
     pub runtime: zgx::reactive::Runtime,
@@ -1457,13 +1198,8 @@ fn lower_node(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
         return div();
     };
     let view = if node.needs_context() {
-        match low.sealed.get() {
-            0 => {
-                let (node, low, vm) = (node.clone(), low.clone(), vm.clone());
-                component(move |cx| build(&node, &vm, &low, Some(cx)))
-            }
-            sealed => sealed_component(node, &vm, low, sealed),
-        }
+        let (node, low, vm) = (node.clone(), low.clone(), vm.clone());
+        component(move |cx| build(&node, &vm, &low, Some(cx)))
     } else {
         build(node, &vm, low, None)
     };
@@ -2489,12 +2225,12 @@ fn warn_replaced_id(vm: &Vm, given: &str, site: Option<&str>, root: &mlua::Value
     );
 }
 
-/// A `ui.each`'s or `ui.list`'s row builder, with plugins: wrapped so a row
-/// whose root plugins add before or after (or replace, or filter) is that
+/// A `ui.each`'s or `ui.list`'s row builder, with scripts: wrapped so a row
+/// whose root scripts add before or after (or replace, or filter) is that
 /// root inside a `display = "contents"` node of the app's, where it is a
 /// child as any other: what is added lays out as the list's own items,
 /// keyed with the row (it moves and goes with it), and reads what the
-/// row's root provides. Without plugins, the builder itself: rows build as
+/// row's root provides. Without scripts, the builder itself: rows build as
 /// they always have.
 #[inline(always)]
 fn row_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlua::Function {
@@ -2503,16 +2239,16 @@ fn row_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlu
     }
     wrapped_builder(builder, vm, low, Built::Row)
 }
-/// What a builder builds, for what plugins add at its root
+/// What a builder builds, for what scripts add at its root
 /// (`wrapped_builder`).
 #[derive(Clone, Copy, PartialEq)]
 enum Built {
-    /// A list's row: in place where plugins add at it or a host lists it.
+    /// A list's row: in place where scripts add at it or a host lists it.
     Row,
-    /// A component's root: in place where plugins add beside it.
+    /// A component's root: in place where scripts add beside it.
     Component,
     /// A presence's content: it can't have siblings (its region lays out
-    /// one piece of content, what leaves over what enters), so plugins
+    /// one piece of content, what leaves over what enters), so scripts
     /// adding beside it are told so.
     Presence,
 }
@@ -2545,8 +2281,8 @@ fn wrapped_builder(
         })
         .unwrap_or_else(|_| builder.clone())
 }
-/// `root`, as `built` says, in a `display = "contents"` node if plugins add
-/// at it (`in_place`), or with the plugins told it can't take siblings.
+/// `root`, as `built` says, in a `display = "contents"` node if scripts add
+/// at it (`in_place`), or with the scripts told it can't take siblings.
 fn hooked_root(
     lua: &mlua::Lua,
     root: mlua::Value,
@@ -2563,19 +2299,19 @@ fn hooked_root(
         return Ok(root);
     };
     let held = match built {
-        // Rows plugins add at, or a host lists (`ScriptHost::elements`).
-        Built::Row => !hooks.at(&node, true, low).is_empty() || hooks.listed(&node),
-        Built::Component => adds_beside(hooks, &node, low),
+        // Rows scripts add at, or a host lists (`ScriptHost::elements`).
+        Built::Row => !hooks.at(&node, true).is_empty() || hooks.listed(&node),
+        Built::Component => adds_beside(hooks, &node),
         // In place, its additions enter and leave with it: the region and
         // the entry lay out flat over it (`Scene::flat_item`), and as it
         // leaves it is kept where it lay (`pin_in_place`). A replacement
-        // too: held so, the root is a child as any other, which plugins
+        // too: held so, the root is a child as any other, which scripts
         // replace (or filter) where it is built, each branch anew.
-        Built::Presence => !hooks.at(&node, true, low).is_empty(),
+        Built::Presence => !hooks.at(&node, true).is_empty(),
     };
     // A root that is a component, a presence or a branching region gets
     // what `hooked_lower` gives it among children: as in place, it's one.
-    let node = match held || beside_a_branch(hooks, &node, low) {
+    let node = match held || beside_a_branch(hooks, &node) {
         true => Rc::new(in_place(&node)),
         false => match &node.kind {
             Kind::Component { .. } | Kind::Presence { .. } => rebuilt(&node, low),
@@ -2584,11 +2320,11 @@ fn hooked_root(
     };
     lua.create_userdata(NodeUd(node)).map(mlua::Value::UserData)
 }
-/// What plugins add before or after `node`, which can't have siblings
+/// What scripts add before or after `node`, which can't have siblings
 /// (`what` it is): an error, once each, in `ScriptHost::contributions` and
-/// to the plugin, never nothing in silence.
-pub(crate) fn no_siblings(hooks: &Hooks, node: &Node, low: &Lowering, what: &str) {
-    for hook in hooks.at(node, true, low) {
+/// to the script, never nothing in silence.
+pub(crate) fn no_siblings(hooks: &Hooks, node: &Node, what: &str) {
+    for hook in hooks.at(node, true) {
         let place = match () {
             _ if hook.placed(crate::node::Place::Before).is_some() => "before",
             _ if hook.placed(crate::node::Place::After).is_some() => "after",
@@ -2610,7 +2346,7 @@ pub(crate) fn no_siblings(hooks: &Hooks, node: &Node, low: &Lowering, what: &str
     }
 }
 /// A node of the app's holding `node`, laid out in its place (`display =
-/// "contents"`), providing what `node` provides: what plugins add beside
+/// "contents"`), providing what `node` provides: what scripts add beside
 /// `node` is then its sibling as in any container's children, and reads
 /// what it would inside it.
 fn in_place(node: &Rc<Node>) -> Node {
@@ -2623,16 +2359,16 @@ fn in_place(node: &Rc<Node>) -> Node {
     held.children = vec![node.clone()];
     held
 }
-/// Whether plugins add before or after `node`.
-fn adds_beside(hooks: &Hooks, node: &Node, low: &Lowering) -> bool {
-    hooks.at(node, true, low).iter().any(|hook| {
+/// Whether scripts add before or after `node`.
+fn adds_beside(hooks: &Hooks, node: &Node) -> bool {
+    hooks.at(node, true).iter().any(|hook| {
         hook.placed(crate::node::Place::Before).is_some()
             || hook.placed(crate::node::Place::After).is_some()
     })
 }
-/// `node` lowered where plugins are loaded, so lowering without them is
+/// `node` lowered where scripts are loaded, so lowering without them is
 /// as it was: a component's or a presence's builder wrapped for what
-/// plugins add at its root (`rebuilt`), and a `ui.show` or `ui.switch`
+/// scripts add at its root (`rebuilt`), and a `ui.show` or `ui.switch`
 /// whose branch root they add beside laid out in its place
 /// (`display_contents`), the additions siblings in its parent's flow.
 #[cold]
@@ -2644,7 +2380,7 @@ fn hooked_lower(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
             copy = rebuilt(node, low);
             (&copy, false)
         }
-        _ => (node, beside_a_branch(hooks, node, low)),
+        _ => (node, beside_a_branch(hooks, node)),
     };
     // One call of `lower`: a second sways how it inlines elsewhere.
     let view = lower(node, low);
@@ -2653,8 +2389,8 @@ fn hooked_lower(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
         false => view,
     }
 }
-/// `node` lowered, by `hooked_lower` where plugins are loaded: for the
-/// plugin-only paths, which may run without them (a reload dropped them).
+/// `node` lowered, by `hooked_lower` where scripts are loaded: for the
+/// contribution-only paths, which may run without them (a reload dropped them).
 #[cold]
 #[inline(never)]
 pub(crate) fn plugged(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
@@ -2663,9 +2399,9 @@ pub(crate) fn plugged(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
         None => lower(node, low),
     }
 }
-/// Whether `node` is a `ui.show` or `ui.switch` plugins add beside a
+/// Whether `node` is a `ui.show` or `ui.switch` scripts add beside a
 /// branch root of.
-fn beside_a_branch(hooks: &Hooks, node: &Node, low: &Lowering) -> bool {
+fn beside_a_branch(hooks: &Hooks, node: &Node) -> bool {
     let roots: Vec<&Rc<Node>> = match &node.kind {
         Kind::Show {
             then, otherwise, ..
@@ -2675,10 +2411,10 @@ fn beside_a_branch(hooks: &Hooks, node: &Node, low: &Lowering) -> bool {
         }
         _ => return false,
     };
-    roots.into_iter().any(|root| adds_beside(hooks, root, low))
+    roots.into_iter().any(|root| adds_beside(hooks, root))
 }
 /// A component or a presence as `node`, its builder wrapped for what
-/// plugins add at the root it builds (`wrapped_builder`).
+/// scripts add at the root it builds (`wrapped_builder`).
 fn rebuilt(node: &Rc<Node>, low: &Rc<Lowering>) -> Rc<Node> {
     let Some(vm) = node.owner.upgrade() else {
         return node.clone();
@@ -2711,7 +2447,7 @@ fn counted(view: View, stats: &Rc<crate::node::ContributionStats>) -> View {
         handle.retain(Live(stats, node));
     })
 }
-/// `view`, an element plugins filter, counted for each filtering script.
+/// `view`, an element scripts filter, counted for each filtering script.
 fn counted_filters(
     mut view: View,
     filters: &[(
@@ -2873,31 +2609,14 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
     let web = spec.web.clone();
     let view = match (&spec.src, &spec.html) {
         (Some(src), _) => {
-            let (src, vm, id) = (resolve_owned(src), vm.clone(), spec.id.clone());
-            // Refused, it stays where it is (blank, the first time).
-            let mut shown = "about:blank".to_owned();
+            let (src, vm) = (resolve_owned(src), vm.clone());
             web_view_src(&web, move || match resolve(&src, Ty::Str, None, &vm) {
-                Some(Lit::Str(url)) => {
-                    match crate::rules::guard_web(&vm.lua, id.as_deref(), &url) {
-                        Ok(()) => {
-                            shown = url.to_string();
-                            shown.clone()
-                        }
-                        Err(error) => {
-                            vm.report(error);
-                            shown.clone()
-                        }
-                    }
-                }
+                Some(Lit::Str(url)) => url.to_string(),
                 _ => String::new(),
             })
         }
         (None, Some((html, base))) => {
-            let name = base.as_deref().unwrap_or("about:blank");
-            match crate::rules::guard_web(&vm.lua, spec.id.as_deref(), name) {
-                Ok(()) => web.load_html(html.clone(), base.as_deref()),
-                Err(error) => vm.report(error),
-            }
+            web.load_html(html.clone(), base.as_deref());
             web_view(&web)
         }
         (None, None) => web_view(&web),
@@ -3963,8 +3682,6 @@ fn kind_view(
                 .filter(|(owner, _, _)| from.as_deref().is_none_or(|from| **owner == *from))
                 .map(|(_, n, stats)| counted(slot_item(n, context.as_ref(), low), stats)),
         ),
-        Kind::Decision(held) => decision(node, held, low),
-        Kind::PluginPage(plugin) => plugin_page(plugin, node, low),
     }
 }
 
@@ -4021,7 +3738,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 }
                 view = view.children_vec(children);
             }
-            // What plugins add at an element is its sibling, or in its place.
+            // What scripts add at an element is its sibling, or in its place.
             Some(hooks) => view = hooked_children(view, node, low, hooks, flow.as_deref()),
         }
     }
@@ -5333,51 +5050,24 @@ fn placeholder() -> Arc<ImageData> {
     }
     EMPTY.with(Clone::clone)
 }
-/// An image's path, from the script's directory. A plugin's come from its
-/// own directory or below, as its modules do, not from anywhere the user
-/// can read.
+/// An image's path, from the script's directory.
 pub(crate) fn resolve_path(vm: &Vm, path: &str) -> Result<std::path::PathBuf, String> {
     resolve_path_of(vm, path, "images")
 }
-/// A file's path as `resolve_path` finds an image's: `what` names what a
-/// plugin's come from its directory (`"fonts"`).
+/// A file's path as `resolve_path` finds an image's: from the script's
+/// directory, or as written if absolute. (`what` names the files, for a
+/// message.)
 pub(crate) fn resolve_path_of(
     vm: &Vm,
     path: &str,
     what: &str,
 ) -> Result<std::path::PathBuf, String> {
+    let _ = what;
     let given = std::path::Path::new(path);
-    let resolved = match (&vm.base, given.is_relative()) {
+    Ok(match (&vm.base, given.is_relative()) {
         (Some(base), true) => base.join(given),
         _ => given.to_path_buf(),
-    };
-    let plugin = vm
-        .lua
-        .app_data_ref::<crate::node::Env>()
-        .is_some_and(|env| matches!(*env.grants, crate::Grants::Only(_)));
-    if !plugin {
-        return Ok(resolved);
-    }
-    // A file its host's grant let it pick (a dialog's, a folder's).
-    let picked = vm
-        .lua
-        .app_data_ref::<crate::node::Env>()
-        .is_some_and(|env| env.picked.borrow().contains(&resolved));
-    if picked {
-        return Ok(resolved);
-    }
-    let root = vm
-        .base
-        .as_ref()
-        .map(|base| base.canonicalize().unwrap_or_else(|_| base.clone()));
-    match root {
-        Some(root) if crate::within(&root, &crate::normalize(&root.join(given))) => {
-            Ok(crate::normalize(&root.join(given)))
-        }
-        _ => Err(format!(
-            "{path}: a plugin's {what} come from its directory or below"
-        )),
-    }
+    })
 }
 fn is_remote(src: &str) -> bool {
     src.starts_with("https://") || src.starts_with("http://")
@@ -5402,14 +5092,6 @@ const FAILED: u8 = 2;
 fn backoff(times: u32) -> std::time::Duration {
     std::time::Duration::from_secs((5u64 << times.saturating_sub(1).min(6)).min(300))
 }
-/// Remote `src`'s key in `Assets::remote` and `failed`: its URL for the app,
-/// apart for each plugin (a URL starts `http`, never with this `\0`).
-fn remote_key<'a>(vm: &Vm, src: &'a str) -> std::borrow::Cow<'a, str> {
-    match crate::fetch_policy::caller_of(&vm.lua) {
-        None => src.into(),
-        Some(plugin) => format!("\0{plugin}\0{src}").into(),
-    }
-}
 fn remote_ready(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> bool {
     remote_status(vm, low, src, svg) == READY
 }
@@ -5427,36 +5109,16 @@ fn remote_status_in(
     src: &str,
     svg: bool,
 ) -> u8 {
-    // A remote source is a request to the network: a plugin makes it only
-    // if granted it, as `ui.fetch` (else an image's URL would carry out what
-    // the plugin read).
-    let fetches = vm
-        .lua
-        .app_data_ref::<crate::node::Env>()
-        .is_none_or(|env| env.grants.allows(&crate::Capability::Fetch));
-    if !fetches {
-        vm.report(mlua::Error::runtime(format!(
-            "{src}: a plugin shows remote images only if the host grants it \
-             (`ScriptHost::grant(plugin, Capability::Fetch)`)"
-        )));
-        return FAILED;
-    }
-    let key = remote_key(vm, src);
-    let existing = assets.remote.borrow().get(&*key).cloned();
+    let key = src;
+    let existing = assets.remote.borrow().get(key).cloned();
     if let Some(status) = &existing {
         if status.get() != FAILED {
             return status.get();
         }
-        let failed = (assets.failed.borrow().get(&*key)).map(|(at, times, _)| (*at, *times));
+        let failed = (assets.failed.borrow().get(key)).map(|(at, times, _)| (*at, *times));
         if failed.is_some_and(|(at, times)| at.elapsed() < backoff(times)) {
             return FAILED;
         }
-    }
-    // Before anything is recorded: refused, it is asked again the next time,
-    // and a picture that can't be shown shows what such a picture does.
-    if let Err(error) = crate::rules::guard(&vm.lua, crate::GuardKind::Picture, src) {
-        vm.report(error);
-        return FAILED;
     }
     let ready = match existing {
         Some(status) => {
@@ -5468,23 +5130,23 @@ fn remote_status_in(
             assets
                 .remote
                 .borrow_mut()
-                .insert(key.clone().into_owned(), ready.clone());
+                .insert(key.to_owned(), ready.clone());
             ready
         }
     };
     let links = assets.links.borrow().clone();
     let fetch = links
         .as_ref()
-        .and_then(|(_, fetcher, _)| fetcher.borrow().clone());
-    let (Some((timers, _, policy)), Some(fetch)) = (links, fetch) else {
+        .and_then(|(_, fetcher)| fetcher.borrow().clone());
+    let (Some((timers, _)), Some(fetch)) = (links, fetch) else {
         vm.report(mlua::Error::runtime(format!(
             "{src}: remote sources need the host's fetcher (`ScriptHost::fetcher`)"
         )));
         return ready.get();
     };
-    // Asked for by a plugin, the request is that plugin's, as its `ui.fetch`.
+    // The request is the script's, as its `ui.fetch` is.
     let body = crate::calls::Body::kept();
-    body.asked_by(&vm.lua, &policy);
+    body.asked_by(&vm.lua);
     let future = fetch(
         crate::calls::Request {
             url: src.to_owned(),
@@ -5498,7 +5160,7 @@ fn remote_status_in(
         assets.clone(),
         Rc::downgrade(vm),
         src.to_owned(),
-        key.into_owned(),
+        key.to_owned(),
         runtime.clone(),
     );
     let arriving = ready.clone();
@@ -5643,21 +5305,17 @@ pub(crate) fn try_load_image_in(
     if vm
         .lua
         .app_data_ref::<crate::node::Env>()
-        .is_some_and(|env| matches!(*env.grants, crate::Grants::Only(_)))
+        .is_some_and(|env| !env.root)
     {
-        return try_load_plugin_image(vm, assets, runtime, src);
+        return try_load_beside_image(vm, assets, runtime, src);
     }
     if let Some(image) = assets.image(src) {
         return Ok(Some(image));
     }
     if is_remote(src) {
         if remote_status_in(vm, assets, runtime, src, false) == FAILED {
-            let key = remote_key(vm, src);
-            let why = assets
-                .failed
-                .borrow()
-                .get(&*key)
-                .map(|(.., why)| why.clone());
+            let key = src;
+            let why = assets.failed.borrow().get(key).map(|(.., why)| why.clone());
             return Err(format!(
                 "{src} didn't load: {}",
                 why.as_deref().unwrap_or("refused")
@@ -5669,8 +5327,6 @@ pub(crate) fn try_load_image_in(
     if src.is_empty() {
         return Ok(None);
     }
-    // A path the script may not reach (a plugin's outside its directory)
-    // is the script's doing: its error, as before.
     let path = match resolve_path(vm, src) {
         Ok(path) => path,
         Err(refused) => {
@@ -5695,15 +5351,12 @@ pub(crate) fn try_load_image_in(
         }),
     }
 }
-/// `try_load_image_in` for a plugin: what it may reach is asked before the
-/// cache, which the app and every plugin share. Else a plugin would be
-/// shown (and with `c:image` and `ui.render_canvas`, read back) a picture
-/// the app fetched for a URL the plugin may not fetch, or the app's own
-/// file named by the same relative `src`. A file is kept by its path, a
-/// remote picture once the plugin's own request for it came.
+/// `try_load_image_in` for a script beside the root, whose relative `src`
+/// names a file of its own folder: kept by its path, never by a `src` the
+/// root (or another script) names a file of its own by.
 #[cold]
 #[inline(never)]
-fn try_load_plugin_image(
+fn try_load_beside_image(
     vm: &Rc<Vm>,
     assets: &Rc<Assets>,
     runtime: &zgx::reactive::Runtime,
@@ -5716,12 +5369,8 @@ fn try_load_plugin_image(
         return match remote_status_in(vm, assets, runtime, src, false) {
             READY => Ok(assets.image(src)),
             FAILED => {
-                let key = remote_key(vm, src);
-                let why = assets
-                    .failed
-                    .borrow()
-                    .get(&*key)
-                    .map(|(.., why)| why.clone());
+                let key = src;
+                let why = assets.failed.borrow().get(key).map(|(.., why)| why.clone());
                 Err(format!(
                     "{src} didn't load: {}",
                     why.as_deref().unwrap_or("refused")
@@ -5738,7 +5387,7 @@ fn try_load_plugin_image(
         }
     };
     // Its path is its key: an absolute path, never a relative `src` the
-    // app (or another plugin) names a file of its own by.
+    // root (or another script) names a file of its own by.
     let key = path.to_string_lossy();
     if let Some(image) = assets.image(&key) {
         return Ok(Some(image));
@@ -6539,15 +6188,9 @@ fn run(
                 }
                 Action::Host(name, arg) => {
                     let action = actions.borrow().get(&**name).cloned();
-                    let guarded = crate::rules::guard(&vm.lua, crate::GuardKind::Action, name);
                     match action {
-                        _ if guarded.is_err() => {
-                            if let Err(error) = guarded {
-                                vm.report(error);
-                            }
-                        }
                         Some(action) => {
-                            action(arg.clone());
+                            crate::calling(crate::script_of(&vm.lua), || action(arg.clone()));
                             if let Some(error) = crate::modules::failure() {
                                 vm.report(error);
                             }
@@ -10677,7 +10320,7 @@ fn presence(
 }
 
 /// What a leaving presence entry holds laid out in its place (content
-/// plugins add beside, `in_place`), kept where it lies as it leaves: each
+/// scripts add beside, `in_place`), kept where it lies as it leaves: each
 /// piece absolute at the offset and size it had in the parent's flow, in
 /// a box of its own, so the one-cell grid that holds what leaves doesn't
 /// stack them. Content alone is left as it is.

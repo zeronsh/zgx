@@ -6,15 +6,9 @@
 //! doing. A peer silent for five minutes ends the request. A host that
 //! brings its own transport replaces it (`ScriptHost::fetcher`).
 //!
-//! The app's `FetchPolicy` (`ScriptHost::fetch_policy`) is asked of every
-//! hop: redirects are followed here, each URL and header asked first, and
-//! the resolver asks of every address before any is connected to. A
-//! plugin's request goes on an agent of that plugin's, so it never reuses a
-//! connection opened for the app or another plugin, and it ignores any proxy
-//! in the environment, which would carry it past the address checks.
+//! Redirects are followed here, as ureq's own would be.
 use std::{
     cell::RefCell,
-    collections::HashMap,
     future::Future,
     io::Read,
     pin::Pin,
@@ -22,17 +16,16 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use ureq::{
-    config::Config,
     http::Uri,
     unversioned::{
-        resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver},
+        resolver::DefaultResolver,
         transport::{
             Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, ShutdownHandle,
             Transport,
         },
     },
 };
-use zgx_script::{Body, FetchPolicy, Request, Response, ScriptHost, Url};
+use zgx_script::{Body, Request, Response, ScriptHost};
 
 /// Give `host` the default fetcher, as `run` does before a host's own
 /// setup (which may replace it).
@@ -64,13 +57,6 @@ struct Heard {
 }
 type Shared = Arc<Mutex<Heard>>;
 
-/// Who is asking (the plugin, `None` for the app) and what the app allows.
-#[derive(Clone)]
-struct Guard {
-    caller: Option<String>,
-    policy: Option<Arc<dyn FetchPolicy>>,
-}
-
 /// One request: its thread reads, this future hands what it read to the
 /// script's body and answers with the head once the body ends.
 struct Fetching {
@@ -81,13 +67,9 @@ impl Fetching {
     fn start(request: Request, body: Body) -> Self {
         let shared = Shared::default();
         let heard = shared.clone();
-        let guard = Guard {
-            caller: body.caller().map(str::to_owned),
-            policy: body.fetch_policy(),
-        };
         std::thread::Builder::new()
             .name("zgx-run fetch".into())
-            .spawn(move || read(request, guard, heard))
+            .spawn(move || read(request, heard))
             .expect("a thread for the request");
         Self { shared, body }
     }
@@ -160,50 +142,6 @@ thread_local! {
     static ACTIVE: RefCell<Option<Shared>> = const { RefCell::new(None) };
     /// The shutdown handle of the connection this thread just made.
     static MADE: RefCell<Option<Weak<dyn ShutdownHandle>>> = const { RefCell::new(None) };
-    /// Who this thread's request is for: what `Checking` asks the policy of.
-    static GUARD: RefCell<Option<Guard>> = const { RefCell::new(None) };
-}
-
-/// ureq's resolver, the policy asked of every address before any is
-/// connected to: an IP literal comes through here too, and a name answering
-/// with one address allowed and one refused is refused (DNS rebinding).
-#[derive(Debug, Default)]
-struct Checking(DefaultResolver);
-impl Resolver for Checking {
-    fn resolve(
-        &self,
-        uri: &Uri,
-        config: &Config,
-        timeout: NextTimeout,
-    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
-        let addresses = self.0.resolve(uri, config, timeout)?;
-        GUARD.with_borrow(|guard| {
-            let Some(Guard {
-                caller,
-                policy: Some(policy),
-            }) = guard
-            else {
-                return Ok(());
-            };
-            let host = uri.host().map_or("", bare_host);
-            addresses.iter().try_for_each(|address| {
-                policy
-                    .address(caller.as_deref(), host, address.ip())
-                    .map_err(|refused| {
-                        ureq::Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            refused,
-                        ))
-                    })
-            })
-        })?;
-        Ok(addresses)
-    }
-}
-
-/// A URL's host without the brackets round an IPv6 address.
-fn bare_host(host: &str) -> &str {
-    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 /// Record `socket` as the connection this thread's request is on, unless
@@ -302,43 +240,32 @@ impl Transport for Tracked {
 /// script reads (`ok` false), not an error, and a redirect one `send`
 /// follows. A read or write waits at most five minutes: a stream may be
 /// quiet a while (a model thinking), a peer gone silent for good is not
-/// waited on forever. A plugin's has no proxy, whatever the environment says.
-fn new_agent(plugin: bool) -> ureq::Agent {
+/// waited on forever.
+fn new_agent() -> ureq::Agent {
     let minutes = |n: u64| Some(std::time::Duration::from_secs(60 * n));
-    let mut config = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
         .user_agent(concat!("zgx-run/", env!("CARGO_PKG_VERSION")))
         .timeout_connect(Some(std::time::Duration::from_secs(30)))
         .timeout_per_read(minutes(5))
         .timeout_per_write(minutes(5));
-    if plugin {
-        config = config.proxy(None);
-    }
-    ureq::Agent::with_parts(config.build(), Tracking::default(), Checking::default())
+    ureq::Agent::with_parts(
+        config.build(),
+        Tracking::default(),
+        DefaultResolver::default(),
+    )
 }
-/// The agent for `caller`: the app's, or that plugin's own, so that no
-/// request reuses a connection whose addresses were asked for another.
-fn agent(caller: Option<&str>) -> ureq::Agent {
-    static APP: OnceLock<ureq::Agent> = OnceLock::new();
-    static PLUGINS: OnceLock<Mutex<HashMap<String, ureq::Agent>>> = OnceLock::new();
-    match caller {
-        None => APP.get_or_init(|| new_agent(false)).clone(),
-        Some(plugin) => {
-            let mut agents = PLUGINS.get_or_init(Mutex::default).lock().unwrap();
-            agents
-                .entry(plugin.to_owned())
-                .or_insert_with(|| new_agent(true))
-                .clone()
-        }
-    }
+/// The agent every request goes on.
+fn agent() -> ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(new_agent).clone()
 }
 
 /// Make `request` and read its answer into `heard`, waking its task as
 /// each part arrives, until it ends or the task stops listening.
-fn read(request: Request, guard: Guard, shared: Shared) {
+fn read(request: Request, shared: Shared) {
     ACTIVE.set(Some(shared.clone()));
-    GUARD.set(Some(guard.clone()));
     let heard: &Mutex<Heard> = &shared;
     let tell = |change: &mut dyn FnMut(&mut Heard)| -> bool {
         let waker = {
@@ -354,7 +281,7 @@ fn read(request: Request, guard: Guard, shared: Shared) {
         }
         true
     };
-    let response = match send(request, &guard, &shared) {
+    let response = match send(request, &shared) {
         Ok(response) => response,
         Err(error) => {
             tell(&mut |heard| heard.head = Some(Err(error.clone())));
@@ -403,40 +330,6 @@ fn read(request: Request, guard: Guard, shared: Shared) {
     }
 }
 
-/// The headers a plugin never sets, whatever the policy says: they would
-/// change what the connection or a proxy does with the request.
-fn forbidden_to_plugins(name: &str) -> bool {
-    const NAMES: [&str; 5] = ["host", "connection", "transfer-encoding", "te", "upgrade"];
-    NAMES
-        .iter()
-        .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
-        || name
-            .get(..6)
-            .is_some_and(|start| start.eq_ignore_ascii_case("proxy-"))
-}
-
-/// Asks the policy of one hop: its URL, and the headers going to its host.
-fn check_hop(uri: &Uri, headers: &[(String, String)], guard: &Guard) -> Result<(), String> {
-    let host = bare_host(
-        uri.host()
-            .ok_or_else(|| format!("{uri}: the URL has no host"))?,
-    );
-    let Some(policy) = &guard.policy else {
-        return Ok(());
-    };
-    let caller = guard.caller.as_deref();
-    let url = Url::new(
-        uri.to_string(),
-        uri.scheme_str().unwrap_or_default(),
-        host,
-        uri.port_u16(),
-    );
-    policy.url(caller, &url)?;
-    headers
-        .iter()
-        .try_for_each(|(name, _)| policy.header(caller, host, name))
-}
-
 /// `location` read against `base`, as a browser would (RFC 3986's reference
 /// resolution, as ureq's own redirects do).
 fn join_location(base: &Uri, location: &str) -> Result<Uri, String> {
@@ -475,26 +368,13 @@ fn join_location(base: &Uri, location: &str) -> Result<Uri, String> {
         .map_err(|_| bad())
 }
 
-/// `request` sent, redirects followed here so the policy hears each hop, the
-/// last answer's head read; how much of its body has gone out told to
+/// `request` sent, redirects followed here, the last answer's head read; how much of its body has gone out told to
 /// `shared` as it goes. A redirect goes as ureq's own would: at most ten,
 /// without `Authorization`, `Cookie` or `Content-Length`; a 307 or 308 of a
 /// request with a body, or of a `DELETE`, is not followed, and any other turns
 /// what isn't a `GET` or `HEAD` into a `GET`.
-fn send(
-    request: Request,
-    guard: &Guard,
-    shared: &Shared,
-) -> Result<ureq::http::Response<ureq::Body>, String> {
-    if guard.caller.is_some()
-        && let Some((name, _)) = request
-            .headers
-            .iter()
-            .find(|(name, _)| forbidden_to_plugins(name))
-    {
-        return Err(format!("a plugin can't set the {name} header"));
-    }
-    let agent = agent(guard.caller.as_deref());
+fn send(request: Request, shared: &Shared) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let agent = agent();
     let mut uri: Uri = request
         .url
         .parse()
@@ -507,7 +387,6 @@ fn send(
         if shared.lock().unwrap().cancelled {
             return Err("cancelled".into());
         }
-        check_hop(&uri, &headers, guard)?;
         let response = send_once(&agent, &method, &uri, &headers, body.take(), shared)?;
         let status = response.status().as_u16();
         let location = response.headers().get("location");

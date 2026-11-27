@@ -3,7 +3,7 @@
 	"width": 480,
 	"height": 360,
 	"app_id": "zgx-plugin-media",
-	"plugins": {
-		"chime": { "path": "plugins/chime", "allow": ["audio", "scene3d"] }
+	"scripts": {
+		"chime": "plugins/chime"
 	}
 }

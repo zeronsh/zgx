@@ -1,8 +1,10 @@
 //! zterm's plugins, after MoonLoader's: a folder per plugin in the plugins
 //! directory, found when zterm starts (and when the panel palette opens),
-//! each running on its own (a sandboxed Luau VM; one that fails is left out).
-//! Unlike MoonLoader's scripts, a plugin says up front what it needs, in its
-//! manifest, and runs only once the user allows it:
+//! each running on its own (a Luau VM of its own; one that fails is left
+//! out). Unlike MoonLoader's scripts, a plugin says up front what it needs,
+//! in its manifest, and runs only once the user allows it. Running, it
+//! reaches all that zterm's own scripts do: the list is for the user to
+//! decide by, not a fence:
 //!
 //! ```text
 //! plugins/notes/plugin.json   {
@@ -26,7 +28,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-use zgx_script::{Capability, Plugin, Request, Response, Value};
+use zgx_script::{Request, Response, Script, Value};
 
 /// What a plugin may ask for: its name in a manifest, what the user is
 /// told, and what it lets the plugin do.
@@ -40,16 +42,6 @@ pub const PERMISSIONS: &[(&str, &str)] = &[
     ),
     ("web", "Show web pages"),
 ];
-fn capabilities(permission: &str) -> Vec<Capability> {
-    match permission {
-        "network" => vec![Capability::Fetch],
-        "clipboard" => vec![Capability::Clipboard],
-        "files" => vec![Capability::Files],
-        "terminals" => vec![Capability::Terminals],
-        "web" => vec![Capability::Web],
-        _ => vec![],
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Panel {
@@ -286,23 +278,12 @@ pub fn scan(dir: &Path, decisions: &HashMap<String, Decision>) -> Vec<Found> {
     found
 }
 
-/// The plugins that run, for `ScriptHost::set_plugins`.
-pub fn enabled(found: &[Found]) -> Vec<Plugin> {
+/// The plugins that run, for `ScriptHost::set_scripts`.
+pub fn enabled(found: &[Found]) -> Vec<Script> {
     found
         .iter()
-        .filter(|plugin| plugin.status == Status::Enabled)
-        .filter_map(|plugin| {
-            let manifest = plugin.manifest.as_ref()?;
-            Some(Plugin {
-                name: plugin.id.clone(),
-                entry: plugin.dir.join("init.luau"),
-                grants: manifest
-                    .permissions
-                    .iter()
-                    .flat_map(|p| capabilities(p))
-                    .collect(),
-            })
-        })
+        .filter(|plugin| plugin.status == Status::Enabled && plugin.manifest.is_some())
+        .map(|plugin| Script::file(plugin.id.clone(), plugin.dir.join("init.luau")))
         .collect()
 }
 

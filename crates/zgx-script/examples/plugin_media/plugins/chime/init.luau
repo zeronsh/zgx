@@ -1,5 +1,4 @@
--- A plugin with sound and 3D. Its sound is its own file, played into its
--- own bus (`plugin:chime`); without the grants each call is an error.
+-- A plugin with sound and 3D. Its sound is its own file.
 local chime = audio.sound("chime.wav")
 local spins = ui.state("spins", 0)
 

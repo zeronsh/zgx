@@ -85,8 +85,8 @@ fn main() {
         let code = SCRIPT.replace("local N = ...", &format!("local N = {n}"));
         let runtime = Runtime::new();
         let host = ScriptHost::inline(&runtime, "bench", code).limits(Limits {
-            load: Duration::from_secs(10),
-            call: Duration::from_secs(600),
+            load: Some(Duration::from_secs(10)),
+            call: Some(Duration::from_secs(600)),
             ..Limits::default()
         });
         host.reload().expect("the bench script loads");
@@ -98,8 +98,8 @@ fn main() {
     let runtime = Runtime::new();
     let code = SCRIPT.replace("local N = ...", &format!("local N = {N}"));
     let host = ScriptHost::inline(&runtime, "bench", code).limits(Limits {
-        load: Duration::from_secs(10),
-        call: Duration::from_secs(60),
+        load: Some(Duration::from_secs(10)),
+        call: Some(Duration::from_secs(60)),
         ..Limits::default()
     });
     host.reload().expect("the bench script loads");

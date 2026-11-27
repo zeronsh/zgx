@@ -1,15 +1,13 @@
-//! Plugins hooking into the app's own interface (`ui.contribute { target,
-//! before | after | replace }`): any element by its id, a declared hook or
-//! its role and name, matched as the interface is built. Adding before or
-//! after an element is open; replacing one takes `Capability::Override`; an
-//! element marked `hook = false` or `private = true` is out of reach. What a
-//! plugin adds is told apart as the plugin's.
+//! Scripts hooking into the root script's interface (`ui.contribute {
+//! target, before | after | replace }`): any element by its id, a declared
+//! hook or its role and name, matched as the interface is built. Any script
+//! adds before or after, or replaces, any element.
 mod common;
 use common::Harness;
 use std::path::PathBuf;
-use zgx_script::{Capability, Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
-fn plugin(name: &str, code: &str) -> PathBuf {
+fn script_file(name: &str, code: &str) -> PathBuf {
     // A directory of each call's own: tests run in parallel in one process,
     // and two writing one name's file would load each other's code.
     static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -20,16 +18,12 @@ fn plugin(name: &str, code: &str) -> PathBuf {
     std::fs::write(&entry, code).unwrap();
     entry
 }
-fn with(app: &'static str, name: &str, code: &str, grants: Vec<Capability>) -> Harness {
-    let entry = plugin(name, code);
+fn with(app: &'static str, name: &str, code: &str) -> Harness {
+    let entry = script_file(name, code);
     let name = name.to_string();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", app);
-        host.set_plugins(vec![Plugin {
-            name,
-            entry,
-            grants,
-        }]);
+        host.set_scripts(vec![Script::file(name, entry)]);
         host
     })
 }
@@ -41,8 +35,8 @@ return ui.column {
         id = "toolbar",
         ui.button { id = "open", w = 60, h = 24, "Open" },
         ui.button { id = "save", hook = "toolbar.save", w = 60, h = 24, "Save" },
-        ui.button { id = "delete", hook = false, w = 60, h = 24, "Delete" },
-        ui.button { id = "secret", private = true, w = 60, h = 24, "Secret" },
+        ui.button { id = "delete", w = 60, h = 24, "Delete" },
+        ui.button { id = "secret", w = 60, h = 24, "Secret" },
     },
     ui.show(shown, ui.column { ui.text { id = "later", "Later" } }),
     ui.button { id = "toggle", w = 60, h = 24, on_click = ui.toggle(shown), "Toggle" },
@@ -50,7 +44,7 @@ return ui.column {
 "##;
 
 #[test]
-fn a_plugin_adds_before_and_after_an_element_by_id() {
+fn a_script_adds_before_and_after_an_element_by_id() {
     let mut h = with(
         APP,
         "extra",
@@ -58,7 +52,6 @@ fn a_plugin_adds_before_and_after_an_element_by_id() {
 ui.contribute { target = "#save", before = ui.text { id = "before", "Before" } }
 ui.contribute { target = "#save", after = ui.text { id = "after", "After" } }
 "##,
-        vec![],
     );
     assert_eq!(h.error(), None);
     let texts = h.texts();
@@ -80,7 +73,6 @@ fn a_selector_names_a_target_by_role() {
         r##"local target = ui.selector('role:button "Open"')
 assert(target == 'role:button "Open"', "the text itself")
 ui.contribute { target = target, after = ui.text { "After open" } }"##,
-        vec![],
     );
     assert_eq!(h.error(), None);
     let texts = h.texts();
@@ -99,7 +91,6 @@ fn a_script_naming_no_selector_makes_none() {
         "plain",
         r##"assert(rawget(ui, "selector") == nil, "made only for a script that names it")
 ui.contribute { target = "#open", after = ui.text { "After open" } }"##,
-        vec![],
     );
     assert_eq!(h.error(), None);
 }
@@ -113,7 +104,6 @@ fn a_declared_hook_and_a_role_and_name_find_the_element() {
 ui.contribute { target = "hook:toolbar.save", after = ui.text { "By hook" } }
 ui.contribute { target = 'role:button "Open"', after = ui.text { "By name" } }
 "##,
-        vec![],
     );
     assert_eq!(h.error(), None);
     let texts = h.texts();
@@ -123,74 +113,47 @@ ui.contribute { target = 'role:button "Open"', after = ui.text { "By name" } }
 }
 
 #[test]
-fn a_private_element_is_out_of_reach() {
+fn every_element_is_in_reach() {
     let mut h = with(
         APP,
-        "nosy",
+        "anywhere",
         r##"
 ui.contribute { target = "#delete", after = ui.text { "Next to delete" } }
 ui.contribute { target = '"Secret"', before = ui.text { "Next to secret" } }
 "##,
-        vec![],
     );
+    assert_eq!(h.error(), None);
     let texts = h.texts();
-    assert!(!texts.iter().any(|t| t.starts_with("Next to")), "{texts:?}");
+    let at = |t: &str| texts.iter().position(|x| x == t).unwrap();
+    assert_eq!(at("Next to delete"), at("Delete") + 1, "{texts:?}");
+    assert_eq!(at("Next to secret") + 1, at("Secret"), "{texts:?}");
 }
 
 #[test]
-fn replacing_an_element_takes_the_override_capability() {
-    const REPLACE: &str = r##"ui.contribute { target = "#save", replace = ui.button { id = "mine", w = 60, h = 24, "Mine" } }"##;
-    let mut denied = with(APP, "swap", REPLACE, vec![]);
-    let error = denied.error().unwrap_or_default();
-    assert!(error.contains("Override"), "{error}");
-    assert!(denied.find("save").is_some(), "the app's own stays");
-    assert!(denied.find("mine").is_none());
-
-    let mut granted = with(
+fn any_script_replaces_an_element() {
+    let mut h = with(
         APP,
         "swap",
-        REPLACE,
-        vec![Capability::Override("#save".into())],
+        r##"ui.contribute { target = "#save", replace = ui.button { id = "mine", w = 60, h = 24, "Mine" } }"##,
     );
-    assert_eq!(granted.error(), None);
-    assert!(granted.find("save").is_none());
-    assert!(granted.find("mine").is_some());
-
-    let mut any = with(APP, "swap", REPLACE, vec![Capability::Override("*".into())]);
-    assert!(any.find("mine").is_some());
+    assert_eq!(h.error(), None);
+    assert!(h.find("save").is_none());
+    assert!(h.find("mine").is_some());
 }
 
+/// What a script adds is as the root script's own would be: zgx describes
+/// it as nobody's.
 #[test]
-fn what_a_plugin_adds_is_told_apart_as_its_own() {
+fn what_a_script_adds_carries_no_description_of_zgxs() {
     let mut h = with(
         APP,
         "lookalike",
         r##"ui.contribute { target = "#save", after = ui.button { id = "confirm", w = 60, h = 24, "Confirm" } }"##,
-        vec![],
     );
     let node = h.find("confirm").expect("contributed");
     let semantics = h.ui.semantics.borrow();
     let described = semantics.get(node).and_then(|s| s.description.clone());
-    assert_eq!(described.as_deref(), Some("From the plugin lookalike"));
-}
-
-#[test]
-fn the_host_can_ask_a_capability_to_add_at_a_target() {
-    const ADD: &str = r##"ui.contribute { target = "#open", after = ui.text { "Added" } }"##;
-    let entry = plugin("guarded", ADD);
-    let mut h = Harness::new(move |runtime| {
-        let host = ScriptHost::inline(runtime, "app", APP);
-        host.expose_hook("#open", Some(Capability::Named("toolbar".into())));
-        host.set_plugins(vec![Plugin {
-            name: "guarded".into(),
-            entry,
-            grants: vec![],
-        }]);
-        host
-    });
-    let error = h.error().unwrap_or_default();
-    assert!(error.contains("toolbar"), "{error}");
-    assert!(!h.texts().contains(&"Added".to_string()));
+    assert_eq!(described, None);
 }
 
 #[test]
@@ -199,7 +162,6 @@ fn a_contribution_goes_and_comes_back_with_its_element() {
         APP,
         "follower",
         r##"ui.contribute { target = "#later", after = ui.text { id = "tag", "Tag" } }"##,
-        vec![],
     );
     assert!(h.find("tag").is_some());
     h.click("toggle");
@@ -215,7 +177,6 @@ fn a_target_known_only_once_shown_is_refused() {
         APP,
         "late",
         r##"ui.contribute { target = "#toolbar row 2", after = ui.text { "x" } }"##,
-        vec![],
     );
     let error = h.error().unwrap_or_default();
     assert!(
@@ -224,29 +185,28 @@ fn a_target_known_only_once_shown_is_refused() {
     );
 }
 
+/// `private` and `hook = false` are gone: either is an error saying so.
 #[test]
-fn what_a_private_element_holds_is_sealed_however_it_builds() {
-    const SEALED: &str = r##"
-return ui.column {
-    ui.column {
-        private = true,
-        ui.scroll { h = 80, ui.button { id = "inner", w = 60, h = 24, "Inner" } },
-        ui.input { id = "password", value = ui.state("password", "") },
-    },
-}
-"##;
-    let mut h = with(
-        SEALED,
-        "prying",
-        r##"
-ui.contribute { target = "#inner", after = ui.text { "Next to inner" } }
-ui.contribute { target = "#password", after = ui.text { "Next to password" } }
-"##,
-        vec![],
-    );
-    assert!(h.find("inner").is_some() && h.find("password").is_some());
-    let texts = h.texts();
-    assert!(!texts.iter().any(|t| t.starts_with("Next to")), "{texts:?}");
+fn private_and_hook_false_are_errors_saying_they_are_gone() {
+    let runtime = zgx::reactive::Runtime::new();
+    for (prop, says) in [
+        (
+            "private = true",
+            "`private` is gone, with no replacement: every script reaches every element; \
+             leave it out",
+        ),
+        (
+            "hook = false",
+            "`hook = false` is gone, with no replacement: every script reaches every \
+             element; leave it out",
+        ),
+    ] {
+        let code = format!(r#"return ui.column {{ {prop}, ui.text {{ "Hi" }} }}"#);
+        let error = ScriptHost::inline(&runtime, "app", code)
+            .reload()
+            .unwrap_err();
+        assert!(error.contains(says), "{prop}: {error}");
+    }
 }
 
 #[test]
@@ -266,7 +226,6 @@ return ui.column {
 ui.contribute { target = "#none", replace = ui.text { id = "mine", "Mine instead" } }
 ui.filter { target = "#mode-a", text = function(t) return t .. "!" end }
 "##,
-        vec![Capability::Override("*".into())],
     );
     assert_eq!(h.error(), None);
     assert!(h.find("none").is_none() && h.find("mine").is_some());
@@ -275,57 +234,4 @@ ui.filter { target = "#mode-a", text = function(t) return t .. "!" end }
         "{:?}",
         h.texts()
     );
-}
-
-/// A host can lock contributions down: with
-/// `require_contribution_capability`, adding into a slot or beside an
-/// element takes that capability, unless the host opens the one it names
-/// (`expose_hook(target, None)`).
-#[test]
-fn the_host_can_ask_a_capability_of_every_contribution() {
-    const SLOTTED: &str = r##"
-return ui.column {
-    ui.slot("sidebar"),
-    ui.button { id = "open", w = 60, h = 24, "Open" },
-    ui.button { id = "help", w = 60, h = 24, "Help" },
-}
-"##;
-    const ADDS: &str = r##"
-ui.contribute("sidebar", ui.text { "In the sidebar" })
-ui.contribute { target = "#open", after = ui.text { "By open" } }
-"##;
-    const OPEN_ONLY: &str =
-        r##"ui.contribute { target = "#help", after = ui.text { "By help" } }"##;
-    let locked = |code: &'static str, grants: Vec<Capability>| {
-        let entry = plugin(&format!("locked-{}", grants.len()), code);
-        Harness::new(move |runtime| {
-            let host = ScriptHost::inline(runtime, "app", SLOTTED);
-            host.require_contribution_capability(Capability::Named("contribute".into()));
-            host.expose_hook("#help", None);
-            host.set_plugins(vec![Plugin {
-                name: "locked".into(),
-                entry,
-                grants,
-            }]);
-            host
-        })
-    };
-    // Without the grant: the slot refuses it, saying what it needs.
-    let mut h = locked(ADDS, vec![]);
-    let error = h.error().unwrap_or_default();
-    assert!(
-        error.contains("sidebar") && error.contains("contribute"),
-        "{error}"
-    );
-    assert!(!h.texts().contains(&"In the sidebar".to_string()));
-    // Granted: both land.
-    let mut h = locked(ADDS, vec![Capability::Named("contribute".into())]);
-    assert_eq!(h.error(), None);
-    let texts = h.texts();
-    assert!(texts.contains(&"In the sidebar".to_string()), "{texts:?}");
-    assert!(texts.contains(&"By open".to_string()), "{texts:?}");
-    // A target the host opened takes none.
-    let mut h = locked(OPEN_ONLY, vec![]);
-    assert_eq!(h.error(), None);
-    assert!(h.texts().contains(&"By help".to_string()));
 }

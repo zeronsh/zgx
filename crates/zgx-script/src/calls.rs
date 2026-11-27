@@ -75,9 +75,8 @@ struct BodyInner {
     /// whether the transport has told it.
     progress: RefCell<Option<Progress>>,
     told: Cell<bool>,
-    /// The plugin that asked (`caller`), and the app's policy then.
-    caller: std::cell::OnceCell<Rc<str>>,
-    policy: std::cell::OnceCell<std::sync::Arc<dyn crate::fetch_policy::FetchPolicy>>,
+    /// The script that asked (`script`).
+    script: std::cell::OnceCell<Rc<str>>,
 }
 impl Body {
     fn new(sink: Option<Sink>) -> Self {
@@ -87,47 +86,31 @@ impl Body {
             open: Cell::new(true),
             progress: RefCell::default(),
             told: Cell::new(false),
-            caller: std::cell::OnceCell::new(),
-            policy: std::cell::OnceCell::new(),
+            script: std::cell::OnceCell::new(),
         }))
     }
-    /// The request is `lua`'s script's, under `policy`.
-    pub(crate) fn asked_by(&self, lua: &mlua::Lua, policy: &crate::fetch_policy::SharedPolicy) {
-        if let Some(caller) = crate::fetch_policy::caller_of(lua) {
-            let _ = self.0.caller.set(caller);
-        }
-        if let Some(policy) = policy.borrow().clone() {
-            let _ = self.0.policy.set(policy);
+    /// The request is `lua`'s script's.
+    pub(crate) fn asked_by(&self, lua: &mlua::Lua) {
+        if let Some(script) = crate::script_of(lua) {
+            let _ = self.0.script.set(script);
         }
     }
-    /// The plugin that made this request (its name), `None` for the app's
-    /// own scripts: what a transport tells `FetchPolicy` it is asking for.
-    pub fn caller(&self) -> Option<&str> {
-        self.0.caller.get().map(|caller| &**caller)
-    }
-    /// The app's policy as this request was made
-    /// (`ScriptHost::fetch_policy`), for a transport to ask.
-    pub fn fetch_policy(&self) -> Option<std::sync::Arc<dyn crate::fetch_policy::FetchPolicy>> {
-        self.0.policy.get().cloned()
+    /// The script that made this request (its name), for a host's transport
+    /// to answer each script in its own way. `None` for one no script made.
+    #[doc(hidden)]
+    pub fn script(&self) -> Option<&str> {
+        self.0.script.get().map(|script| &**script)
     }
     /// A body kept whole, for the response's `body`.
     pub(crate) fn kept() -> Self {
         Self::new(None)
     }
-    /// The request is `caller`'s (a plugin's name; `None` for the app's),
-    /// under `policy`: for one made with no script running (a sound's file,
-    /// fetched in the browser).
+    /// The request is `script`'s: for one made with no script running (a
+    /// sound's file, fetched in the browser).
     #[cfg(all(feature = "audio", target_arch = "wasm32"))]
-    pub(crate) fn asked_as(
-        &self,
-        caller: Option<Rc<str>>,
-        policy: &crate::fetch_policy::SharedPolicy,
-    ) {
-        if let Some(caller) = caller {
-            let _ = self.0.caller.set(caller);
-        }
-        if let Some(policy) = policy.borrow().clone() {
-            let _ = self.0.policy.set(policy);
+    pub(crate) fn asked_as(&self, script: Option<Rc<str>>) {
+        if let Some(script) = script {
+            let _ = self.0.script.set(script);
         }
     }
     /// Write the next piece of the body. Nothing hears it once the request
@@ -607,7 +590,7 @@ enum Part {
 }
 
 /// `file`, `multipart` and `on_progress` of `ui.fetch`'s options.
-fn uploading(opts: &Table, files: bool) -> mlua::Result<(Option<Upload>, Option<Function>)> {
+fn uploading(opts: &Table) -> mlua::Result<(Option<Upload>, Option<Function>)> {
     let path_of = |value: mlua::Value, what: &str| -> mlua::Result<std::path::PathBuf> {
         match value {
             mlua::Value::Table(file) => Ok(file.get::<String>("path")?.into()),
@@ -644,12 +627,6 @@ fn uploading(opts: &Table, files: bool) -> mlua::Result<(Option<Upload>, Option<
             ));
         }
     };
-    if upload.is_some() && !files {
-        return Err(mlua::Error::runtime(
-            "ui.fetch: a plugin sends files only if the host grants it \
-             (`ScriptHost::grant(plugin, Capability::Files)`)",
-        ));
-    }
     Ok((upload, opts.get("on_progress")?))
 }
 
@@ -1090,16 +1067,12 @@ impl Events {
     }
 }
 
-/// Installs `ui.call`, `ui.task` and `ui.fetch` (`fetcher`, unless the
-/// script may not reach the network: a plugin the host did not grant it).
+/// Installs `ui.call`, `ui.task` and `ui.fetch` (through `fetcher`).
 pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
     actions: AsyncActions,
-    fetcher: Option<SharedFetcher>,
-    policy: crate::fetch_policy::SharedPolicy,
-    // Whether it may read files for a body (`file`, `multipart`).
-    files: bool,
+    fetcher: SharedFetcher,
 ) -> mlua::Result<()> {
     let (await_fn, try_fn): (Function, Function) =
         crate::lazy::builtin(lua, "=await", AWAIT_SOURCE)?.call(ui.clone())?;
@@ -1115,23 +1088,16 @@ pub(crate) fn install(
     ui.set(
         "call",
         lua.create_function(move |lua, (name, arg): (String, Option<Value>)| {
-            {
-                let env = env(lua)?;
-                env.permits(&env.exposed_actions, &name, "ui.call")?;
-            }
             let arg = arg.unwrap_or(Value::Nil);
             let promise = pending(lua, name.clone())?;
             let action = actions.borrow().get(&name).cloned();
             let plain = env(lua)?.actions.borrow().get(&name).cloned();
-            let kind = match action.is_some() {
-                true => crate::GuardKind::AsyncAction,
-                false => crate::GuardKind::Action,
-            };
-            crate::rules::guard(lua, kind, &name)?;
+            let who = crate::script_of(lua);
             if let Some(action) = action {
-                settle_with(lua, &promise, Kind::Action, action(arg))?;
+                let started = crate::calling(who, || action(arg));
+                settle_with(lua, &promise, Kind::Action, started)?;
             } else if let Some(action) = plain {
-                action(arg);
+                crate::calling(who, || action(arg));
                 if let Some(error) = crate::modules::failure() {
                     return Err(error);
                 }
@@ -1147,21 +1113,6 @@ pub(crate) fn install(
     ui.set(
         "fetch",
         lua.create_function(move |lua, (url, opts): (String, Option<Table>)| {
-            // Refused, its promise rejects, as a request the network refused:
-            // what handles those says so, and a top level isn't failed.
-            if let Err(error) = crate::rules::guard(lua, crate::GuardKind::Fetch, &url) {
-                let promise = pending(lua, format!("fetch {url}"))?;
-                settle_with(lua, &promise, Kind::Network, async move {
-                    Err(error.to_string())
-                })?;
-                return Ok(PromiseUd(promise));
-            }
-            let Some(fetcher) = &fetcher else {
-                return Err(mlua::Error::runtime(
-                    "ui.fetch: a plugin reaches the network only if the host grants it \
-                     (`ScriptHost::grant(plugin, Capability::Fetch)`)",
-                ));
-            };
             let Some(fetch) = fetcher.borrow().clone() else {
                 return Err(mlua::Error::runtime(
                     "ui.fetch: the host has no fetcher (`ScriptHost::fetcher`)",
@@ -1181,7 +1132,7 @@ pub(crate) fn install(
             // `file` or `multipart`: a body read from files, off the
             // window's thread; `on_progress(sent, total)` as it goes out.
             let (upload, on_progress) = match &opts {
-                Some(opts) => uploading(opts, files)?,
+                Some(opts) => uploading(opts)?,
                 None => (None, None),
             };
             let request = request(lua, url.clone(), opts)?;
@@ -1194,7 +1145,7 @@ pub(crate) fn install(
                 }
                 None => Body::kept(),
             };
-            body.asked_by(lua, &policy);
+            body.asked_by(lua);
             let future = match (upload, on_progress) {
                 (None, None) => fetch(request, body.clone()),
                 (upload, on_progress) => {

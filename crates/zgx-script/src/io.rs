@@ -3,7 +3,7 @@
 //! file dialogs (`ui.open_files`, `ui.save_file`) and the files the user
 //! picked in them (`ui.read_file`, `ui.write_file`). A script reaches only
 //! files the user chose, as a web page does; reads and writes run off the
-//! main thread. A plugin gets none of it unless its host grants it.
+//! main thread.
 use crate::Str;
 use crate::{
     calls::{PromiseUd, pending, settle_failing, settle_with},
@@ -102,12 +102,6 @@ pub(crate) fn clipboard_types(content: &Table) -> mlua::Result<Vec<(String, Stri
         .get("types")
         .map_err(|_| mlua::Error::runtime("types is { [mime] = text }, each a string"))?;
     Ok(types.unwrap_or_default().into_iter().collect())
-}
-pub(crate) fn denied(what: &str, capability: &str) -> mlua::Error {
-    mlua::Error::runtime(format!(
-        "{what}: a plugin does this only if the host grants it \
-         (`ScriptHost::grant(plugin, Capability::{capability})`)"
-    ))
 }
 
 /// Call each clicked notification's `on_click` (`clicks`, by tag), the
@@ -348,13 +342,11 @@ fn load_font(lua: &Lua, src: mlua::Value, shared: SharedPlatform) -> mlua::Resul
 }
 
 /// `on_paste`'s `files`: those on the clipboard, which a script may then
-/// read as it does what the person picks. None for a plugin without both
-/// grants, or where no platform reads them.
+/// read as it does what the person picks. None where no platform reads
+/// them.
 pub(crate) fn pasted_files(lua: &Lua) -> mlua::Result<mlua::Value> {
     let env = crate::node::env(lua)?;
-    let allowed = env.grants.allows(&crate::Capability::Files)
-        && env.grants.allows(&crate::Capability::Clipboard);
-    let platform = env.platform.borrow().clone().filter(|_| allowed);
+    let platform = env.platform.borrow().clone();
     let paths = platform.map_or_else(Vec::new, |platform| platform.0.clipboard_files());
     env.picked.borrow_mut().extend(paths.iter().cloned());
     Value::List(paths.iter().map(|path| file_value(path)).collect()).into_lua(lua)
@@ -364,27 +356,18 @@ pub(crate) fn pasted_files(lua: &Lua) -> mlua::Result<mlua::Value> {
 const WRITE_LIMIT: usize = 256 << 20;
 
 /// Installs `ui.clipboard` (text and images), `ui.open_files`, `ui.save_file`, `ui.read_file`,
-/// `ui.write_file` and `ui.load_font`. `clipboard`, `files` and `fonts` are
-/// false for a plugin the host did not grant them.
+/// `ui.write_file` and `ui.load_font`.
 pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
     shared: SharedPlatform,
     picked: Picked,
-    clipboard: bool,
-    files: bool,
-    fonts: bool,
 ) -> mlua::Result<()> {
     {
         let shared = shared.clone();
         ui.set(
             "load_font",
-            lua.create_function(move |lua, src: mlua::Value| {
-                if !fonts {
-                    return Err(denied("ui.load_font", "Fonts"));
-                }
-                load_font(lua, src, shared.clone())
-            })?,
+            lua.create_function(move |lua, src: mlua::Value| load_font(lua, src, shared.clone()))?,
         )?;
     }
     let board = lua.create_table()?;
@@ -392,11 +375,7 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "read",
-            lua.create_function(move |lua, ()| {
-                if !clipboard {
-                    return Err(denied("ui.clipboard.read", "Clipboard"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
+            lua.create_function(move |_, ()| {
                 Ok(platform(&shared, "ui.clipboard.read")?.0.clipboard_text())
             })?,
         )?;
@@ -410,10 +389,6 @@ pub(crate) fn install(
             // clipboard; with `image` (PNG bytes) too, a promise, as a
             // platform pasting images decoded decodes it off the main thread.
             lua.create_function(move |lua, content: mlua::Value| {
-                if !clipboard {
-                    return Err(denied("ui.clipboard.write", "Clipboard"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Clipboard, "write")?;
                 let platform = platform(&shared, "ui.clipboard.write")?;
                 let content = match content {
                     mlua::Value::Table(table) => {
@@ -459,11 +434,7 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "read_html",
-            lua.create_function(move |lua, ()| {
-                if !clipboard {
-                    return Err(denied("ui.clipboard.read_html", "Clipboard"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
+            lua.create_function(move |_, ()| {
                 Ok(platform(&shared, "ui.clipboard.read_html")?
                     .0
                     .clipboard_html())
@@ -474,11 +445,7 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "read_type",
-            lua.create_function(move |lua, mime: String| {
-                if !clipboard {
-                    return Err(denied("ui.clipboard.read_type", "Clipboard"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
+            lua.create_function(move |_, mime: String| {
                 Ok(platform(&shared, "ui.clipboard.read_type")?
                     .0
                     .clipboard_typed(&mime))
@@ -489,11 +456,7 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "write_html",
-            lua.create_function(move |lua, (text, html): (String, String)| {
-                if !clipboard {
-                    return Err(denied("ui.clipboard.write_html", "Clipboard"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Clipboard, "write")?;
+            lua.create_function(move |_, (text, html): (String, String)| {
                 Ok(platform(&shared, "ui.clipboard.write_html")?
                     .0
                     .set_clipboard_rich_text(text, html))
@@ -506,10 +469,6 @@ pub(crate) fn install(
             "read_image",
             // A promise: a large image is decoded off the main thread.
             lua.create_function(move |lua, ()| {
-                if !clipboard {
-                    return Err(denied("ui.clipboard.read_image", "Clipboard"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read_image")?;
                 let promise = pending(lua, "clipboard.read_image".into())?;
                 let shared = shared.clone();
                 settle_with(lua, &promise, crate::errors::Kind::Io, async move {
@@ -531,10 +490,6 @@ pub(crate) fn install(
             // A promise too: encoding a large image takes frames.
             lua.create_function(
                 move |lua, image: mlua::UserDataRef<crate::node::BitmapUd>| {
-                    if !clipboard {
-                        return Err(denied("ui.clipboard.write_image", "Clipboard"));
-                    }
-                    crate::rules::guard(lua, crate::GuardKind::Clipboard, "write_image")?;
                     let (image, shared) = (image.0.clone(), shared.clone());
                     let promise = pending(lua, "clipboard.write_image".into())?;
                     settle_with(lua, &promise, crate::errors::Kind::Io, async move {
@@ -553,10 +508,6 @@ pub(crate) fn install(
         ui.set(
             "open_files",
             lua.create_function(move |lua, opts: Option<Table>| {
-                if !files {
-                    return Err(denied("ui.open_files", "Files"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Dialog, "open_files")?;
                 let picker = picker(opts, "Open")?;
                 let promise = pending(lua, "open_files".into())?;
                 let (shared, picked) = (shared.clone(), picked.clone());
@@ -572,10 +523,9 @@ pub(crate) fn install(
             })?,
         )?;
     }
-    // `ui.notify { title, body, tag }`: a system notification, the app's
-    // (a plugin posts none); a promise settled once the system has it, or
-    // with why not (`kind` "unsupported", "denied", or "io").
-    let app = !crate::node::env(lua).is_ok_and(|env| matches!(*env.grants, crate::Grants::Only(_)));
+    // `ui.notify { title, body, tag }`: a system notification; a promise
+    // settled once the system has it, or with why not (`kind`
+    // "unsupported", "denied", or "io").
     {
         let shared = shared.clone();
         // Each notification's `on_click`, by its tag; and whether this
@@ -587,15 +537,9 @@ pub(crate) fn install(
         ui.set(
             "notify",
             lua.create_function(move |lua, opts: Table| {
-                if !app {
-                    return Err(mlua::Error::runtime(
-                        "ui.notify: the app's own, not a plugin's",
-                    ));
-                }
                 let title: String = opts
                     .get::<Option<String>>("title")?
                     .ok_or_else(|| mlua::Error::runtime("ui.notify needs a `title`"))?;
-                crate::rules::guard(lua, crate::GuardKind::Notification, &title)?;
                 let body = opts.get::<Option<String>>("body")?.unwrap_or_default();
                 // Its tag, the script's or one of its own: what a click is
                 // told by.
@@ -645,13 +589,7 @@ pub(crate) fn install(
         let shared = shared.clone();
         ui.set(
             "badge",
-            lua.create_function(move |lua, badge: mlua::Value| {
-                if !app {
-                    return Err(mlua::Error::runtime(
-                        "ui.badge: the app's own, not a plugin's",
-                    ));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Notification, "badge")?;
+            lua.create_function(move |_, badge: mlua::Value| {
                 let badge = match badge {
                     mlua::Value::Nil => None,
                     mlua::Value::Integer(0) => None,
@@ -673,10 +611,6 @@ pub(crate) fn install(
         ui.set(
             "save_file",
             lua.create_function(move |lua, opts: Option<Table>| {
-                if !files {
-                    return Err(denied("ui.save_file", "Files"));
-                }
-                crate::rules::guard(lua, crate::GuardKind::Dialog, "save_file")?;
                 let picker = picker(opts, "Save")?;
                 let promise = pending(lua, "save_file".into())?;
                 let (shared, picked) = (shared.clone(), picked.clone());
@@ -699,11 +633,7 @@ pub(crate) fn install(
         ui.set(
             "read_file",
             lua.create_function(move |lua, (file, opts): (mlua::Value, Option<Table>)| {
-                if !files {
-                    return Err(denied("ui.read_file", "Files"));
-                }
                 let path = chosen(&picked, &file, "ui.read_file")?;
-                crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
                 // Text (a byte that isn't UTF-8 becomes U+FFFD), or with
                 // `base64` every byte, whole (a picture to keep).
                 let encoded = match &opts {
@@ -728,11 +658,7 @@ pub(crate) fn install(
         ui.set(
             "zip",
             lua.create_function(move |lua, file: mlua::Value| {
-                if !files {
-                    return Err(denied("ui.zip", "Files"));
-                }
                 let path = chosen(&picked, &file, "ui.zip")?;
-                crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
                 let zip = crate::zip::open(path)
                     .map_err(|e| mlua::Error::runtime(format!("ui.zip: {e}")))?;
                 lua.create_userdata(zip)
@@ -743,9 +669,6 @@ pub(crate) fn install(
         "write_file",
         lua.create_function(
             move |lua, (file, data, opts): (mlua::Value, mlua::Value, Option<mlua::Table>)| {
-                if !files {
-                    return Err(denied("ui.write_file", "Files"));
-                }
                 // `append = true`: onto the end of the file instead of over it,
                 // to write a big file in parts (await each part: they're
                 // written in the order they finish).
@@ -754,7 +677,6 @@ pub(crate) fn install(
                     None => false,
                 };
                 let path = chosen(&picked, &file, "ui.write_file")?;
-                crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
                 // A string's bytes as they are (any byte, not only UTF-8), or
                 // bytes in base64 (a PNG a canvas rendered, a server's file).
                 let (bytes, encoded) = match &data {
@@ -885,9 +807,6 @@ impl mlua::UserData for DownloadUd {
             "save_to",
             |lua, d, (file, opts): (mlua::Value, Option<Table>)| {
                 let env = crate::node::env(lua)?;
-                if !env.grants.allows(&crate::Capability::Files) {
-                    return Err(denied("d:save_to", "Files"));
-                }
                 let path = chosen(&env.picked, &file, "d:save_to")?;
                 let status = download_status(lua, opts)?;
                 d.take("d:save_to")?.save_to(path, status);
@@ -897,11 +816,7 @@ impl mlua::UserData for DownloadUd {
         // The save dialog, suggesting the download's name: a promise of
         // the file saved to (`{ path, … }`), or nil if the person cancelled.
         methods.add_method("ask", |lua, d, opts: Option<Table>| {
-            crate::rules::guard(lua, crate::GuardKind::Dialog, "ask")?;
             let env = crate::node::env(lua)?;
-            if !env.grants.allows(&crate::Capability::Files) {
-                return Err(denied("d:ask", "Files"));
-            }
             let responder = d.take("d:ask")?;
             let status = download_status(lua, opts)?;
             let picker = zgx::platform::FilePicker {
@@ -929,9 +844,6 @@ impl mlua::UserData for DownloadUd {
         // file is the script's to read and pass on, as a picked one is.
         methods.add_method("save_temp", |lua, d, opts: Option<Table>| {
             let env = crate::node::env(lua)?;
-            if !env.grants.allows(&crate::Capability::Files) {
-                return Err(denied("d:save_temp", "Files"));
-            }
             let Some(dir) = env.downloads.dir.borrow().clone() else {
                 return Err(mlua::Error::runtime(
                     "d:save_temp: the host names no folder for downloads \
@@ -947,16 +859,13 @@ impl mlua::UserData for DownloadUd {
                 mlua::Error::runtime(format!("d:save_temp: {}: {e}", dir.display()))
             })?;
             let path = env.downloads.reserve(&dir, &d.request.name);
-            let mut status =
-                match crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())
-                    .and_then(|()| download_status(lua, opts))
-                {
-                    Ok(status) => status,
-                    Err(e) => {
-                        env.downloads.release(&path);
-                        return Err(e);
-                    }
-                };
+            let mut status = match download_status(lua, opts) {
+                Ok(status) => status,
+                Err(e) => {
+                    env.downloads.release(&path);
+                    return Err(e);
+                }
+            };
             let (tell, mut heard) = zgx::task::latest::<bool>();
             let (picked, downloads, saved) =
                 (env.picked.clone(), env.downloads.clone(), path.clone());

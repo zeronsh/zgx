@@ -1,23 +1,19 @@
-//! What a host asks of a plugin it runs: where what it added shows
-//! (`ScriptHost::contribution_bounds`), and forgetting its state as it is
-//! uninstalled (`ScriptHost::forget_state`).
+//! What a host asks of a script it runs beside the root: where what it
+//! added shows (`ScriptHost::contribution_bounds`), and forgetting its state
+//! as it is removed (`ScriptHost::forget_state`).
 mod common;
 
 use common::Harness;
 use std::path::PathBuf;
-use zgx_script::{Capability, Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 fn temp(name: &str) -> PathBuf {
-    common::temp_dir(&format!("plugin-bf-{name}"))
+    common::temp_dir(&format!("script-bf-{name}"))
 }
-fn plugin(name: &str, code: &str, grants: Vec<Capability>) -> Plugin {
+fn script(name: &str, code: &str) -> Script {
     let entry = temp(name).join("init.luau");
     std::fs::write(&entry, code).unwrap();
-    Plugin {
-        name: name.into(),
-        entry,
-        grants,
-    }
+    Script::file(name, entry)
 }
 
 const APP: &str = r##"return ui.column {
@@ -42,13 +38,10 @@ fn sorted(mut rects: Vec<zgx::scene::Rect>) -> Vec<(f32, f32, f32, f32)> {
 }
 
 #[test]
-fn a_plugins_contributions_say_where_they_show() {
+fn a_scripts_contributions_say_where_they_show() {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![
-            plugin("adds", ADDS, vec![Capability::Override("*".into())]),
-            plugin("quiet", "", vec![]),
-        ]);
+        host.set_scripts(vec![script("adds", ADDS), script("quiet", "")]);
         host
     });
     assert_eq!(h.error(), None);
@@ -62,48 +55,24 @@ fn a_plugins_contributions_say_where_they_show() {
     assert_eq!(sorted(h.host.contribution_bounds("adds")), want);
     assert!(h.host.contribution_bounds("quiet").is_empty());
     assert!(h.host.contribution_bounds("nobody").is_empty());
-    // Gone with the plugin.
-    h.host.set_plugins(vec![]);
+    // Gone with the script.
+    h.host.set_scripts(vec![]);
     h.host.reload().unwrap();
     h.settle();
     assert!(h.host.contribution_bounds("adds").is_empty());
 }
 
 #[test]
-fn what_a_plugin_gives_its_page_says_where_it_shows_too() {
-    let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::inline(
-            runtime,
-            "app",
-            r##"return ui.sealed { id = "settings", w = 300, h = 200,
-                ui.plugin_page { plugin = "mine", w = 300, h = 100 },
-            }"##,
-        );
-        host.set_plugins(vec![plugin(
-            "mine",
-            r##"ui.contribute("plugin_page", ui.div { id = "my-page", w = 100, h = 30 })"##,
-            vec![],
-        )]);
-        host
-    });
-    assert_eq!(h.error(), None);
-    h.ui.prepare_frame();
-    let want = sorted(vec![h.bounds("my-page")]);
-    assert_eq!(sorted(h.host.contribution_bounds("mine")), want);
-}
-
-#[test]
 fn a_contribution_that_goes_takes_its_box_with_it() {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
-        host.set_plugins(vec![plugin(
+        host.set_scripts(vec![script(
             "shows",
             r##"
 local on = ui.state("on", true)
 ui.contribute("bar", ui.show(on, ui.div { id = "maybe", w = 30, h = 10 }))
 ui.contribute("bar", ui.button { id = "off", w = 20, h = 10, on_click = ui.set(on, false) })
 "##,
-            vec![],
         )]);
         host
     });
@@ -133,20 +102,20 @@ ui.contribute("bar", ui.column {
 })
 "##;
 
-fn remembering(dir: PathBuf, entries: [&Plugin; 2]) -> Harness {
-    let plugins: Vec<Plugin> = entries.into_iter().cloned().collect();
+fn remembering(dir: PathBuf, entries: [&Script; 2]) -> Harness {
+    let scripts: Vec<Script> = entries.into_iter().cloned().collect();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", APP).storage(dir);
-        host.set_plugins(plugins);
+        host.set_scripts(scripts);
         host
     })
 }
 
 #[test]
-fn forgetting_a_plugins_state_leaves_nothing_of_it_and_others_alone() {
+fn forgetting_a_scripts_state_by_its_name_leaves_nothing_of_it_and_others_alone() {
     let dir = temp("storage");
-    let gone = plugin("gone", &REMEMBERS.replace("NAME", "gone"), vec![]);
-    let stays = plugin("stays", &REMEMBERS.replace("NAME", "stays"), vec![]);
+    let gone = script("gone", &REMEMBERS.replace("NAME", "gone"));
+    let stays = script("stays", &REMEMBERS.replace("NAME", "stays"));
     let mut h = remembering(dir.clone(), [&gone, &stays]);
     assert_eq!(h.error(), None);
     h.click("gone-bump");
@@ -155,25 +124,25 @@ fn forgetting_a_plugins_state_leaves_nothing_of_it_and_others_alone() {
     assert_eq!(h.text("gone-kept"), "2");
     assert_eq!(h.text("gone-plain"), "2");
     h.host.save();
-    let folder = dir.join("plugin%3Agone");
+    let folder = dir.join("script%3Agone");
     assert!(folder.is_dir(), "{:?}", std::fs::read_dir(&dir));
     // A change not yet saved is forgotten too, and never written after.
     h.click("gone-bump");
     h.settle();
-    // Uninstalled: it goes, then its state.
-    h.host.set_plugins(vec![stays.clone()]);
+    // Removed: it goes, then its state, by its name.
+    h.host.set_scripts(vec![stays.clone()]);
     h.host.reload().unwrap();
     h.settle();
-    h.host.forget_state("plugin:gone");
+    h.host.forget_state("gone");
     assert!(!folder.exists());
-    assert!(dir.join("plugin%3Astays").is_dir());
+    assert!(dir.join("script%3Astays").is_dir());
     h.host.save();
     assert!(
         !folder.exists(),
         "a write queued before it can't bring it back"
     );
-    // Installed again: from its `initial`. The other kept its own.
-    h.host.set_plugins(vec![gone.clone(), stays.clone()]);
+    // Added again: from its `initial`. The other kept its own.
+    h.host.set_scripts(vec![gone.clone(), stays.clone()]);
     h.host.reload().unwrap();
     h.settle();
     assert_eq!(h.text("gone-kept"), "1");
@@ -193,6 +162,38 @@ fn forgetting_a_plugins_state_leaves_nothing_of_it_and_others_alone() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What a script saved as `plugin:<name>`, before scripts were kept by
+/// `script:<name>`, is its own: the folder is moved once, and never over a
+/// `script:<name>` folder already there.
+#[test]
+fn a_folder_saved_as_plugin_is_adopted_once() {
+    let dir = temp("adopt");
+    let gone = script("gone", &REMEMBERS.replace("NAME", "gone"));
+    let stays = script("stays", &REMEMBERS.replace("NAME", "stays"));
+    let mut h = remembering(dir.clone(), [&gone, &stays]);
+    h.click("gone-bump");
+    h.settle();
+    h.host.save();
+    drop(h);
+    let (old, new) = (dir.join("plugin%3Agone"), dir.join("script%3Agone"));
+    std::fs::rename(&new, &old).unwrap();
+    // Loaded again: the old folder is the script's.
+    let mut h = remembering(dir.clone(), [&gone, &stays]);
+    assert_eq!(h.text("gone-kept"), "2");
+    assert!(new.is_dir() && !old.exists());
+    h.click("gone-bump");
+    h.settle();
+    h.host.save();
+    drop(h);
+    // An old folder beside the new one stays where it is, unread.
+    std::fs::create_dir(&old).unwrap();
+    let mut h = remembering(dir.clone(), [&gone, &stays]);
+    assert_eq!(h.text("gone-kept"), "3");
+    assert!(old.is_dir() && new.is_dir());
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_name_never_reaches_outside_its_own_folder() {
     let dir = temp("names");
@@ -201,7 +202,7 @@ fn a_name_never_reaches_outside_its_own_folder() {
     let h = Harness::new(|runtime| {
         ScriptHost::inline(runtime, "app", "return ui.text { \"app\" }").storage(dir.clone())
     });
-    for name in ["", ".", "..", "../..", "/", "plugin:../.."] {
+    for name in ["", ".", "..", "../..", "/", "script:../..", "plugin:../.."] {
         h.host.forget_state(name);
     }
     assert!(bystander.exists());

@@ -306,13 +306,13 @@ each reload's path: partial (the app's VM kept, what changed and what requires i
 
 A reload loads everything again when:
 
-- plugins are loaded (they always load again in full);
+- scripts beside the root are loaded (they load again in full);
 - a file that changed isn't a module the last load ran (an image, a new file);
 - a module running again, the app's script included, sets a global or starts at its top level something nothing carries over yet (a task, an animation, an `on_open` handler, actions, a router);
 - a module kept declares at its top level something each load gathers anew (a command, a window, a contribution or filter, an override, an `on_mount`);
 - every module changed or requires one that did (a template swapped whole);
 - the last reload failed partway;
-- the host asked for it (`ScriptHost::reload`: plugins set, a template switched), listed with no files.
+- the host asked for it (`ScriptHost::reload`: scripts set, a template switched), listed with no files.
 
 A save whose bytes are what the last load read (an editor saving the same text, files a reload the host asked for already read) reloads nothing, and theme and locale files are read again in place without reloading the scripts. A global zgx makes as a script first reads it (`anime`) isn't the script's to set.
 

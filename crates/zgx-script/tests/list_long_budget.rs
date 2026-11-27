@@ -72,8 +72,8 @@ fn long_rows() -> Value {
 /// what these scripts do: a few reads, and 300 keys.
 fn tight() -> Limits {
     Limits {
-        call: Duration::from_millis(10),
-        load: Duration::from_secs(10),
+        call: Some(Duration::from_millis(10)),
+        load: Some(Duration::from_secs(10)),
         ..Default::default()
     }
 }

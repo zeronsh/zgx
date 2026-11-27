@@ -143,28 +143,41 @@ fn app_key(key: &str) -> Value {
         "version" => {
             json!({ "type": "string", "description": "The app's version, as zgx build gives its bundle." })
         }
-        "expose" => json!({
+        "scripts" => json!({
             "type": "object",
-            "description": "What plugins reach of the app.",
-            "properties": {
-                "shared": { "type": "object", "additionalProperties": { "enum": ["read", "write"] } },
-                "actions": { "type": "array", "items": { "type": "string" } },
-                "hooks": { "type": "object", "additionalProperties": { "enum": ["open", "override"] } }
-            },
-            "additionalProperties": false
+            "description": "Scripts the app loads beside its own, by name, each in a VM of its own: a folder (its init.luau) or a file, or { path, limits }.",
+            "additionalProperties": {
+                "oneOf": [
+                    { "type": "string" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "limits": {
+                                "type": "object",
+                                "properties": {
+                                    "memory_mb": { "type": "number", "minimum": 0 },
+                                    "load_ms": { "type": "number", "minimum": 0 },
+                                    "call_ms": { "type": "number", "minimum": 0 },
+                                    "voices": { "type": "number", "minimum": 0 },
+                                    "count_state": { "type": "boolean" }
+                                },
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                ]
+            }
         }),
         "plugins" => json!({
-            "type": "object",
-            "description": "The app's plugins, by name, each with what it is allowed.",
-            "additionalProperties": {
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "allow": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }
+            "deprecated": true,
+            "description": "Gone: `scripts` lists the scripts the app loads, and each reaches everything the app's does."
+        }),
+        "expose" => json!({
+            "deprecated": true,
+            "description": "Gone: every script reaches every shared state, action and element of the app's."
         }),
         other => panic!("zgx.json's key `{other}` has no schema"),
     }

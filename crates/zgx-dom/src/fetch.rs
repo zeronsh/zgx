@@ -2,14 +2,8 @@
 //! through the page's `fetch` (`js/zgx-fetch.js`), as zgx-run's is through
 //! its own HTTP stack on the desktop.
 //!
-//! The same rules as the desktop's apply, in the same places. A plugin
-//! reaches the fetcher only with `Capability::Fetch` (zgx-script refuses
-//! it otherwise, on every target). The app's `FetchPolicy` is asked of the
-//! URL and each header the script set before the request goes. With a
-//! policy, redirects are refused rather than followed, as a page can't
-//! show each hop to ask it. A browser resolves names itself, so
-//! `FetchPolicy::address` isn't asked here: the page's own origin rules
-//! (CORS, `connect-src`) stand in for it.
+//! Redirects are followed, as the page's `fetch` follows them; the page's
+//! own origin rules (CORS, `connect-src`) apply.
 //!
 //! A relative URL resolves against the base the app was installed with,
 //! the page's `document.baseURI` then unless the host gives one, never
@@ -21,7 +15,7 @@
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use zgx_script::{Body, Request, Response, ScriptHost, Url};
+use zgx_script::{Body, Request, Response, ScriptHost};
 
 #[wasm_bindgen(module = "/js/zgx-fetch.js")]
 extern "C" {
@@ -95,22 +89,13 @@ async fn fetch(request: Request, body: &Body, base: &str) -> Result<Response, St
             .and_then(JsValue::as_string)
             .unwrap_or_default()
     };
-    let (href, scheme, host) = (part(0), part(1), part(2));
-    let port = part(3).parse::<u16>().ok();
-    let policy = body.fetch_policy();
-    if let Some(policy) = &policy {
-        let caller = body.caller();
-        policy.url(caller, &Url::new(href.clone(), scheme, host.clone(), port))?;
-        for (name, _) in &request.headers {
-            policy.header(caller, &host, name)?;
-        }
-    }
+    let href = part(0);
     let headers = request
         .headers
         .iter()
         .flat_map(|(name, value)| [name.clone(), value.clone()])
         .collect();
-    let redirect = if policy.is_some() { "error" } else { "follow" };
+    let redirect = "follow";
     let started = zgx_fetch(
         &href,
         &request.method,

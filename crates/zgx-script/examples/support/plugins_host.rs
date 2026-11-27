@@ -1,10 +1,10 @@
 //! The plugins example's host: its tasks (kept in Rust, shown to scripts
-//! as the shared state `tasks`), the actions that change them, what it
-//! exposes to plugins, and each plugin with what it is granted. The
-//! example and its test (`tests/plugins_example.rs`) set the app up here.
+//! as the shared state `tasks`), the actions that change them, and its
+//! plugins, each a script of its own. The example and its test
+//! (`tests/plugins_example.rs`) set the app up here.
 use std::{cell::RefCell, path::Path, rc::Rc};
 use zgx::reactive::Runtime;
-use zgx_script::{Capability, Plugin, ScriptHost, Value};
+use zgx_script::{Script, ScriptHost, Value};
 
 /// How an action changes the tasks, given what the script passed.
 type Change = Box<dyn Fn(&mut Vec<Task>, Value)>;
@@ -90,30 +90,14 @@ pub fn host(runtime: &Runtime) -> ScriptHost {
         }),
     );
     action("clear_done", Box::new(|tasks, _| tasks.retain(|t| !t.done)));
-    // What plugins may see and do of the app's: its tasks, read only (a
-    // plugin's write is an error), whether focus is on (theirs to set), and
-    // completing a task. Adding and clearing stay the app's.
+    // Whether focus is on: the focus plugin's to set.
     host.shared("focus", false);
-    host.expose_shared_read("tasks", None);
-    host.expose_shared("focus", None);
-    host.expose_action("complete", None);
     let plugins = app.join("plugins");
-    host.set_plugins(vec![
-        // Adds a button (open to every plugin) and filters the list.
-        Plugin {
-            name: "focus".into(),
-            entry: plugins.join("focus/init.luau"),
-            grants: vec![Capability::Override("#tasks".into())],
-        },
-        // Replaces the empty state and, trusted with it, the row module.
-        Plugin {
-            name: "stamps".into(),
-            entry: plugins.join("stamps/init.luau"),
-            grants: vec![
-                Capability::Override("#empty".into()),
-                Capability::Override("@app/components/task_row".into()),
-            ],
-        },
+    host.set_scripts(vec![
+        // Adds a button and filters the list.
+        Script::file("focus", plugins.join("focus/init.luau")),
+        // Replaces the empty state and the row module.
+        Script::file("stamps", plugins.join("stamps/init.luau")),
     ]);
     host
 }

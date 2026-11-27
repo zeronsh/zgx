@@ -88,8 +88,8 @@ pub(crate) struct Watch {
     alive: Cell<bool>,
     /// Shared with the watchdog: the slot and the running call's due time.
     alarm: Arc<Alarm>,
-    /// The VM's memory limit in bytes (0: none): less, for a plugin, what
-    /// its states hold (`meter`).
+    /// The VM's memory limit in bytes (0: none): less, for a metered script,
+    /// what its states hold (`meter`).
     limit: Cell<usize>,
     /// What was live at the last collection.
     live: Cell<usize>,
@@ -663,7 +663,7 @@ fn sleep_for(wait: Duration) {
 
 thread_local! {
     /// Each VM's watch, by its main thread. Few VMs run on a thread (the
-    /// app's and its plugins'), so a list serves.
+    /// root script's and those beside it), so a list serves.
     static WATCHES: RefCell<Vec<(usize, Weak<Watch>)>> = const { RefCell::new(Vec::new()) };
 }
 

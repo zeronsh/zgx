@@ -166,7 +166,7 @@ ui.scene3d {
   - a file over about 10 s loaded with `audio.sound` (it's decoded whole: use `audio.music`);
   - a gain or pitch written from script in a loop (bind a state);
   - `ui.sound3d` with `loop` and no `falloff.max` (it never becomes virtual).
-- **Plugins:** a sandboxed plugin's sounds count against its memory; it plays only on a bus the host gives it, with a voice limit of its own.
+- **Scripts' limits:** a script's sounds count against its memory where its host limits that, and its voices against its own voice limit (`Limits`).
 
 ## 11. Budgets, tests and milestones
 

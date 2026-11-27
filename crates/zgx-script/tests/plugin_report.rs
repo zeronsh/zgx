@@ -1,9 +1,9 @@
-//! `ScriptHost::contributions`: each plugin contribution's target, place,
+//! `ScriptHost::contributions`: each script's contribution's target, place,
 //! the elements it applies at now and its latest error, for a host or an
 //! agent to tell a target that matches nothing from one that works.
 mod common;
 use common::Harness;
-use zgx_script::{Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 fn with(test: &str, app: &'static str, code: &str) -> Harness {
     let dir = common::temp_dir(&format!("report-{test}"));
@@ -12,11 +12,7 @@ fn with(test: &str, app: &'static str, code: &str) -> Harness {
     std::fs::write(&entry, code).unwrap();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", app);
-        host.set_plugins(vec![Plugin {
-            name: "marks".into(),
-            entry,
-            grants: vec![zgx_script::Capability::Override("*".into())],
-        }]);
+        host.set_scripts(vec![Script::file("marks", entry)]);
         host
     })
 }
@@ -26,7 +22,7 @@ fn report(h: &Harness) -> Vec<(String, &'static str, usize, bool)> {
         .contributions()
         .into_iter()
         .map(|r| {
-            assert_eq!(r.plugin, "marks");
+            assert_eq!(r.script, "marks");
             (r.target, r.place, r.matches, r.error.is_some())
         })
         .collect()
@@ -82,13 +78,13 @@ ui.contribute { target = "#row", after = ui.text { "e" } }
 }
 
 #[test]
-fn without_plugins_there_is_nothing_to_report() {
+fn without_other_scripts_there_is_nothing_to_report() {
     let h = Harness::inline(r#"return ui.text { "plain" }"#);
     assert!(h.host.contributions().is_empty());
 }
 
 #[test]
-fn a_plugin_shortcut_the_app_holds_is_reported_dropped() {
+fn a_scripts_shortcut_the_root_holds_is_reported_dropped() {
     let h = with(
         "keys",
         r##"
@@ -112,18 +108,18 @@ ui.command { id = "reopen", title = "Reopen", key = "cmd+o", run = function() en
     assert_eq!(
         keys,
         vec![
-            ("marks/copy".to_string(), None),
-            ("marks/open".to_string(), Some("cmd+o".to_string())),
-            ("marks/reopen".to_string(), None),
+            ("copy".to_string(), None),
+            ("open".to_string(), Some("cmd+o".to_string())),
+            ("reopen".to_string(), None),
             ("edit.copy".to_string(), Some("cmd+shift+c".to_string())),
         ],
-        "the app's key stays its own, spelled differently or not"
+        "the root's key stays its own, spelled differently or not"
     );
     let dropped: Vec<_> = h
         .host
         .dropped_shortcuts()
         .into_iter()
-        .map(|d| (d.plugin, d.command, d.key, d.reason, d.holder))
+        .map(|d| (d.script, d.command, d.key, d.reason, d.holder))
         .collect();
     let row = |a: &str, b: &str, c: &str, d: &str, e: &str| {
         (
@@ -139,17 +135,17 @@ ui.command { id = "reopen", title = "Reopen", key = "cmd+o", run = function() en
         vec![
             row(
                 "marks",
-                "marks/copy",
+                "copy",
                 "Shift+Cmd+C",
-                "taken by the app",
+                "taken by the root script",
                 "edit.copy"
             ),
             row(
                 "marks",
-                "marks/reopen",
+                "reopen",
                 "cmd+o",
-                "taken by the plugin `marks`",
-                "marks/open"
+                "taken by the script `marks`",
+                "open"
             ),
         ]
     );
@@ -158,16 +154,17 @@ ui.command { id = "reopen", title = "Reopen", key = "cmd+o", run = function() en
         .contributions()
         .into_iter()
         .filter(|r| r.place == "shortcut")
-        .map(|r| (r.plugin, r.target, r.matches, r.error))
+        .map(|r| (r.script, r.target, r.matches, r.error))
         .collect();
     assert_eq!(
         shortcuts[0],
         (
             "marks".to_string(),
-            "marks/copy".to_string(),
+            "copy".to_string(),
             0,
             Some(
-                "its shortcut `Shift+Cmd+C` was dropped: taken by the app (`edit.copy`)"
+                "its shortcut `Shift+Cmd+C` was dropped: taken by the root script \
+                 (`edit.copy`)"
                     .to_string()
             )
         )
@@ -176,7 +173,7 @@ ui.command { id = "reopen", title = "Reopen", key = "cmd+o", run = function() en
 }
 
 #[test]
-fn without_plugins_no_shortcut_is_dropped() {
+fn without_other_scripts_no_shortcut_is_dropped() {
     let h = Harness::inline(
         r##"
 ui.command { id = "a", key = "cmd+o", run = function() end }

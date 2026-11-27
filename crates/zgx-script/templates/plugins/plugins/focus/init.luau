@@ -1,7 +1,6 @@
 -- Focus: a button beside the app's Add (its declared hook), and while it
--- is on, a filter on the list hiding what is done. zgx.json allows it the
--- shared `tasks` (read only) and `focus`, the app's `complete` action, and
--- filtering `#tasks`; it reaches nothing else of the app's.
+-- is on, a filter on the list hiding what is done. It reads the shared
+-- `tasks`, sets `focus`, and calls the app's `complete` action.
 local focus = ui.shared("focus", false)
 local tasks = ui.shared("tasks", {} :: { { id: number, done: boolean } })
 

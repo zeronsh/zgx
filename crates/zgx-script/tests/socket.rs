@@ -329,12 +329,11 @@ fn a_task_sleeps() {
     assert!(began.elapsed() >= Duration::from_millis(20));
 }
 
+/// `Socket::script` names the script that opened a connection, the root
+/// script's included.
 #[test]
-fn a_connector_hears_who_asked_and_the_hosts_policy() {
-    struct Open;
-    impl zgx_script::FetchPolicy for Open {}
-
-    type Asked = (String, Option<String>, bool);
+fn a_connector_hears_which_script_asked() {
+    type Asked = (String, Option<String>);
     let asked = Rc::new(RefCell::new(Vec::<Asked>::new()));
     let log = asked.clone();
     let h = Harness::new(move |runtime| {
@@ -345,20 +344,15 @@ fn a_connector_hears_who_asked_and_the_hosts_policy() {
             local socket = ui.socket("wss://app.test/")
             return ui.column { ui.slot("bar") }
             "#,
-        )
-        .plugin(
+        );
+        host.set_scripts(vec![zgx_script::Script::code(
             "feed.luau",
-            r#"local socket = ui.socket("wss://plugin.test/")"#,
-        )
-        .grant("feed.luau", zgx_script::Capability::Fetch);
-        host.fetch_policy(Open);
+            r#"local socket = ui.socket("wss://beside.test/")"#,
+        )]);
         let log = log.clone();
         host.socket_connector(move |request, socket: Socket| {
-            log.borrow_mut().push((
-                request.url,
-                socket.caller().map(str::to_owned),
-                socket.fetch_policy().is_some(),
-            ));
+            log.borrow_mut()
+                .push((request.url, socket.script().map(str::to_owned)));
             async { Err("nothing here".to_string()) }
         });
         host
@@ -375,11 +369,10 @@ fn a_connector_hears_who_asked_and_the_hosts_policy() {
     assert_eq!(
         asked[..2],
         [
-            ("wss://app.test/".to_string(), None, true),
+            ("wss://app.test/".to_string(), Some("app".to_string())),
             (
-                "wss://plugin.test/".to_string(),
-                Some("feed.luau".to_string()),
-                true
+                "wss://beside.test/".to_string(),
+                Some("feed.luau".to_string())
             ),
         ]
     );

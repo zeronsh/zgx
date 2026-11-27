@@ -9,8 +9,8 @@
 //! run without calling the script.
 //!
 //! State is Rust-owned and keyed, so a hot reload keeps it. Each script gets
-//! its own sandboxed VM with a memory limit and a time budget per call, which
-//! makes plugins safe to load next to the application script.
+//! its own VM, within the memory limit and time budget per call its host
+//! sets, so one failing or stopped leaves the others running.
 //!
 //! ```lua
 //! local count = ui.state("count", 0)
@@ -55,7 +55,6 @@ pub mod driver;
 mod element;
 mod elements_report;
 mod estimate;
-mod fetch_policy;
 mod frames;
 mod journal;
 mod json;
@@ -161,7 +160,6 @@ mod reloads;
 mod reorder;
 mod router;
 mod routes;
-mod rules;
 pub mod scaffold;
 #[cfg(feature = "scene3d")]
 mod scene3d;
@@ -191,7 +189,6 @@ pub use bundle::{Bundle, BundleFile, MemoryFiles, build};
 pub use calls::{Body, Request, Response};
 pub use command::{Command, DroppedShortcut};
 pub use design::DesignLint;
-pub use fetch_policy::{FetchPolicy, Url};
 pub use persist::app_data_dir;
 pub use socket::{Message, Socket, SocketRequest};
 pub use windows::WindowState;
@@ -203,7 +200,6 @@ pub use zgx_audio;
 pub fn window_size_value(width: f32, height: f32) -> Value {
     windows::size(width, height)
 }
-pub use rules::GuardKind;
 pub use value::{
     ElementHandle, Field, Folded, List, Map, PathKey, Place, Shared, Slice, Store, Str, Unfold,
     Value, WeakSlice, tables_converted, values_converted, values_filed,
@@ -224,37 +220,50 @@ use zgx::{
     reactive::{Runtime, Signal},
 };
 
-/// Resource limits for each script.
-#[derive(Clone, Copy, Debug)]
+/// What a script may use, as its host sets it: none of them unless set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Limits {
-    /// Heap limit for each of the app's own script VMs: generous, since an
-    /// app holds its data there (100,000 table rows take some 60 MB); it
-    /// stops a runaway allocation before the process runs out.
-    pub memory: usize,
-    /// Heap limit for each plugin's VM, which the app needn't trust, with
-    /// what its state holds (values Rust keeps, outside the VM) counted in.
-    pub plugin_memory: usize,
-    /// Budget for evaluating a script on load.
-    pub load: Duration,
-    /// Budget for one handler or computed property call. Budgets count the
-    /// CPU time from a reading up to 1 ms old, so a script may be stopped up
-    /// to 1 ms short of one, never past it.
-    pub call: Duration,
+    /// Its VM's heap, in bytes: past it an allocation fails as a script
+    /// error. What its states hold (values Rust keeps, outside the VM) is
+    /// counted in only with `count_state`.
+    pub memory: Option<usize>,
+    /// How long evaluating the script as it loads may take.
+    pub load: Option<Duration>,
+    /// How long one handler or computed call may take. Budgets count the CPU
+    /// time from a reading up to 1 ms old, so a script may be stopped up to
+    /// 1 ms short of one, never past it.
+    pub call: Option<Duration>,
+    /// How many sounds it plays at once (`audio.play`, `audio.music`, a
+    /// control's sound), streams among them: past them a play is a voice
+    /// that never plays.
+    pub voices: Option<usize>,
+    /// Whether what the script's states hold in Rust counts against
+    /// `memory` too (the meter): each state write is then weighed, which
+    /// costs every write. Off unless set; nothing without `memory`.
+    pub count_state: bool,
 }
-impl Default for Limits {
-    /// In a debug build the time budgets are ten times longer: the same
-    /// script runs several times slower there (the dashboard's sort of
-    /// 100,000 rows, 128 ms of a 50 ms budget, with zgx-script's Rust
-    /// unoptimized, as `cargo run` builds it), and a budget is to stop a
-    /// runaway script, which half a second still does.
-    fn default() -> Self {
+impl Limits {
+    /// The time budgets `zgx run` and `zgx test` give an app's own script: 500
+    /// ms to load and 50 ms a call, ten times that in a debug build, where the
+    /// same script runs several times slower (a budget is to stop a runaway
+    /// script, which half a second still does). No memory limit.
+    #[doc(hidden)]
+    pub fn app_budgets() -> Self {
         let scale = if cfg!(debug_assertions) { 10 } else { 1 };
         Self {
-            memory: 1 << 30,
-            plugin_memory: 32 << 20,
-            load: Duration::from_millis(500 * scale),
-            call: Duration::from_millis(50 * scale),
+            load: Some(Duration::from_millis(500 * scale)),
+            call: Some(Duration::from_millis(50 * scale)),
+            ..Self::default()
         }
+    }
+    /// A budget that never runs out, for a script with none: a deadline is
+    /// kept all the same, so a call costs what it does with one.
+    pub(crate) const NO_BUDGET: Duration = Duration::from_secs(u32::MAX as u64);
+    pub(crate) fn load_budget(&self) -> Duration {
+        self.load.unwrap_or(Self::NO_BUDGET)
+    }
+    pub(crate) fn call_budget(&self) -> Duration {
+        self.call.unwrap_or(Self::NO_BUDGET)
     }
 }
 
@@ -286,8 +295,8 @@ fn read_aliases(dir: &std::path::Path, files: &Files) -> HashMap<String, PathBuf
         .unwrap_or_default()
 }
 /// Whether `path` is in `root`: by its name, and, where it exists, by what
-/// it is, so a symbolic link inside the root to a file outside it (a plugin
-/// shipping one to `~/.ssh`) is outside too.
+/// it is, so a symbolic link inside the root to a file outside it (one
+/// pointing at `~/.ssh`) is outside too.
 pub(crate) fn within(root: &std::path::Path, path: &std::path::Path) -> bool {
     path.starts_with(root)
         && path.canonicalize().map_or(true, |real| {
@@ -964,9 +973,8 @@ fn describe(name: &str, error: &mlua::Error) -> String {
     // Luau says only "not enough memory": say which limit and its knob.
     if text.contains("not enough memory") {
         message.push_str(
-            "\n(the script's VM reached its memory limit: `Limits::memory` for the app's \
-             scripts, 1 GiB by default, or `Limits::plugin_memory` for a plugin's, 32 MiB; \
-             a host raises them with `ScriptHost::limits`)",
+            "\n(the script's VM reached its memory limit, `Limits::memory`, which its host \
+             sets: `ScriptHost::limits` for the root script, `Script::limits` for the others)",
         );
     }
     message
@@ -1136,18 +1144,47 @@ pub(crate) fn duration_ms(what: &str, ms: f64) -> mlua::Result<Duration> {
     let seconds = (ms / 1000.).clamp(0., zgx::timer::MAX_SLEEP.as_secs_f64());
     Ok(Duration::from_secs_f64(seconds))
 }
+thread_local! {
+    /// The script calling into the host now (`ScriptHost::calling_script`).
+    static CALLING: RefCell<Option<Rc<str>>> = const { RefCell::new(None) };
+}
+/// Runs `f`, a host action, function or async action's start, as script
+/// `who`'s call: `ScriptHost::calling_script` says so while it runs.
+pub(crate) fn calling<R>(who: Option<Rc<str>>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Rc<str>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CALLING.set(self.0.take());
+        }
+    }
+    let _restore = Restore(CALLING.replace(who));
+    f()
+}
+/// The script whose VM `lua` is.
+pub(crate) fn script_of(lua: &Lua) -> Option<Rc<str>> {
+    lua.app_data_ref::<node::Env>().map(|env| env.owner.clone())
+}
+
 /// Errors unless the VM's memory limit leaves room for `bytes` more: what a
 /// builtin checks before it builds, in Rust, a string as long as the script
 /// asked (`anime.utils.padStart('x', 1e18)` would abort the process).
 pub(crate) fn room_for(lua: &Lua, what: &str, bytes: usize) -> mlua::Result<()> {
     let limit = lua.app_data_ref::<MemoryLimit>().map_or(0, |limit| limit.0);
-    if limit > 0 && bytes > limit.saturating_sub(lua.used_memory()) {
+    // With no limit, what a Luau string can hold at most: past it the
+    // string could never be made anyway.
+    let room = match limit {
+        0 => LUAU_STRING_MAX,
+        limit => limit.saturating_sub(lua.used_memory()),
+    };
+    if bytes > room {
         return Err(mlua::Error::runtime(format!(
             "{what}: {bytes} bytes is more than the script's memory leaves"
         )));
     }
     Ok(())
 }
+/// The longest string Luau makes (its `MAXSSIZE`).
+const LUAU_STRING_MAX: usize = 1 << 30;
 /// A VM's memory limit in bytes (0: none), for builtins (`room_for`).
 struct MemoryLimit(usize);
 
@@ -1359,117 +1396,76 @@ fn error_layer(banner: View, cx: &mut zgx::compose::Context) -> View {
         .child(banner)
 }
 
+/// A script a host loads, as it loads it.
 #[derive(Clone)]
-enum Script {
+enum Entry {
+    /// From a file, named by it: the root script, or one in the folder
+    /// `scripts_in` gives.
     File(PathBuf),
-    Inline {
-        name: String,
-        code: String,
-    },
-    /// A plugin the app manages (`set_plugins`): named by the app, read
-    /// from the disk.
-    Plugin {
-        name: String,
-        path: PathBuf,
-    },
-}
-/// What a plugin may do beyond its sandbox, if its host grants it
-/// (`ScriptHost::grant`). The application's own scripts may do all of it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Capability {
-    /// `ui.fetch`: the network, through the host's fetcher.
-    Fetch,
-    /// `ui.clipboard`: read and write the clipboard.
-    Clipboard,
-    /// `ui.open_files`, `ui.save_file` and reading and writing what the
-    /// user picks in them.
-    Files,
-    /// `ui.open_folder`: a folder the user picks, with everything inside
-    /// it to list, read and write.
-    Folders,
-    /// `ui.load_font`: a font file from its directory (or one the user
-    /// picked) added to every window's text, the app's too.
-    Fonts,
-    /// `ui.term`: terminal sessions, to read and to type into.
-    Terminals,
-    /// `ui.web` and `ui.webview`: web pages.
-    Web,
-    /// `ui.window`: windows of its own, which could pose as the app's or
-    /// the system's (asking for a password).
-    Windows,
-    /// `audio`: sounds played into a bus of the plugin's own (the `audio`
-    /// feature). It reaches no other bus and no device.
-    #[cfg(feature = "audio")]
-    Audio,
-    /// `ui.scene3d` and `ui.model`: 3D scenes, drawn on the GPU (the
-    /// `scene3d` feature).
-    #[cfg(feature = "scene3d")]
-    Scene3d,
-    /// What the app defines (`expose_action`, `expose_shared`): a host
-    /// action or shared state a plugin reaches only if granted it.
-    Named(String),
-    /// A package the app requires from (`ScriptHost::package`), lent to the
-    /// plugin by its name (`"ds"`): `require("@ds/…")` loads its modules in
-    /// the plugin's own VM, as source, its state the plugin's alone. A lent
-    /// module requires only inside its package or the plugin's other lent
-    /// ones (never `@app/…`), and lends no authority: what it calls is gated
-    /// by the plugin's grants, as the plugin's own code is.
-    Package(String),
-    /// The older spelling of [`OverrideElement`](Self::OverrideElement) and
-    /// [`OverrideModule`](Self::OverrideModule), read by what it names: a
-    /// target or `"*"` is `OverrideElement`, a module (`"@app/…"`) is
-    /// `OverrideModule` of that module. `"*"` no longer reaches modules.
-    Override(String),
-    /// Replacing or filtering an element of the app's (`ui.contribute {
-    /// target, replace }`, `ui.filter`): the target as the plugin writes it,
-    /// or `"*"` for any. Adding before or after an element is open, as a
-    /// slot is, unless the host asks a capability for that target
-    /// (`expose_hook`).
-    OverrideElement(String),
-    /// Replacing one of the app's modules (`ui.override`): `"@app/…"` as the
-    /// plugin writes it, or `"*"` for any.
-    ///
-    /// **A trust grant, not a permission over the interface:** a module
-    /// replacement runs in the app's VM as the app's own code, with all its
-    /// access. `OverrideModule("@app/…")` trusts the plugin with that module;
-    /// `OverrideModule("*")` trusts it with the app.
-    OverrideModule(String),
+    /// From source held in memory.
+    Inline { name: String, code: String },
+    /// From a file, named by the host (`set_scripts`).
+    Named { name: String, path: PathBuf },
 }
 
-/// A plugin an app loads (`ScriptHost::set_plugins`): its name (what errors
-/// and grants say), its entry script on the disk, and what it may do.
+/// A script a host loads beside its root script (`ScriptHost::set_scripts`),
+/// in a VM of its own: reloaded with the others, and its errors its own. It
+/// adds to the interface where it likes (`ui.contribute`, `ui.filter`,
+/// `ui.override`) and reaches everything the root script does.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct Plugin {
-    /// What errors and grants call it.
+pub struct Script {
+    /// What its errors, its saved state and the reports call it.
     pub name: String,
-    /// Its entry script.
-    pub entry: PathBuf,
-    /// What it may do beyond its sandbox.
-    pub grants: Vec<Capability>,
+    /// Where its code is.
+    pub source: Source,
+    /// What it may use (none of them limited unless set).
+    pub limits: Limits,
 }
-
-/// What a script may do beyond its sandbox: everything (the application's
-/// own scripts) or what its host granted it (a plugin).
-#[derive(Clone, Debug)]
-pub(crate) enum Grants {
-    All,
-    Only(Vec<Capability>),
+/// Where a script's code is.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Source {
+    /// A file, which hot reloading watches.
+    File(PathBuf),
+    /// Source held in memory.
+    Code(String),
 }
-impl Grants {
-    pub(crate) fn allows(&self, capability: &Capability) -> bool {
-        match self {
-            Grants::All => true,
-            Grants::Only(granted) => granted.contains(capability),
+impl Script {
+    /// A script from a file, with no limits.
+    pub fn file(name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            source: Source::File(path.into()),
+            limits: Limits::default(),
         }
     }
+    /// A script from source, with no limits.
+    pub fn code(name: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            source: Source::Code(code.into()),
+            limits: Limits::default(),
+        }
+    }
+    /// The same, within `limits`.
+    pub fn limits(self, limits: Limits) -> Self {
+        Self { limits, ..self }
+    }
+    fn entry(self) -> (Entry, Limits) {
+        let entry = match self.source {
+            Source::File(path) => Entry::Named {
+                name: self.name,
+                path,
+            },
+            Source::Code(code) => Entry::Inline {
+                name: self.name,
+                code,
+            },
+        };
+        (entry, self.limits)
+    }
 }
-/// The host actions and shared keys plugins reach (`expose_*`), and what
-/// capability each needs, if any. A plugin reaches nothing else of the
-/// app's; the app's own scripts reach all of it.
-pub(crate) type Exposed = Rc<RefCell<HashMap<String, Option<Capability>>>>;
-/// Shared keys plugins read but may not write (`expose_shared_read`).
-pub(crate) type ReadOnly = Rc<RefCell<std::collections::HashSet<String>>>;
 
 /// What a host offers its scripts, by name (`ScriptHost::registry`), each
 /// list sorted.
@@ -1572,9 +1568,9 @@ impl Files {
     /// A chunk read from here, loading as the files allow: an app's bundle
     /// holds the bytecode its build compiled from its own scripts; what
     /// comes from the disk is source, always. Luau checks no bytecode it
-    /// loads, so a file of crafted bytecode (a plugin's, or a module one
-    /// requires) would corrupt the VM and step out of the sandbox: read as
-    /// source, it just fails to parse.
+    /// loads, so a file of crafted bytecode (a script's, or a module one
+    /// requires) would corrupt the VM: read as source, it just fails to
+    /// parse.
     fn chunk<'a>(&self, chunk: mlua::chunk::Chunk<'a>) -> mlua::chunk::Chunk<'a> {
         match self {
             Files::Bundle(_, Code::VerifiedBytecode)
@@ -1651,80 +1647,73 @@ impl Files {
         }
     }
 }
-impl Script {
+impl Entry {
     /// Shown in errors and tracebacks.
     fn name(&self) -> String {
         match self {
-            Script::File(path) => path
+            Entry::File(path) => path
                 .file_name()
                 .unwrap_or(path.as_os_str())
                 .to_string_lossy()
                 .into_owned(),
-            Script::Inline { name, .. } | Script::Plugin { name, .. } => name.clone(),
+            Entry::Inline { name, .. } | Entry::Named { name, .. } => name.clone(),
         }
     }
     /// The directory a file script is in.
     fn dir(&self) -> Option<PathBuf> {
         match self {
-            Script::File(path) | Script::Plugin { path, .. } => path.parent().map(PathBuf::from),
-            Script::Inline { .. } => None,
+            Entry::File(path) | Entry::Named { path, .. } => path.parent().map(PathBuf::from),
+            Entry::Inline { .. } => None,
         }
     }
     /// Keys the script's state across reloads.
     fn key(&self) -> String {
         match self {
-            Script::File(path) => path.display().to_string(),
-            Script::Inline { name, .. } => format!("inline:{name}"),
-            Script::Plugin { name, .. } => format!("plugin:{name}"),
+            Entry::File(path) => path.display().to_string(),
+            Entry::Inline { name, .. } => format!("inline:{name}"),
+            Entry::Named { name, .. } => format!("script:{name}"),
         }
     }
     /// Its source, or (from a bundle) its bytecode.
     fn code(&self, files: &Files) -> Result<Vec<u8>, String> {
         match self {
-            Script::File(path) | Script::Plugin { path, .. } => files
+            Entry::File(path) | Entry::Named { path, .. } => files
                 .read(path)
                 .map_err(|e| format!("{}: {e}", path.display())),
-            Script::Inline { code, .. } => Ok(code.clone().into_bytes()),
+            Entry::Inline { code, .. } => Ok(code.clone().into_bytes()),
         }
     }
 }
 
-/// What `require` resolves with: a VM's root, aliases and packages, its
-/// modules so far, and (for a plugin) its name and every package's.
+/// What `require` resolves with: a VM's root, the root script's directory
+/// (`@app/…`), aliases and packages, its modules so far, and whether the host
+/// records its requires (the root script's alone).
 struct Require {
     host: std::rc::Weak<Inner>,
     modules: Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>>,
     root: Option<PathBuf>,
+    app: Option<PathBuf>,
     aliases: HashMap<String, PathBuf>,
     packages: Vec<(String, PathBuf)>,
     files: Files,
-    plugin_name: Option<String>,
-    all_packages: Vec<String>,
+    recorded: bool,
 }
 
-/// `require(name)` from a VM: a plugin's when `LENDING` (packages lent to
-/// it, `Capability::Package`, and nothing else), else the app's, which
-/// compiles none of lending's checks.
-fn require_module<const LENDING: bool>(
-    state: &Require,
-    lua: &Lua,
-    name: String,
-) -> mlua::Result<mlua::Value> {
+/// `require(name)` from a VM.
+fn require_module(state: &Require, lua: &Lua, name: String) -> mlua::Result<mlua::Value> {
     // (As `within` has it, each folder followed once a load.)
     use real_paths::within;
     let Require {
         host,
         modules,
         root,
+        app,
         aliases,
         packages,
         files,
-        plugin_name,
-        all_packages,
+        recorded,
     } = state;
     let files = files.clone();
-    let plugin = LENDING;
-    let plugin_name: &Option<String> = if LENDING { plugin_name } else { &None };
     let Some(root) = &root else {
         return Err(mlua::Error::runtime(
             "require needs a script loaded from a file",
@@ -1741,43 +1730,26 @@ fn require_module<const LENDING: bool>(
         .and_then(std::path::Path::parent)
         .unwrap_or(root)
         .to_path_buf();
-    // `@app/…`: the app's module, or the module a plugin replaced it
-    // with (`ui.override`); `@app-original/…`: the app's own, for
-    // that replacement alone. Plugins reach neither.
+    // `@app/…`: the root script's module, or the module a script replaced
+    // it with (`ui.override`); `@app-original/…`: the root script's own.
+    let app_dir = app.as_ref().unwrap_or(root);
     let mut overridden = None;
     let joined = if let Some(rest) = name
         .strip_prefix("@app/")
         .or_else(|| name.strip_prefix("@app-original/"))
     {
-        if plugin {
-            return Err(fail(
-                "`@app/…` names the app's modules, which a plugin replaces with \
-                 ui.override, not requires (no grant lends them, to a lent package's \
-                 modules either)"
-                    .into(),
-            ));
-        }
         let module = node::module_name(rest);
         let replacement = host
             .upgrade()
             .and_then(|host| host.overrides.borrow().get(&module).cloned());
         if name.starts_with("@app-original/") {
-            // Only the module that replaced this one reaches it.
-            let from_replacement = replacement
-                .as_ref()
-                .is_some_and(|r| caller.as_deref() == Some(r.with.as_path()));
-            if !from_replacement {
-                return Err(fail(
-                    "`@app-original/…` is for the module that overrides it alone".into(),
-                ));
-            }
-            root.join(rest)
+            app_dir.join(rest)
         } else if let Some(replacement) = replacement {
             let with = replacement.with.clone();
             overridden = Some(replacement);
             with
         } else {
-            root.join(rest)
+            app_dir.join(rest)
         }
     } else if let Some(rest) = name.strip_prefix("@self") {
         here.join(rest.trim_start_matches('/'))
@@ -1791,15 +1763,10 @@ fn require_module<const LENDING: bool>(
                     .find(|(name, _)| name == alias)
                     .map(|(_, dir)| dir)
             })
-            .ok_or_else(|| match &plugin_name {
-                Some(plugin) if all_packages.iter().any(|p| p == alias) => fail(format!(
-                    "package `@{alias}` isn't lent to plugin `{plugin}`: the host \
-                     lends it with Capability::Package(\"{alias}\") (zgx.json: \
-                     \"package:{alias}\")"
-                )),
-                _ => fail(format!(
+            .ok_or_else(|| {
+                fail(format!(
                     "no alias `@{alias}` in .luaurc, nor a package of that name"
-                )),
+                ))
             })?;
         base.join(rest)
     } else if name.starts_with("./") || name.starts_with("../") {
@@ -1825,49 +1792,37 @@ fn require_module<const LENDING: bool>(
     } else if path.extension().is_none() {
         path.set_extension("luau");
     }
-    // A lent package's module requires inside it, or the plugin's
-    // other lent packages: never into the plugin's own files nor
-    // anywhere else.
-    if let Some(plugin) = &plugin_name
-        && let Some((lent, _)) = packages
-            .iter()
-            .find(|(_, dir)| caller.as_deref().is_some_and(|c| within(dir, c)))
-        && !packages.iter().any(|(_, dir)| within(dir, &path))
-    {
-        return Err(fail(format!(
-            "a module of package `@{lent}` requires only inside it or the other \
-             packages lent to plugin `{plugin}` (Capability::Package)"
-        )));
-    }
-    // A replacement and what it requires come from its plugin's
-    // directory; the app's from its own.
+    // A replacement and what it requires come from its script's
+    // directory; the others' from their own, or the root script's.
     let replacements: Vec<node::ModuleOverride> = host
         .upgrade()
         .map(|host| host.overrides.borrow().values().cloned().collect())
         .unwrap_or_default();
-    let in_plugin = replacements
+    let replacing = replacements
         .iter()
         .find(|r| overridden.as_ref() == Some(*r) || within(&r.dir, &path));
+    let in_app = app.as_ref().is_some_and(|app| within(app, &path));
     if !within(root, &path)
-        && in_plugin.is_none()
+        && !in_app
+        && replacing.is_none()
         && !packages.iter().any(|(_, dir)| within(dir, &path))
     {
         return Err(fail(
-            "modules come from the script's directory or below, or a package \
-             (ScriptHost::package, zgx.json's \"packages\")"
+            "modules come from the script's directory or below, the root script's, or \
+             a package (ScriptHost::package, zgx.json's \"packages\")"
                 .into(),
         ));
     }
-    // A plugin's files are on the disk, whatever the app's are.
-    let files = if in_plugin.is_some() && !within(root, &path) {
+    // A replacement's files are on the disk, whatever the root script's are.
+    let files = if replacing.is_some() && !within(root, &path) {
         Files::Disk
     } else {
         files
     };
     // A module of the app's own checked bundle (a package it lends, its
     // design system, say) is the bundle's bytecode whichever VM requires
-    // it: a plugin's reads it as the app's does, and can't change it. (A
-    // VM reading the bundle already, the app's, asks nothing more: `within`
+    // it, and can't change it. (A
+    // VM reading the bundle already, the root script's, asks nothing more: `within`
     // costs each require a walk of its path.)
     let files = match files {
         Files::Folder(..) => files,
@@ -1879,7 +1834,7 @@ fn require_module<const LENDING: bool>(
         },
     };
     // While the host watches its files: who requires what (`reloads`).
-    let tracker = if LENDING || !reloads::recording() {
+    let tracker = if !recorded || !reloads::recording() {
         None
     } else {
         host.upgrade().and_then(|host| tracking(&host))
@@ -1897,18 +1852,6 @@ fn require_module<const LENDING: bool>(
         .map_err(|e| fail(format!("{}: {e}", path.display())))?;
     if let Some(host) = host.upgrade() {
         host.required.borrow_mut().push(path.clone());
-        // One more module of a package lent to this plugin.
-        if let Some(plugin) = &plugin_name
-            && let Some((package, _)) = packages.iter().find(|(_, dir)| within(dir, &path))
-            && let Some(entry) = host
-                .lent
-                .borrow_mut()
-                .pending
-                .iter_mut()
-                .find(|(p, k, _)| p == plugin && k == package)
-        {
-            entry.2 += 1;
-        }
     }
     modules.borrow_mut().insert(path.clone(), None);
     // Named by its path in the root: errors show it, and its own
@@ -1918,21 +1861,14 @@ fn require_module<const LENDING: bool>(
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
-    // A lent package's module: compiled once for all the plugins
-    // requiring it, hot-reloading or not (its source is the same in each
-    // VM). The app's resolver compiles none of this in (`LENDING`).
     // Otherwise compiled once while its bytes stay the same (a
     // hot-reloading host's): a reload compiles only the files that changed.
-    let lent = LENDING
-        && matches!(files, Files::Disk)
-        && packages.iter().any(|(_, dir)| within(dir, &path));
-    // A package's module, the app's: compiled once for every host until
+    // A package's module: compiled once for every host and VM until
     // the next idle trim. A hot-reloading host keeps its own by path (its
     // `sources`), as for its other files: a trim between edits would
     // otherwise compile them again at each reload.
-    let in_package = !LENDING
-        && matches!(files, Files::Disk)
-        && packages.iter().any(|(_, dir)| path.starts_with(dir));
+    let in_package =
+        matches!(files, Files::Disk) && packages.iter().any(|(_, dir)| path.starts_with(dir));
     let package = in_package
         .then(|| host.upgrade())
         .flatten()
@@ -1949,14 +1885,6 @@ fn require_module<const LENDING: bool>(
         });
     let compiled = match files {
         _ if package.is_some() => None,
-        Files::Disk if lent => host.upgrade().map(|h| {
-            let (compiled, now) = sources::compiled(&code);
-            h.lent_compiles.set(h.lent_compiles.get() + u64::from(now));
-            h.lent_compiled
-                .borrow_mut()
-                .insert(path.clone(), compiled.clone());
-            compiled
-        }),
         Files::Disk => host
             .upgrade()
             .and_then(|h| h.sources.compiled(&path, &code))
@@ -2107,7 +2035,7 @@ struct Loaded {
     /// The scripts' `ui.on_mount`s outside components, run as the app's
     /// interface mounts.
     mounted: Vec<(Rc<Vm>, mlua::Function)>,
-    /// Plugins left out because they failed, and why.
+    /// Scripts beside the root left out because they failed, and why.
     broken: Vec<String>,
     root: Rc<node::Node>,
     lowering: Rc<lower::Lowering>,
@@ -2133,33 +2061,23 @@ pub struct ReloadReport {
     pub taken: bool,
 }
 
-/// A plugin's contribution at the app's elements, as
+/// A script's contribution at the root script's elements, as
 /// `ScriptHost::contributions` reports it.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct ContributionReport {
-    /// The plugin that made it.
-    pub plugin: String,
+    /// The script that made it.
+    pub script: String,
     /// Its target, as a selector reads it: `#save`, `hook:toolbar.save`.
     pub target: String,
     /// What it does there: "before", "after", "replace" or "filter"; or
-    /// "shortcut", a plugin command's shortcut dropped
-    /// (`ScriptHost::dropped_shortcuts`), its target the command's id; or
-    /// "package", a package lent to it (`Capability::Package`), its target
-    /// `@name` and `matches` the modules it required from it.
+    /// "shortcut", a command's shortcut dropped
+    /// (`ScriptHost::dropped_shortcuts`), its target the command's id.
     pub place: &'static str,
     /// The elements it applies at, mounted now.
     pub matches: usize,
     /// Its latest error, if any.
     pub error: Option<String>,
-}
-
-/// The packages lent to plugins (`Capability::Package`): (plugin, package,
-/// modules it required from it), in the order the plugins ran.
-#[derive(Default)]
-struct Lent {
-    pending: Vec<(String, String, usize)>,
-    published: Vec<(String, String, usize)>,
 }
 
 /// The framework's issues a host heard (`ScriptHost::issues`), and who
@@ -2186,7 +2104,7 @@ struct Inner {
     /// The app's script, and where its files come from: what `retarget`
     /// moves to another app's. Shared, so reading it copies no inline
     /// script's code.
-    app: RefCell<Rc<Script>>,
+    app: RefCell<Rc<Entry>>,
     files: RefCell<Files>,
     /// `async_action`s, which `ui.call` runs.
     async_actions: calls::AsyncActions,
@@ -2194,24 +2112,9 @@ struct Inner {
     fetcher: calls::SharedFetcher,
     /// The transport `ui.socket` connects through (`socket_connector`).
     connector: socket::SharedConnector,
-    /// What the app allows of scripts' requests (`fetch_policy`).
-    fetch_policy: fetch_policy::SharedPolicy,
-    /// What each plugin may do beyond its sandbox (`grant`), by name.
-    grants: RefCell<HashMap<String, Vec<Capability>>>,
-    /// Each plugin's heap where the app set its own (`plugin_memory`), by
-    /// name; the rest have `Limits::plugin_memory`.
-    plugin_memory: RefCell<HashMap<String, usize>>,
-    /// What every plugin may do (`grant_all_plugins`), those loaded later
-    /// too.
-    all_plugins: RefCell<Vec<Capability>>,
-    /// The plugins the app manages (`set_plugins`).
-    managed: RefCell<Vec<Script>>,
-    /// Host actions and shared keys plugins reach (`expose_*`).
-    exposed_actions: Exposed,
-    exposed_shared: Exposed,
-    /// Of `exposed_shared`, the keys plugins only read.
-    read_only_shared: ReadOnly,
-    exposed_hooks: Exposed,
+    /// The scripts the host loads beside the root (`set_scripts`), with
+    /// their limits.
+    managed: RefCell<Vec<(Entry, Limits)>>,
     /// Tells `watch` to look at what it watches again (after a reload).
     rewatch: RefCell<Option<zgx::task::LatestSender<()>>>,
     /// The window's clipboard and dialogs, once the view mounts in one.
@@ -2236,8 +2139,9 @@ struct Inner {
     /// Tells `error_hooks` of what the framework reports (`zgx::issues`).
     _issues: zgx::issues::IssueListener,
     error_watch: RefCell<Option<Box<dyn std::any::Any>>>,
-    plugin_dir: Option<PathBuf>,
-    plugins: Vec<Script>,
+    /// A folder whose every script loads beside the root (`scripts_in`),
+    /// and their limits.
+    scripts_dir: Option<(PathBuf, Limits)>,
     /// Module folders outside the script's directory the app may require,
     /// by name (`package`): `@name/…`.
     packages: Vec<(String, PathBuf)>,
@@ -2285,16 +2189,6 @@ struct Inner {
     required: RefCell<Vec<PathBuf>>,
     /// What a load writes to state that outlives it, undone if it fails.
     journal: Rc<journal::Journal>,
-    /// The packages lent to each plugin, and how many of their modules it
-    /// required: the load under way's, and the last successful one's
-    /// (`contributions`).
-    lent: RefCell<Lent>,
-    /// The lent packages' modules, compiled once for every plugin VM that
-    /// requires them (`sources::compiled`), by path: held while the host
-    /// lends them, the paths the last load required.
-    lent_compiled: RefCell<HashMap<PathBuf, Rc<sources::Compiled>>>,
-    /// How many lent modules were compiled (not found compiled).
-    lent_compiles: Cell<u64>,
     /// Packages' modules it compiled, and found compiled by another host
     /// (`sources::package_compiled`).
     package_compiles: Cell<u64>,
@@ -2302,11 +2196,10 @@ struct Inner {
     /// The scripts' bytecode by what their files held, once the host
     /// hot-reloads: a reload compiles only what changed.
     sources: sources::Sources,
-    /// The app's modules plugins replace (`ui.override`), by module name
-    /// (`components/card` for `@app/components/card`): gathered as the
-    /// plugins load, before the app, and read by the app's `require`.
+    /// The root script's modules scripts replace (`ui.override`), by module
+    /// name (`components/card` for `@app/components/card`): gathered as the
+    /// other scripts load, before the root, and read by every `require`.
     overrides: RefCell<HashMap<String, node::ModuleOverride>>,
-    decisions: Rc<lower::Decisions>,
     /// Terminal sessions (`ui.term`): they outlive reloads.
     terms: Rc<term::Terms>,
     /// Web pages by id (`ui.web(id)`): they outlive reloads too.
@@ -2393,7 +2286,8 @@ fn diagnostics_requested() -> bool {
 /// and height or none (`ScriptHost::window_size_limits`).
 pub type WindowSizeLimits = (Option<(f64, f64)>, Option<(f64, f64)>);
 
-/// Loads an application script and its plugins and mounts what they describe.
+/// Loads an application's root script and the scripts beside it, and mounts
+/// what they describe.
 #[derive(Clone)]
 pub struct ScriptHost(Rc<Inner>);
 /// A script run: its VM, the view it returned and its slot contributions.
@@ -2407,19 +2301,19 @@ type Ran = (
 impl ScriptHost {
     /// A host for the application script at `path`.
     pub fn new(runtime: &Runtime, path: impl Into<PathBuf>) -> Self {
-        Self::with(runtime, Script::File(path.into()))
+        Self::with(runtime, Entry::File(path.into()))
     }
     /// A host for script source held in memory.
     pub fn inline(runtime: &Runtime, name: impl Into<String>, code: impl Into<String>) -> Self {
         Self::with(
             runtime,
-            Script::Inline {
+            Entry::Inline {
                 name: name.into(),
                 code: code.into(),
             },
         )
     }
-    fn with(runtime: &Runtime, app: Script) -> Self {
+    fn with(runtime: &Runtime, app: Entry) -> Self {
         #[cfg(target_arch = "wasm32")]
         web::start();
         let elements = Rc::new(element::Elements::default());
@@ -2439,15 +2333,7 @@ impl ScriptHost {
             async_actions: Rc::default(),
             fetcher: Rc::default(),
             connector: Rc::default(),
-            fetch_policy: Rc::default(),
-            grants: RefCell::default(),
-            plugin_memory: RefCell::default(),
-            all_plugins: RefCell::default(),
             managed: RefCell::default(),
-            exposed_actions: Rc::default(),
-            exposed_shared: Rc::default(),
-            read_only_shared: Rc::default(),
-            exposed_hooks: Rc::default(),
             rewatch: RefCell::default(),
             platform: Rc::default(),
             picked: Rc::default(),
@@ -2469,9 +2355,8 @@ impl ScriptHost {
                 }
             }),
             error_watch: RefCell::default(),
-            plugin_dir: None,
+            scripts_dir: None,
             packages: Vec::new(),
-            plugins: Vec::new(),
             limits: Limits::default(),
             large_heap_goal: None,
             stores: RefCell::default(),
@@ -2507,14 +2392,10 @@ impl ScriptHost {
             stamps: RefCell::default(),
             required: RefCell::default(),
             journal: Rc::default(),
-            lent: RefCell::default(),
-            lent_compiled: RefCell::default(),
-            lent_compiles: Cell::new(0),
             package_compiles: Cell::new(0),
             package_hits: Cell::new(0),
             sources: sources::Sources::default(),
             overrides: RefCell::default(),
-            decisions: Rc::new(lower::Decisions::new(runtime)),
             terms: Rc::default(),
             webs: Rc::default(),
             commands: Rc::new(command::Commands::new(runtime)),
@@ -2541,26 +2422,22 @@ impl ScriptHost {
             #[cfg(feature = "audio")]
             audio: audio::AudioHost::new(runtime),
         }));
-        host.0.assets.connect(
-            host.0.timers.clone(),
-            host.0.fetcher.clone(),
-            host.0.fetch_policy.clone(),
-        );
+        host.0
+            .assets
+            .connect(host.0.timers.clone(), host.0.fetcher.clone());
         #[cfg(feature = "audio")]
         host.0.audio.set_timers(host.0.timers.clone());
         // No files in the browser: a sound's are fetched, through the host's
-        // transport and under its policy.
+        // transport.
         #[cfg(all(feature = "audio", target_arch = "wasm32"))]
-        host.0
-            .audio
-            .set_fetch(host.0.fetcher.clone(), host.0.fetch_policy.clone());
+        host.0.audio.set_fetch(host.0.fetcher.clone());
         host.trim_when_idle();
         host
     }
     /// The scripts compiled into the app (`include_bundle!`), starting at
     /// `entry` (`"app.luau"`): what ships. Nothing is read from the disk,
-    /// `require`, `.luaurc` aliases, packages, theme files, images and
-    /// plugins included, and `watch` watches nothing.
+    /// `require`, `.luaurc` aliases, packages, theme files and images
+    /// included, and `watch` watches nothing.
     pub fn bundled(runtime: &Runtime, bundle: &'static Bundle, entry: &str) -> Self {
         Self::from_files(
             runtime,
@@ -2577,7 +2454,7 @@ impl ScriptHost {
     pub fn from_files(runtime: &Runtime, files: ScriptFiles, entry: &str, code: Code) -> Self {
         let files = files.with(code);
         let root = files.root().expect("a bundle or files in memory");
-        let mut host = Self::with(runtime, Script::File(root.join(entry)));
+        let mut host = Self::with(runtime, Entry::File(root.join(entry)));
         // Its packages, as `build::bundle` stored them.
         for name in files.packages() {
             let dir = root.join(bundle::build::PACKAGES).join(&name);
@@ -2599,7 +2476,7 @@ impl ScriptHost {
         let files = files.with(self.code_mode());
         let root = files.root().expect("a bundle or files in memory");
         let before = (self.app(), self.files());
-        let app = Script::File(root.join(entry));
+        let app = Entry::File(root.join(entry));
         // Its state, kept by the app's script: the new one's.
         let keys = (before.0.key(), app.key());
         self.move_store(&keys.0, &keys.1);
@@ -2620,7 +2497,6 @@ impl ScriptHost {
             Ok(()) => {
                 // The old scripts' bytecode, kept to reload them faster.
                 self.0.sources.keep_only(std::iter::empty());
-                self.0.lent_compiled.borrow_mut().clear();
                 Ok(())
             }
             Err(message) => {
@@ -2706,8 +2582,7 @@ impl ScriptHost {
     /// The folder a page's downloads are saved into with no dialog
     /// (Luau's `d:save_temp`), each under its suggested name made unique:
     /// one of the app's own, temporary, which the app clears. Until it
-    /// names one, `d:save_temp` raises. Plugins need `Capability::Files`
-    /// for it, as for `d:save_to`.
+    /// names one, `d:save_temp` raises.
     #[doc(hidden)]
     pub fn download_dir(self, dir: impl Into<PathBuf>) -> Self {
         *self.0.downloads.dir.borrow_mut() = Some(dir.into());
@@ -2743,12 +2618,12 @@ impl ScriptHost {
     pub fn issues(&self) -> Vec<(zgx::issues::IssueKind, String)> {
         self.0.issues.borrow().last.iter().cloned().collect()
     }
-    /// Where a plugin can put something and what it can read there: the
-    /// app's named elements (ids, classes, hooks) by the elements that
-    /// `provide` context, as mounted under `handle` in `ui`, with names the
-    /// source declares that aren't showing (`mounted: false`). The mounted
-    /// tree is kept only while plugins are loaded; without, it lists the
-    /// source (`live: false`).
+    /// Where a script can put something and what it can read there: the
+    /// root script's named elements (ids, classes, hooks) by the elements
+    /// that `provide` context, as mounted under `handle` in `ui`, with names
+    /// the source declares that aren't showing (`mounted: false`). The
+    /// mounted tree is kept only while scripts beside the root are loaded;
+    /// without, it lists the source (`live: false`).
     pub fn elements(
         &self,
         ui: &zgx::widgets::Ui,
@@ -2769,7 +2644,7 @@ impl ScriptHost {
             };
         };
         let sources: Vec<(PathBuf, String)> = match &*self.app() {
-            Script::Inline { name, code } => vec![(PathBuf::from(name), code.clone())],
+            Entry::Inline { name, code } => vec![(PathBuf::from(name), code.clone())],
             script => script
                 .dir()
                 .map(|dir| check::scripts(&dir))
@@ -2788,13 +2663,13 @@ impl ScriptHost {
     pub(crate) fn expose_classes(&self) {
         element::Classes::register(&self.0.runtime, &self.0.elements);
     }
-    /// Where what `plugin` adds shows in the window now, in points, through
+    /// Where what `script` adds shows in the window now, in points, through
     /// whatever transforms and zooms it lies under: a box for each mounted
     /// `ui.contribute` into a slot or before, after or in place of an
-    /// element. What a `ui.filter` changes stays the app's own element, and
+    /// element. What a `ui.filter` changes stays the root's own element, and
     /// a box with no area is left out. For a host to say what is whose (a
-    /// click on a plugin's control, a preview outlining it).
-    pub fn contribution_bounds(&self, plugin: &str) -> Vec<zgx::scene::Rect> {
+    /// click on a script's control, a preview outlining it).
+    pub fn contribution_bounds(&self, script: &str) -> Vec<zgx::scene::Rect> {
         let current = self.0.current.borrow();
         let Some(loaded) = current.as_ref() else {
             return Vec::new();
@@ -2806,13 +2681,13 @@ impl ScriptHost {
             .map(|hooks| hooks.all())
             .unwrap_or_default()
             .iter()
-            .filter(|hook| &*hook.owner == plugin && matches!(hook.adds, node::Adds::Node(..)))
+            .filter(|hook| &*hook.owner == script && matches!(hook.adds, node::Adds::Node(..)))
             .map(|hook| &hook.stats);
         let slotted = lowering
             .slots
             .values()
             .flatten()
-            .filter(|(owner, _, _)| &**owner == plugin)
+            .filter(|(owner, _, _)| &**owner == script)
             .map(|(_, _, stats)| stats);
         added
             .chain(slotted)
@@ -2823,21 +2698,29 @@ impl ScriptHost {
     }
     /// Forgets a script's state: its `ui.state` and `ui.persist` values held
     /// here, what waits to be saved, and its saved files, gone by the time
-    /// this returns. `script` names it as state is kept: `"plugin:<name>"`
-    /// for a plugin of [`set_plugins`](Self::set_plugins). For uninstalling
-    /// a plugin: call it once the plugin is no longer loaded (a VM still
-    /// running keeps what it holds until it goes); the next load that asks
-    /// starts from its `initial`.
+    /// this returns. `script` is its name (`Script::name`, or the root
+    /// script's). For removing a script for good: call it once the script is
+    /// no longer loaded (a VM still running keeps what it holds until it
+    /// goes); the next load that asks starts from its `initial`.
     pub fn forget_state(&self, script: &str) {
-        self.0.stores.borrow_mut().remove(script);
-        self.0.persist.forget(script);
+        let kept = [
+            script.to_owned(),
+            format!("script:{script}"),
+            format!("inline:{script}"),
+        ];
+        for kept in kept {
+            self.0.stores.borrow_mut().remove(&kept);
+            self.0.persist.forget(&kept);
+        }
+        // Saved before scripts were kept by `script:<name>`.
+        self.0.persist.forget(&format!("plugin:{script}"));
     }
-    /// What each plugin adds at the app's elements (`ui.contribute { target
-    /// }`, `ui.filter`), in the order they made them: its target, where it
-    /// goes, how many elements it applies at now, and its latest error. A
-    /// target matching nothing shows `matches: 0`. Then each plugin
-    /// command's dropped shortcut (`dropped_shortcuts`), as place
-    /// "shortcut" and its error saying why. Empty without plugins.
+    /// What each script adds at the root's elements (`ui.contribute {
+    /// target }`, `ui.filter`), in the order they made them: its target,
+    /// where it goes, how many elements it applies at now, and its latest
+    /// error. A target matching nothing shows `matches: 0`. Then each other
+    /// script's command's dropped shortcut (`dropped_shortcuts`), as place
+    /// "shortcut" and its error saying why. Empty with no contribution.
     pub fn contributions(&self) -> Vec<ContributionReport> {
         let current = self.0.current.borrow();
         let hooks = current
@@ -2848,7 +2731,7 @@ impl ScriptHost {
             .unwrap_or_default()
             .iter()
             .map(|hook| ContributionReport {
-                plugin: hook.owner.to_string(),
+                script: hook.owner.to_string(),
                 target: hook.target_text(),
                 place: hook.place_name(),
                 matches: hook.stats.live.get(),
@@ -2856,29 +2739,15 @@ impl ScriptHost {
             })
             .collect();
         reports.extend(
-            self.0
-                .lent
-                .borrow()
-                .published
-                .iter()
-                .map(|(plugin, package, modules)| ContributionReport {
-                    plugin: plugin.clone(),
-                    target: format!("@{package}"),
-                    place: "package",
-                    matches: *modules,
-                    error: None,
-                }),
-        );
-        reports.extend(
             self.dropped_shortcuts()
                 .into_iter()
-                .filter(|drop| !drop.plugin.is_empty())
+                .filter(|drop| !drop.script.is_empty())
                 .map(|drop| ContributionReport {
                     error: Some(format!(
                         "its shortcut `{}` was dropped: {} (`{}`)",
                         drop.key, drop.reason, drop.holder
                     )),
-                    plugin: drop.plugin,
+                    script: drop.script,
                     target: drop.command,
                     place: "shortcut",
                     matches: 0,
@@ -2887,13 +2756,13 @@ impl ScriptHost {
         reports
     }
     /// The shortcuts the last publish dropped, in declaration order: a
-    /// plugin command's key that the app's commands (or an earlier
-    /// plugin's) hold, spelled the same or not, stays theirs, and an app
-    /// command's key an earlier app command holds (one rebound to it, `key`
-    /// following a state) stays the earlier's (its `plugin` empty): the
+    /// command's key that the root script's commands (or an earlier
+    /// script's) hold, spelled the same or not, stays theirs, and a root
+    /// command's key an earlier root command holds (one rebound to it, `key`
+    /// following a state) stays the earlier's (its `script` empty): the
     /// command is published (`commands`) without it, so the menu bar never
     /// has a key twice. Each says the key, why and the command that holds
-    /// it, for the app to tell the plugin's author or the person rebinding.
+    /// it, for the app to tell the script's author or the person rebinding.
     /// Read it as `commands` changes.
     pub fn dropped_shortcuts(&self) -> Vec<DroppedShortcut> {
         self.0.commands.dropped.borrow().clone()
@@ -2917,7 +2786,7 @@ impl ScriptHost {
         *self.0.error_watch.borrow_mut() = Some(Box::new(watch));
     }
     /// The app's script (`app`), as it is now.
-    fn app(&self) -> Rc<Script> {
+    fn app(&self) -> Rc<Entry> {
         self.0.app.borrow().clone()
     }
     /// Where its files come from (`files`), as it is now.
@@ -2925,14 +2794,10 @@ impl ScriptHost {
         self.0.files.borrow().clone()
     }
     fn configure(self, f: impl FnOnce(&mut Inner)) -> Self {
-        let rules = rules::of(&self.0);
         let mut inner = Rc::try_unwrap(self.0)
             .unwrap_or_else(|_| panic!("configure a ScriptHost before cloning it"));
         f(&mut inner);
         let host = Self(Rc::new(inner));
-        if let Some(rules) = rules {
-            rules::attach(&host.0, rules);
-        }
         // The host is a new `Rc`: what goes idle with it follows it.
         host.trim_when_idle();
         host
@@ -2947,23 +2812,26 @@ impl ScriptHost {
         });
         *self.0.idle.borrow_mut() = Some(trim);
     }
-    /// Loads every `.luau` file in `dir` as a plugin.
-    pub fn plugins(self, dir: impl Into<PathBuf>) -> Self {
+    /// Loads every `.luau` file in `dir` beside the root script, each in a
+    /// VM of its own within `limits`, by name, before those `set_scripts`
+    /// gives. A file added to the folder loads as the host hot-reloads.
+    #[doc(hidden)]
+    pub fn scripts_in(self, dir: impl Into<PathBuf>, limits: Limits) -> Self {
         let dir = dir.into();
-        self.configure(|inner| inner.plugin_dir = Some(dir))
+        self.configure(|inner| inner.scripts_dir = Some((dir, limits)))
     }
     /// Lets the app `require` modules from `dir`, outside its own directory,
     /// as `"@name/…"` (`require("@kit/button")`), and lets its `.luaurc`
     /// aliases point into it: a folder of modules several apps share. They
-    /// are read, never written, and run as the app's own code; plugins do
-    /// not reach them. zgx-run gives zgx.json's `"packages"` here.
+    /// are read, never written, and every script requires from them.
+    /// zgx-run gives zgx.json's `"packages"` here.
     pub fn package(self, name: impl Into<String>, dir: impl Into<PathBuf>) -> Self {
         let package = (name.into().to_lowercase(), dir.into());
         self.configure(|inner| inner.packages.push(package))
     }
     /// Loads the catalog of locale files in `dir` (`en.json`, `ar.json`,
     /// …), its keys written in `source`, before any script runs: `ui.t` and
-    /// `ui.locale` work in the app's scripts and its plugins' as after
+    /// `ui.locale` work in every script as after
     /// `ui.i18n { dir, source }`, with no script calling it. Watched as the
     /// host hot-reloads: an edited locale file sets the messages whose text
     /// changed, without reloading the scripts. A script's `ui.i18n` naming
@@ -3001,14 +2869,6 @@ impl ScriptHost {
     #[doc(hidden)]
     pub fn i18n_catalog(&self) -> Option<zgx::i18n::I18n> {
         self.0.locales.handle()
-    }
-    /// Adds a plugin from source held in memory.
-    pub fn plugin(self, name: impl Into<String>, code: impl Into<String>) -> Self {
-        let script = Script::Inline {
-            name: name.into(),
-            code: code.into(),
-        };
-        self.configure(|inner| inner.plugins.push(script))
     }
     /// `ui.args`: what the app was launched with after its script (a
     /// command line's `notes.txt`).
@@ -3160,8 +3020,7 @@ impl ScriptHost {
     /// `ui.call_sync(name, arg)`: a read of data the host keeps (the rows a
     /// virtualized list shows of a large diff), so the data never has to
     /// be copied into the script whole. It runs on the UI thread: keep it
-    /// quick (no I/O; `async_action` is for that). Plugins reach it as
-    /// they reach actions (`expose_action`). A name registered twice warns
+    /// quick (no I/O; `async_action` is for that). A name registered twice warns
     /// as [`action`](Self::action)'s does (`replace_function` doesn't).
     #[track_caller]
     pub fn function(&self, name: impl Into<String>, function: impl Fn(Value) -> Value + 'static) {
@@ -3376,198 +3235,29 @@ impl ScriptHost {
             Box::pin(connect(request, socket))
         }));
     }
-    /// What the app allows of its scripts' requests, `ui.fetch`, remote
-    /// images and `ui.socket`, each attributed to the plugin that made it:
-    /// every URL including each redirect's, every address a host resolves
-    /// to, and every header a script sets. Without one, all are allowed.
-    /// `zgx-run`'s transports call it; a host's own transport reads it, and
-    /// the caller, from `Body` or `Socket`. It replaces the last, for the
-    /// requests made from now on.
-    pub fn fetch_policy(&self, policy: impl FetchPolicy) {
-        *self.0.fetch_policy.borrow_mut() = Some(std::sync::Arc::new(policy));
-    }
-    /// Refuse `ui.open_folder` to every script, the app's own too: an app
-    /// that must not touch folders, whatever its scripts ask.
-    pub fn refuse_folders(self) -> Self {
-        self.0.folders.refused.set(true);
-        self
-    }
     /// Keep no folder past a run: `ui.open_folder { remember }` picks as
     /// without it, and `ui.remembered_folder` is always nil.
     pub fn refuse_remembered_folders(self) -> Self {
         self.0.folders.forgetful.set(true);
         self
     }
-    /// Let plugin `plugin` (its file name, `stats.luau`, or `plugin`'s
-    /// name) do `capability`. Plugins get none unless granted; the
-    /// application's scripts have every one.
-    pub fn grant(self, plugin: impl Into<String>, capability: Capability) -> Self {
-        let plugin = plugin.into();
-        self.configure(|inner| {
-            inner
-                .grants
-                .get_mut()
-                .entry(plugin)
-                .or_default()
-                .push(capability)
-        })
-    }
-    /// Let every plugin do `capability`: those loaded now and later, by
-    /// `plugins`, `plugin` or `set_plugins`, as if each were granted it.
-    /// An app lending its design system to all its plugins
-    /// (`Capability::Package("ds")`) grants it here once.
-    pub fn grant_all_plugins(self, capability: Capability) -> Self {
-        self.configure(|inner| inner.all_plugins.get_mut().push(capability))
-    }
-    /// The plugins the app loads, each with what it may do, from the next
-    /// `reload` on (an app that asks its user what to allow loads a plugin
-    /// once they have). Plugins read from the disk, a bundled app's too. A
-    /// plugin that fails to load is left out and its error reported.
-    pub fn set_plugins(&self, plugins: Vec<Plugin>) {
-        let mut grants = self.0.grants.borrow_mut();
-        let mut managed = self.0.managed.borrow_mut();
-        for old in managed.drain(..) {
-            if let Script::Plugin { name, .. } = old {
-                grants.remove(&name);
-                self.0.plugin_memory.borrow_mut().remove(&name);
-            }
-        }
-        for plugin in plugins {
-            grants.insert(plugin.name.clone(), plugin.grants);
-            managed.push(Script::Plugin {
-                name: plugin.name,
-                path: plugin.entry,
-            });
-        }
-    }
-    /// Plugin `name`'s heap, in bytes, in place of `Limits::plugin_memory`
-    /// (a plugin whose manifest asks for more), from its next load. Set
-    /// after `set_plugins`, which forgets those of the plugins it replaces.
-    pub fn plugin_memory(&self, name: impl Into<String>, bytes: usize) {
-        self.0.plugin_memory.borrow_mut().insert(name.into(), bytes);
-    }
-    /// Let plugins bind, invoke and call host action `name` (`action`,
-    /// `async_action`): all of them, or (`Some`) those granted
-    /// `capability`. Plugins reach no host action the app does not expose;
-    /// the app's own scripts reach every one.
-    pub fn expose_action(&self, name: impl Into<String>, capability: Option<Capability>) {
-        self.0
-            .exposed_actions
-            .borrow_mut()
-            .insert(name.into(), capability);
-    }
-    /// Let plugins read and write shared state `key` (`ui.shared`): all of
-    /// them, or (`Some`) those granted `capability`. Plugins reach no shared
-    /// state the app does not expose.
-    pub fn expose_shared(&self, key: impl Into<String>, capability: Option<Capability>) {
-        let key = key.into();
-        self.0.read_only_shared.borrow_mut().remove(&key);
-        self.0.exposed_shared.borrow_mut().insert(key, capability);
-    }
-    /// Let plugins read shared state `key` and follow it, but not write it:
-    /// all of them, or (`Some`) those granted `capability`. A plugin's
-    /// `set`, `update`, `push` and the rest on it are errors that say so,
-    /// as is binding it where it is written (an input's `value`). The app's
-    /// own scripts read and write it as before.
-    pub fn expose_shared_read(&self, key: impl Into<String>, capability: Option<Capability>) {
-        let key = key.into();
-        self.0.read_only_shared.borrow_mut().insert(key.clone());
-        self.0.exposed_shared.borrow_mut().insert(key, capability);
-    }
-    /// Keep names under `prefix` (`"zeron"`: `zeron` and `zeron.…`) for the
-    /// app's own scripts: a plugin may neither offer a `ui.slot` so named nor
-    /// declare a `ui.command` with such an `id`, whatever it is granted. A
-    /// plugin offers only its own names anyway (`<plugin>.…`); this holds
-    /// even for a plugin itself named under the prefix. From the next load.
-    pub fn reserve_prefix(&self, prefix: &str) {
-        rules::start(&self.0).reserve(prefix);
-    }
-    /// Asks `guard` before the app's own scripts reach the host or the
-    /// network: a host action, async action or function (by its name), or a
-    /// `ui.fetch`, remote picture or `ui.socket` (by its URL), each time. An
-    /// `Err` stops it, its text the script's error: what a preview of
-    /// someone's template runs under. A plugin's VM isn't asked: it reaches
-    /// only what its grants say. The last one set applies, at once.
-    pub fn guard(&self, guard: impl Fn(GuardKind, &str) -> Result<(), String> + 'static) {
-        let rules = rules::start(&self.0);
-        rules.set_guard(Rc::new(guard));
-        // The VM already loaded hears it too; a later load's has it from
-        // the start.
-        if let Some(loaded) = &*self.0.current.borrow()
-            && let Some(vm) = loaded._vms.last()
-        {
-            vm.lua.set_app_data(rules::Guarded(rules));
-        }
-    }
-    /// Asks `guard` of pages in place of [`guard`](Self::guard)'s
-    /// [`GuardKind::Web`]: each URL the app's scripts load (`:load`, `src`,
-    /// `html`'s base) and each navigation the platform starts, a main
-    /// frame's, an iframe's and a redirect's, told the id the page was made
-    /// under (`ui.web("tab")` gives `Some("tab")`; an anonymous `ui.web(opts)`
-    /// or `ui.webview` without `web`, `None`). An `Err` stops it, as
-    /// `guard`'s does. So one host lets its browser tabs reach what its
-    /// previews may not. Unset, `guard` decides as before. The last one set
-    /// applies, at once.
+    /// The scripts the host loads beside its root script, each in a VM of
+    /// its own and within its own limits, from the next `reload`: in this
+    /// order, after those in the folder `scripts_in` gives. One that fails
+    /// to load is left out and its error reported; one no longer given is
+    /// unloaded, and nothing of it runs once the next load is in (its
+    /// effects, timers, windows, sockets and calls ended first).
     #[doc(hidden)]
-    pub fn web_guard(&self, guard: impl Fn(Option<&str>, &str) -> Result<(), String> + 'static) {
-        let rules = rules::start(&self.0);
-        rules.set_web_guard(Rc::new(guard));
-        if let Some(loaded) = &*self.0.current.borrow()
-            && let Some(vm) = loaded._vms.last()
-        {
-            vm.lua.set_app_data(rules::Guarded(rules));
-        }
+    pub fn set_scripts(&self, scripts: Vec<Script>) {
+        *self.0.managed.borrow_mut() = scripts.into_iter().map(Script::entry).collect();
     }
-    /// Saves what `ui.persist` keys the guard refused hold
-    /// ([`GuardKind::Persist`]): the person kept what they previewed. How
-    /// many changed what is kept. It saves as any change does, 250 ms after
-    /// (or [`save`](Self::save)); what shows goes on holding its own copy
-    /// until the next load.
-    pub fn keep_held_state(&self) -> usize {
-        let Some(rules) = rules::of(&self.0) else {
-            return 0;
-        };
-        rules
-            .take_held()
-            .into_iter()
-            .filter(|((script, key), held)| {
-                let value = held.value.with_untracked(Clone::clone);
-                // Told where the hold began, as a key with no file starts a
-                // run there: what it became is then a change, and saved.
-                let kept = self.0.persist.state(script, key, held.start.clone());
-                kept.set(value)
-            })
-            .count()
-    }
-    /// Lets go of what `ui.persist` keys the guard refused hold: the person
-    /// reverted. The next load starts from what is saved. Quitting does the
-    /// same: nothing held is ever saved on its own.
-    pub fn drop_held_state(&self) {
-        if let Some(rules) = rules::of(&self.0) {
-            drop(rules.take_held());
-        }
-    }
-    /// Ask `capability` of a plugin adding before or after an element by
-    /// `target`, written as plugins write it (`"#save"`, `"hook:toolbar.save"`):
-    /// every target is open to before and after, as a slot is, unless the
-    /// host says so. Replacing an element always takes
-    /// `Capability::OverrideElement`.
-    pub fn expose_hook(&self, target: impl Into<String>, capability: Option<Capability>) {
-        self.0
-            .exposed_hooks
-            .borrow_mut()
-            .insert(target.into(), capability);
-    }
-    /// Ask `capability` of every plugin contribution the host hasn't named
-    /// with [`expose_hook`](Self::expose_hook): adding into a slot
-    /// (`ui.contribute(name, node)`, named `"slot:name"` there) or before or
-    /// after an element, by `#id` or a hook. Without this they are open, as
-    /// a slot is; `expose_hook(target, None)` opens one again.
-    pub fn require_contribution_capability(&self, capability: Capability) {
-        self.0
-            .exposed_hooks
-            .borrow_mut()
-            .insert("*".into(), Some(capability));
+    /// The script calling the host now: its name, inside a host action,
+    /// function or async action it called (`ui.action`, `ui.invoke`,
+    /// `ui.call_sync`, `ui.call`), and `None` outside one. For a host whose
+    /// actions answer each script in its own way.
+    #[doc(hidden)]
+    pub fn calling_script(&self) -> Option<Rc<str>> {
+        CALLING.with_borrow(Clone::clone)
     }
     /// State shared by the application and every script (`ui.shared`). Rust
     /// can publish model data here and observe what scripts write.
@@ -3808,17 +3498,6 @@ impl ScriptHost {
     pub fn reserved_keys(&self) -> Signal<Vec<String>> {
         self.0.commands.reserved.clone()
     }
-    /// Whether decision control `key` (`ui.decision`) is on screen: at least
-    /// half of it shows in the window, and no plugin has a window open
-    /// (`Capability::Windows`), which nothing in this window can be above.
-    /// Followed where read reactively. A host holding a pending decision shows
-    /// its own fallback in its top layer (`View::top_layer`) while this is
-    /// false: a plugin replacing what a builder makes (a row, a component)
-    /// takes the control away where no refusal can see it.
-    pub fn decision_shown(&self, key: &str) -> bool {
-        let shown = self.0.decisions.shown(key).get();
-        !self.0.windows.plugin_window_open() && shown
-    }
     /// The windows the scripts declare (`ui.window`), as of the last good
     /// load: open each while its `open` state is true, showing
     /// `window_view(id)`, and set the state false when it is closed.
@@ -3840,12 +3519,7 @@ impl ScriptHost {
                     (Some(loaded), Some(content)) => {
                         let view = match loaded.lowering.hooks.as_deref() {
                             Some(hooks) => {
-                                lower::no_siblings(
-                                    hooks,
-                                    &content.node,
-                                    &loaded.lowering,
-                                    "a window's root",
-                                );
+                                lower::no_siblings(hooks, &content.node, "a window's root");
                                 lower::plugged(&content.node, &loaded.lowering)
                             }
                             None => lower::lower(&content.node, &loaded.lowering),
@@ -4021,7 +3695,7 @@ impl ScriptHost {
         loaded.map_or(0, |l| l._vms.iter().map(|vm| vm.lua.used_memory()).sum())
     }
     /// Bytes the loaded scripts' VMs hold after a full collection (each is
-    /// capped at `Limits::memory` or `Limits::plugin_memory`): what a test reads over many updates to
+    /// capped at its `Limits::memory`, if set): what a test reads over many updates to
     /// check that nothing keeps what it no longer needs. The conversion
     /// cache's tables count until the host next goes idle (`collect_garbage`
     /// lets go of what no script holds), so a number here is no leak until
@@ -4163,7 +3837,7 @@ impl ScriptHost {
     /// The application script's file, if it was loaded from one.
     pub fn script_path(&self) -> Option<PathBuf> {
         match &*self.app() {
-            Script::File(path) => Some(path.clone()),
+            Entry::File(path) => Some(path.clone()),
             _ => None,
         }
     }
@@ -4304,11 +3978,11 @@ impl ScriptHost {
             .iter()
             .filter_map(|file| Some((file.clone(), std::fs::read_to_string(file).ok()?)))
             .collect();
-        // An app written inline is no file, but its plugins target what it
+        // An app written inline is no file, but its scripts target what it
         // declares (`unknown-target`): read with them, its own findings left
         // as an inline app's always were.
         let inline = match &*self.app() {
-            Script::Inline { name, code } if !files.is_empty() => {
+            Entry::Inline { name, code } if !files.is_empty() => {
                 let path = PathBuf::from(format!("<inline {name}>"));
                 sources.push((path.clone(), code.clone()));
                 Some(path)
@@ -4352,11 +4026,15 @@ impl ScriptHost {
             return;
         }
         let script = self.app();
-        let Script::File(app) = &*script else {
+        let Entry::File(app) = &*script else {
             return;
         };
         let mut paths = vec![app.clone()];
-        paths.extend(self.0.plugin_dir.iter().filter(|d| d.is_dir()).cloned());
+        paths.extend(
+            (self.0.scripts_dir.iter())
+                .map(|(d, _)| d.clone())
+                .filter(|d| d.is_dir()),
+        );
         *self.0.checker.borrow_mut() =
             Some(check::Background::start(paths, check::Options::default()));
     }
@@ -4405,7 +4083,6 @@ impl ScriptHost {
     fn reload_with(&self, ran: Option<Vec<PathBuf>>) -> Result<(), String> {
         #[cfg(feature = "audio")]
         self.0.audio.begin_load();
-        self.0.lent.borrow_mut().pending.clear();
         self.0.commands.begin();
         self.0.windows.begin();
         let reports = self.0.error.version();
@@ -4438,16 +4115,6 @@ impl ScriptHost {
                 }
                 *self.0.current.borrow_mut() = Some(Rc::new(loaded));
                 self.0.commands.publish();
-                {
-                    let mut lent = self.0.lent.borrow_mut();
-                    lent.published = std::mem::take(&mut lent.pending);
-                    // Only what this load required stays compiled.
-                    let required = self.0.required.borrow();
-                    self.0
-                        .lent_compiled
-                        .borrow_mut()
-                        .retain(|path, _| required.contains(path));
-                }
                 let mut problems = self
                     .0
                     .current
@@ -4543,8 +4210,9 @@ impl ScriptHost {
         if assets {
             changed.push(PathBuf::from("(an image or SVG file it shows)"));
         }
-        // The app's VM alone, its modules' cache reached: it can be kept.
-        let can_keep = self.0.plugins.is_empty()
+        // The root script's VM alone, its modules' cache reached: it can be
+        // kept.
+        let can_keep = self.0.scripts_dir.is_none()
             && self.0.managed.borrow().is_empty()
             && self.0.current.borrow().as_ref().is_some_and(|l| {
                 l._vms.len() == 1
@@ -4558,7 +4226,7 @@ impl ScriptHost {
     /// The app script's path as `require` keys modules (`module_key`).
     fn app_key(&self) -> Option<PathBuf> {
         match &*self.app() {
-            Script::File(path) => Some(module_key(path)),
+            Entry::File(path) => Some(module_key(path)),
             _ => None,
         }
     }
@@ -4659,12 +4327,12 @@ impl ScriptHost {
         }
         let host = self.clone();
         async move {
-            // A bundle never changes; the plugins beside it (on the disk)
+            // A bundle never changes; the scripts beside it (on the disk)
             // are watched as any file is.
             // The kernel says when a file changes; nothing runs meanwhile.
             #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
             if let Some(mut events) = file_events::FileEvents::new() {
-                // A reload (new plugins) has the watched files looked at again.
+                // A reload (new scripts) has the watched files looked at again.
                 let (rewatch, mut rewatched) = zgx::task::latest::<()>();
                 *host.0.rewatch.borrow_mut() = Some(rewatch);
                 let mut heard = false;
@@ -4729,14 +4397,14 @@ impl ScriptHost {
         files.extend(self.0.locales.files());
         files
     }
-    /// The directories whose every entry a reload depends on: the plugins',
-    /// so the first plugin dropped into an empty one loads.
+    /// The directories whose every entry a reload depends on: the scripts'
+    /// folder's, so the first script dropped into an empty one loads.
     #[cfg_attr(
         not(any(target_os = "macos", windows, target_os = "linux")),
         allow(dead_code)
     )]
     fn watched_dirs(&self) -> Vec<PathBuf> {
-        self.0.plugin_dir.iter().cloned().collect()
+        self.0.scripts_dir.iter().map(|(d, _)| d.clone()).collect()
     }
 
     /// The mounted interface, with an error banner above it.
@@ -4800,8 +4468,6 @@ impl ScriptHost {
         let persist = self.0.persist.clone();
         let timers = self.0.timers.clone();
         let host = self.clone();
-        // A host with rules is asked of the links in its view.
-        let links = rules::of(&self.0).map(|rules| rules::link_guard(rules, self.0.error.clone()));
         let view = component(move |cx| {
             // One frame loop ticks every animation; it idles at rest.
             if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
@@ -4914,31 +4580,34 @@ impl ScriptHost {
         });
         // Its window, for `ui.focus_snapshot`.
         let root = self.0.root.clone();
-        let view = view.on_mount(move |handle| *root.borrow_mut() = Some(handle));
-        match links {
-            Some(links) => zgx::compose::provide(links, view),
-            None => view,
-        }
+        view.on_mount(move |handle| *root.borrow_mut() = Some(handle))
     }
 
-    fn scripts(&self) -> Vec<Script> {
+    /// The scripts beside the root, in the order they load: those in the
+    /// folder `scripts_in` gives, by name, then those `set_scripts` gives.
+    fn others(&self) -> Vec<(Entry, Limits)> {
         let mut files: Vec<_> = self
             .0
-            .plugin_dir
+            .scripts_dir
             .as_ref()
-            .map(|dir| self.files().list(dir))
+            .map(|(dir, _)| self.files().list(dir))
             .into_iter()
             .flatten()
             .filter(|path| path.extension().is_some_and(|ext| ext == "luau"))
             .collect();
         files.sort();
-        files.into_iter().map(Script::File).collect()
-    }
-    /// The lent packages' modules this host compiled, rather than found
-    /// compiled by a plugin VM before (for tests: once per process).
-    #[doc(hidden)]
-    pub fn lent_compiles(&self) -> u64 {
-        self.0.lent_compiles.get()
+        let limits = self
+            .0
+            .scripts_dir
+            .as_ref()
+            .map(|(_, l)| *l)
+            .unwrap_or_default();
+        let mut others: Vec<_> = files
+            .into_iter()
+            .map(|path| (Entry::File(path), limits))
+            .collect();
+        others.extend(self.0.managed.borrow().iter().cloned());
+        others
     }
     /// The packages' modules this host compiled, and those it found compiled
     /// by another host (for tests).
@@ -4976,20 +4645,15 @@ impl ScriptHost {
     }
     fn stamps(&self) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
         let mut paths: Vec<_> = self
-            .scripts()
+            .others()
             .into_iter()
-            .filter_map(|s| match s {
-                Script::File(path) | Script::Plugin { path, .. } => Some(path),
-                Script::Inline { .. } => None,
+            .filter_map(|(s, _)| match s {
+                Entry::File(path) | Entry::Named { path, .. } => Some(path),
+                Entry::Inline { .. } => None,
             })
             .collect();
-        if let Script::File(path) = &*self.app() {
+        if let Entry::File(path) = &*self.app() {
             paths.push(path.clone());
-        }
-        for script in self.0.managed.borrow().iter() {
-            if let Script::Plugin { path, .. } = script {
-                paths.push(path.clone());
-            }
         }
         paths.extend(self.0.required.borrow().iter().cloned());
         paths
@@ -5045,12 +4709,11 @@ impl ScriptHost {
         let mut vms = Vec::new();
         let mut slots = node::Slots::new();
         let mut hooks = lower::Hooks::default();
-        let files = self.scripts();
         let mut broken = Vec::new();
-        let managed = self.0.managed.borrow().clone();
-        for script in self.0.plugins.iter().chain(&files).chain(&managed) {
-            // A plugin that fails is left out, not the app: the error is
-            // reported, and the app and the other plugins load. What it
+        let others = self.others();
+        for (script, limits) in &others {
+            // A script that fails is left out, not the root: the error is
+            // reported, and the root and the other scripts load. What it
             // declared before it failed goes with it: no command of its
             // stays in the menu bar unable to run, no window of its opens.
             let declared = (self.0.commands.mark(), self.0.windows.mark());
@@ -5058,7 +4721,7 @@ impl ScriptHost {
                 self.0.commands.discard_since(declared.0);
                 self.0.windows.discard_since(declared.1);
             };
-            let (vm, root, contributions, added) = match self.run(script, true) {
+            let (vm, root, contributions, added) = match self.run(script, *limits, false) {
                 Ok(ran) => ran,
                 Err(error) => {
                     discard();
@@ -5069,7 +4732,8 @@ impl ScriptHost {
             if root.is_some() {
                 discard();
                 broken.push(format!(
-                    "{}: a plugin contributes with ui.contribute; it returns nothing",
+                    "{}: a script beside the root contributes with ui.contribute; it returns \
+                     nothing",
                     script.name()
                 ));
                 continue;
@@ -5083,20 +4747,19 @@ impl ScriptHost {
             hooks.extend(added);
             vms.push(vm);
         }
-        let (vm, root, contributions, added) = self.run(&self.app(), false)?;
+        let (vm, root, contributions, added) = self.run(&self.app(), self.0.limits, true)?;
         vms.push(vm);
-        let plugins = !self.0.plugins.is_empty() || !managed.is_empty();
         self.finish_load(
             vms,
             root,
             (slots, hooks),
             (contributions, added),
             broken,
-            plugins,
+            !others.is_empty(),
         )
     }
 
-    /// The app's script ran in `vms`' last (after the plugins'), returning
+    /// The root script ran in `vms`' last (after the others), returning
     /// `root` and contributing `app`: what's loaded.
     #[allow(clippy::type_complexity)]
     fn finish_load(
@@ -5109,7 +4772,7 @@ impl ScriptHost {
             Vec<node::HookContribution>,
         ),
         broken: Vec<String>,
-        plugins: bool,
+        others: bool,
     ) -> Result<Loaded, String> {
         let (contributions, added) = app;
         if let Some(vm) = vms.last() {
@@ -5141,10 +4804,8 @@ impl ScriptHost {
             .collect();
         let lowering = Rc::new(lower::Lowering {
             slots,
-            // Boxed, and none without plugins adding at the app's elements.
+            // Boxed, and none without scripts adding at the root's elements.
             hooks: (!hooks.is_empty()).then(|| Box::new(hooks)),
-            sealed: Default::default(),
-            decisions: self.0.decisions.clone(),
             actions: self.0.actions.clone(),
             elements: self.0.elements.clone(),
             runtime: self.0.runtime.clone(),
@@ -5154,14 +4815,14 @@ impl ScriptHost {
             #[cfg(feature = "components")]
             commands: self.0.commands.clone(),
         });
-        // What plugins add beside the app's root, which has no siblings:
+        // What scripts add beside the root's root element, which has no siblings:
         // an error, not nothing.
         if let Some(hooks) = lowering.hooks.as_deref() {
-            lower::no_siblings(hooks, &root, &lowering, "the app's root");
+            lower::no_siblings(hooks, &root, "the app's root");
         }
         // What the next reload is judged by: this load's modules.
         if let Some(reloads) = reloads::of(&self.0) {
-            reloads.loaded(plugins);
+            reloads.loaded(others);
         }
         Ok(Loaded {
             _vms: vms,
@@ -5217,7 +4878,9 @@ impl ScriptHost {
         tracker.begin_kept(self.app_key(), &last, ran);
         let (app, files) = (self.app(), self.files());
         let loaded = app.code(&files).and_then(|code| {
-            let (root, contributions, added) = self.evaluate(&vm, &app, files.clone(), &code)?;
+            let load = self.0.limits.load_budget();
+            let (root, contributions, added) =
+                self.evaluate(&vm, &app, files.clone(), &code, load)?;
             let empty = (node::Slots::new(), lower::Hooks::default());
             self.finish_load(
                 vec![vm.clone()],
@@ -5254,17 +4917,12 @@ impl ScriptHost {
         }
     }
 
-    /// The app's packages (`package`), their folders canonical: plugins
-    /// reach none.
-    /// The packages a script requires from: all of them for the app's, the
-    /// ones lent to it (`Capability::Package`) for a plugin.
-    fn packages(&self, plugin: Option<&Grants>) -> Vec<(String, PathBuf)> {
+    /// The packages scripts require from (`package`), their folders
+    /// canonical.
+    fn packages(&self) -> Vec<(String, PathBuf)> {
         self.0
             .packages
             .iter()
-            .filter(|(name, _)| {
-                plugin.is_none_or(|grants| grants.allows(&Capability::Package(name.clone())))
-            })
             .map(|(name, dir)| {
                 let dir = normalize(dir);
                 (name.clone(), dir.canonicalize().unwrap_or(dir))
@@ -5285,17 +4943,13 @@ impl ScriptHost {
         lua: &Lua,
         dir: Option<PathBuf>,
         files: Files,
-        lent_to: Option<(&str, &Grants)>,
+        root_script: bool,
     ) -> mlua::Result<()> {
-        let plugin = lent_to.is_some();
-        let plugin_name: Option<String> = lent_to.map(|(name, _)| name.to_owned());
-        // Every package's name, to tell a plugin which one it wasn't lent.
-        let all_packages: Vec<String> = self.0.packages.iter().map(|(n, _)| n.clone()).collect();
         let host = Rc::downgrade(&self.0);
         let modules: Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>> = Rc::default();
         // A partial reload runs modules again in this VM: it reaches the
         // cache of what they returned.
-        if !plugin
+        if root_script
             && reloads::recording()
             && let Some(tracked) = lua.app_data_ref::<reloads::Tracked>()
         {
@@ -5312,20 +4966,13 @@ impl ScriptHost {
                 && let Some(root) = &root
             {
                 return Err(mlua::Error::runtime(format!(
-                    "{}: `{reserved}` is zgx's own alias (`@app/…` names the app's modules, \
-                     which plugins may override): rename this one",
+                    "{}: `{reserved}` is zgx's own alias (`@app/…` names the root script's \
+                     modules, which scripts may override): rename this one",
                     root.join(".luaurc").display()
                 )));
             }
         }
-        let packages = self.packages(lent_to.map(|(_, grants)| grants));
-        if let Some(plugin) = &plugin_name {
-            self.0.lent.borrow_mut().pending.extend(
-                packages
-                    .iter()
-                    .map(|(package, _)| (plugin.clone(), package.clone(), 0)),
-            );
-        }
+        let packages = self.packages();
         for (name, dir) in &packages {
             if matches!(name.as_str(), "app" | "app-original" | "self") {
                 return Err(mlua::Error::runtime(format!(
@@ -5343,66 +4990,54 @@ impl ScriptHost {
                 )));
             }
         }
+        let app = match root_script {
+            true => None,
+            false => self.app().dir().map(|d| d.canonicalize().unwrap_or(d)),
+        };
         let state = Require {
             host,
             modules,
             root,
+            app,
             aliases,
             packages,
             files,
-            plugin_name,
-            all_packages,
+            recorded: root_script,
         };
-        // Chosen once per VM: the app's resolver has none of lending's
-        // checks compiled in.
-        let require = match plugin {
-            false => lua.create_function(move |lua, name: String| {
-                require_module::<false>(&state, lua, name)
-            })?,
-            true => lua.create_function(move |lua, name: String| {
-                require_module::<true>(&state, lua, name)
-            })?,
-        };
+        let require =
+            lua.create_function(move |lua, name: String| require_module(&state, lua, name))?;
         lua.globals().set("require", require)
     }
 
-    /// Run `script`: the application's, or a `plugin` (sandboxed further:
-    /// only what the host grants it).
-    fn run(&self, script: &Script, plugin: bool) -> Result<Ran, String> {
+    /// Run `script` within `limits`: the root script (`root`, whose view
+    /// mounts), or another the host loads beside it.
+    fn run(&self, script: &Entry, limits: Limits, root: bool) -> Result<Ran, String> {
         let name = script.name();
         let fail = |error: mlua::Error| describe(&name, &error);
-        // A plugin outside the app's bundle reads from the disk.
+        // A script outside the app's bundle reads from the disk.
         let files = match (self.files(), script) {
-            (Files::Bundle(bundle, _), Script::File(path) | Script::Plugin { path, .. })
-                if plugin && !path.starts_with(bundle.root) =>
+            (Files::Bundle(bundle, _), Entry::File(path) | Entry::Named { path, .. })
+                if !root && !path.starts_with(bundle.root) =>
             {
                 Files::Disk
             }
-            (Files::Memory(memory, _), Script::File(path) | Script::Plugin { path, .. })
-                if plugin && !path.starts_with(memory.root_path()) =>
+            (Files::Memory(memory, _), Entry::File(path) | Entry::Named { path, .. })
+                if !root && !path.starts_with(memory.root_path()) =>
             {
                 Files::Disk
             }
-            (Files::Folder(checked, _), Script::File(path) | Script::Plugin { path, .. })
-                if plugin && !path.starts_with(checked.dir()) =>
+            (Files::Folder(checked, _), Entry::File(path) | Entry::Named { path, .. })
+                if !root && !path.starts_with(checked.dir()) =>
             {
                 Files::Disk
             }
             (files, _) => files,
         };
-        let grants = Rc::new(if plugin {
-            let mut granted = self
-                .0
-                .grants
-                .borrow()
-                .get(&name)
-                .cloned()
-                .unwrap_or_default();
-            granted.extend(self.0.all_plugins.borrow().iter().cloned());
-            Grants::Only(granted)
-        } else {
-            Grants::All
-        });
+        if let Entry::Named { name, .. } = script {
+            self.0
+                .persist
+                .adopt(&format!("plugin:{name}"), &script.key());
+        }
         let code = script.code(&files)?;
         #[cfg(all(luau_asserts, not(debug_assertions)))]
         warning(
@@ -5416,13 +5051,8 @@ impl ScriptHost {
         // not, and the VM frees all it holds when the last one goes.
         mlua::pool_pages(zgx::idle::heap_returns_whole_runs());
         let lua = Lua::new().clone();
-        let limits = self.0.limits;
-        let memory = if plugin {
-            let own = self.0.plugin_memory.borrow().get(&name).copied();
-            own.unwrap_or(limits.plugin_memory)
-        } else {
-            limits.memory
-        };
+        // No limit: 0, as Luau and the meter read it.
+        let memory = limits.memory.unwrap_or(0);
         lua.set_memory_limit(memory).map_err(fail)?;
         lua.set_app_data(MemoryLimit(memory));
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
@@ -5441,7 +5071,7 @@ impl ScriptHost {
             interrupt,
             base: script.dir(),
             deadline,
-            budget: limits.call,
+            budget: limits.call_budget(),
             runtime: self.0.runtime.clone(),
             errors: self.0.error.clone(),
             layout_ids: Default::default(),
@@ -5480,29 +5110,19 @@ impl ScriptHost {
             persist: self.0.persist.clone(),
             warnings: self.0.warnings.clone(),
             timers: self.0.timers.clone(),
-            grants: grants.clone(),
-            exposed_actions: self.0.exposed_actions.clone(),
-            exposed_shared: self.0.exposed_shared.clone(),
-            read_only_shared: self.0.read_only_shared.clone(),
-            exposed_hooks: self.0.exposed_hooks.clone(),
+            root,
             owner: name.as_str().into(),
             persist_as: match &script {
-                Script::Plugin { .. } => script.key().into(),
+                Entry::Named { .. } => script.key().into(),
                 _ => name.as_str().into(),
             },
-            meter: plugin.then(|| meter::Meter::new(&lua, memory, watch)),
+            meter: (memory > 0 && limits.count_state)
+                .then(|| meter::Meter::new(&lua, memory, watch)),
             assets: self.0.assets.clone(),
         });
-        // What the host asked of this VM, if anything.
-        if let Some(rules) = rules::of(&self.0) {
-            if plugin {
-                lua.set_app_data(rules::Reserving(rules));
-            } else {
-                lua.set_app_data(rules::Guarded(rules));
-            }
-        }
-        // A plugin always loads again in full: nothing of it recorded.
-        if !plugin && let Some(tracker) = tracking(&self.0) {
+        // A script beside the root always loads again in full: nothing of it
+        // recorded.
+        if root && let Some(tracker) = tracking(&self.0) {
             lua.set_app_data(reloads::Tracked::new(tracker));
         }
         node::install(&lua).map_err(fail)?;
@@ -5551,33 +5171,27 @@ impl ScriptHost {
         // The window's focus with it: a module of its own costs every VM
         // made one more entry, and every name a script reads first one more
         // to pass.
-        let root = self.0.root.clone();
+        let view_root = self.0.root.clone();
         lazy.ui(
             &["window", "window_rect", "windows", "focus_snapshot"],
             move |lua, ui| {
                 windows::install(lua, ui, windows, &shared)?;
-                element::install_focus_snapshot(lua, ui, root)
+                element::install_focus_snapshot(lua, ui, view_root)
             },
         );
-        let may = |capability: Capability| grants.allows(&capability);
-        let fetch = may(Capability::Fetch).then(|| self.0.fetcher.clone());
-        let policy = self.0.fetch_policy.clone();
+        let fetch = self.0.fetcher.clone();
         let actions = self.0.async_actions.clone();
-        let upload_files = may(Capability::Files);
         lazy.ui(
             &["call", "fetch", "resource", "task", "try"],
-            move |lua, ui| calls::install(lua, ui, actions, fetch, policy, upload_files),
+            move |lua, ui| calls::install(lua, ui, actions, fetch),
         );
         lazy.ui(&["paged", "debounced"], paged::install);
-        let connector = may(Capability::Fetch).then(|| self.0.connector.clone());
-        let policy = self.0.fetch_policy.clone();
+        let connector = self.0.connector.clone();
         lazy.ui(&["socket", "sleep"], move |lua, ui| {
-            socket::install(lua, ui, connector, policy)
+            socket::install(lua, ui, connector)
         });
         let (platform, picked) = (self.0.platform.clone(), self.0.picked.clone());
-        let (clipboard, files_allowed) = (may(Capability::Clipboard), may(Capability::Files));
-        let (folders, access) = (may(Capability::Folders), self.0.folders.clone());
-        let fonts = may(Capability::Fonts);
+        let access = self.0.folders.clone();
         lazy.ui(
             &[
                 "badge",
@@ -5593,30 +5207,29 @@ impl ScriptHost {
                 "zip",
             ],
             move |lua, ui| {
-                folder::install(lua, ui, platform.clone(), folders, access)?;
-                io::install(lua, ui, platform, picked, clipboard, files_allowed, fonts)
+                folder::install(lua, ui, platform.clone(), access)?;
+                io::install(lua, ui, platform, picked)
             },
         );
-        // A plugin's lent packages' tokens too: a lent design system themes it.
-        let (dir, packages) = (script.dir(), self.packages(plugin.then_some(&*grants)));
+        // The packages' tokens too: a package's design system themes it.
+        let (dir, packages) = (script.dir(), self.packages());
         lazy.ui(&["prefers", "theme", "tokens"], move |lua, ui| {
             theme::install(lua, ui, dir, packages)
         });
         lazy.ui(&["form"], form::install);
-        lazy.ui(
-            &["decision", "sealed", "plugin_page"],
-            node::install_decisions,
-        );
         lazy.ui(&["modifiers"], modifiers::install);
         lazy.ui(&["editor"], element::install_editor);
         lazy.ui(&["router"], router::install);
         lazy.ui(&["async", "optimistic"], handlers::install);
         let app_actions = self.0.actions.clone();
         lazy.ui(&["actions"], move |lua, ui| {
-            actions::install(lua, ui, app_actions, !plugin)
+            actions::install(lua, ui, app_actions)
         });
-        lazy.ui(&["contribute", "filter", "override"], node::install_plugins);
-        // `ui.selector(text)`: a plugin's target by role or name
+        lazy.ui(
+            &["contribute", "filter", "override"],
+            node::install_composition,
+        );
+        // `ui.selector(text)`: a target by role or name
         // (`'role:button "Save"'`), the text itself at run time; its type
         // tells it from a target the app declares (`zgx types`).
         lazy.ui(&["selector"], |lua, ui| {
@@ -5627,33 +5240,30 @@ impl ScriptHost {
         });
         let opens = self.0.opens.clone();
         lazy.ui(&["args", "on_open"], move |lua, ui| {
-            opens::install(lua, ui, opens, plugin)
+            opens::install(lua, ui, opens)
         });
         lazy.global(&["anime"], |lua, _| anime::api::install(lua));
         #[cfg(feature = "audio")]
         {
-            let (audio, plugin) = (self.0.audio.clone(), plugin.then(|| name.as_str().into()));
+            let (audio, owner): (_, Rc<str>) = (self.0.audio.clone(), name.as_str().into());
+            let voices = limits.voices;
             lazy.global(&["audio"], move |lua, globals| {
-                audio::install(lua, globals, audio, plugin)
+                audio::install(lua, globals, audio, owner, voices)
             });
         }
         // Last: a module's names are looked for in order, and few scripts
         // name these.
         lazy.ui(&["controls", "press", "text_of"], controls::install);
-        self.install_require(
-            &lua,
-            script.dir(),
-            files.clone(),
-            plugin.then_some((&*name, &*grants)),
-        )
-        .map_err(fail)?;
+        self.install_require(&lua, script.dir(), files.clone(), root)
+            .map_err(fail)?;
         lazy::attach(&lua, &ui, lazy).map_err(fail)?;
         ui.set_readonly(true);
         if zgx::clock::is_virtual() {
             on_virtual_clock(&lua).map_err(fail)?;
         }
         lua.sandbox(true).map_err(fail)?;
-        let (root, contributions, hooks) = self.evaluate(&vm, script, files, &code)?;
+        let load = limits.load_budget();
+        let (root, contributions, hooks) = self.evaluate(&vm, script, files, &code, load)?;
         Ok((vm, root, contributions, hooks))
     }
 
@@ -5663,9 +5273,10 @@ impl ScriptHost {
     fn evaluate(
         &self,
         vm: &Rc<Vm>,
-        script: &Script,
+        script: &Entry,
         files: Files,
         code: &[u8],
+        load: Duration,
     ) -> Result<
         (
             Option<Rc<node::Node>>,
@@ -5676,11 +5287,11 @@ impl ScriptHost {
     > {
         let name = &vm.name;
         let fail = |error: mlua::Error| describe(name, &error);
-        let (lua, limits) = (&vm.lua, self.0.limits);
+        let lua = &vm.lua;
         // Building runs untracked: reading state while describing the tree
         // must not subscribe whatever is currently mounting.
         let compiled = match (&files, script) {
-            (Files::Disk, Script::File(path) | Script::Plugin { path, .. }) => self
+            (Files::Disk, Entry::File(path) | Entry::Named { path, .. }) => self
                 .0
                 .sources
                 .compiled(path, code)
@@ -5688,7 +5299,7 @@ impl ScriptHost {
             _ => None,
         };
         let result = self.0.runtime.untracked(|| {
-            vm.guard(limits.load, || {
+            vm.guard(load, || {
                 let loaded = match compiled.as_deref().and_then(sources::Compiled::bytecode) {
                     Some(bytecode) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
                     None => files.chunk(lua.load(code)),
@@ -5724,8 +5335,8 @@ impl ScriptHost {
                 )
             })
             .unwrap_or_default();
-        // A plugin's module overrides, for the app's `require` (the last
-        // plugin's wins, as its `replace` does).
+        // A script's module overrides, for every `require` (the last
+        // script's wins, as its `replace` does).
         let mut gathered = self.0.overrides.borrow_mut();
         for (module, with) in overrides {
             gathered.insert(module, with);
@@ -6185,7 +5796,7 @@ mod budget_tests {
 #[derive(Debug, Clone, Default)]
 #[doc(hidden)]
 pub struct GcVm {
-    /// The VM's name (the app's, or a plugin's).
+    /// The VM's name: its script's.
     pub name: String,
     /// Bytes it held before the collection, garbage included.
     pub before: usize,

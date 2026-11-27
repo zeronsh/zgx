@@ -191,12 +191,14 @@ struct Hosted {
 /// would stall it; a render stalls nothing, and a composition may mount a
 /// whole app (its first build alone takes longer than a window allows a
 /// call), so they are long: what stops a script here is one that never
-/// ends.
+/// ends. The heap is capped (4 GiB); what states hold in Rust isn't
+/// counted, which would weigh every state write.
 pub const RENDER_LIMITS: zgx_script::Limits = zgx_script::Limits {
-    memory: 4 << 30,
-    plugin_memory: 256 << 20,
-    load: std::time::Duration::from_secs(120),
-    call: std::time::Duration::from_secs(60),
+    memory: Some(4 << 30),
+    load: Some(std::time::Duration::from_secs(120)),
+    call: Some(std::time::Duration::from_secs(60)),
+    voices: None,
+    count_state: false,
 };
 
 fn host(

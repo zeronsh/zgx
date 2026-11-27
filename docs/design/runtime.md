@@ -40,7 +40,7 @@ So a Luau change already compiles nothing. The costs are:
 
 Performance stays what it is: the interface is Luau now and stays Luau, the engine's work stays Rust, and an app's own hot code stays Rust, in modules.
 
-Not in scope: moving an app's Rust to Luau, any change to what an app looks like or does, and native modules for third-party plugins. Plugins stay Luau, in their sandbox.
+Not in scope: moving an app's Rust to Luau, any change to what an app looks like or does, and native modules for third-party scripts. Scripts beside the app stay Luau.
 
 ## The parts
 
@@ -84,7 +84,7 @@ mod words {
 }
 ```
 
-Scripts call it as a member of the module's table, typed from its manifest (`ui.module("words").count(text)`), or by name as they call a host's function (`ui.call_sync("words.count", text)`), untyped. To `expose_action`'s rules for plugins, a module's function is a host function.
+Scripts call it as a member of the module's table, typed from its manifest (`ui.module("words").count(text)`), or by name as they call a host's function (`ui.call_sync("words.count", text)`), untyped. Every script reaches it, as every script reaches a host function.
 
 ### Why a C interface
 
@@ -181,7 +181,7 @@ Zeron's host makes 107 actions, 181 async actions, 11 functions and 128 shared s
 
 ### Who may load one
 
-Only the app, by name in its `zgx.json` (in development, by path) or in its bundle's manifest (released, by hash). `ScriptHost::load_module` is `unsafe` and takes a path from Rust. No Luau API loads a library, and a plugin's directory is never searched for one. Third-party plugins stay Luau.
+Only the app, by name in its `zgx.json` (in development, by path) or in its bundle's manifest (released, by hash). `ScriptHost::load_module` is `unsafe` and takes a path from Rust. No Luau API loads a library, and a script's directory is never searched for one. Third-party scripts stay Luau.
 
 ### Failures
 
@@ -278,7 +278,7 @@ The bundle keeps that line where it is:
 
 - **Bytecode is accepted from one place**: the bundle the runtime was started on, the install's own. Each file is read only if its hash is the manifest's, and the manifest only if its signature verifies.
 - **The key that signs it is the app's**, and what vouches for the key is what vouches for the runtime binary itself: on macOS the app's code signature, which covers the runtime, the bundle and the modules together; elsewhere a public key in a file the installer writes beside the runtime. Whoever can replace that file can replace the runtime, so the bundle is trusted exactly as far as the executable is, and no further.
-- **Everything else is source, always**: a plugin's directory, a person's templates or themes, anything an app downloads or writes, `ui.persist`'s data. These load with `Code::Source`, which refuses bytecode, as now. Nothing in a manifest can widen this.
+- **Everything else is source, always**: a script's directory beside the app's, a person's templates or themes, anything an app downloads or writes, `ui.persist`'s data. These load with `Code::Source`, which refuses bytecode, as now. Nothing in a manifest can widen this.
 - **Modules are in the same manifest**, loaded by hash. A library that isn't the one the manifest names doesn't load.
 
 An update is a new bundle, verified whole before it replaces the old one.
@@ -324,7 +324,7 @@ Zeron's host goes past functions and state in six places. The target is a generi
 | What the host does in Rust | What zgx has | What the runtime needs |
 | --- | --- | --- |
 | Opens its windows: which one first, where, with what frame, transparency and blur | `zgx.json`'s window keys; `ui.window` declarations (`follow_windows`, `crates/zgx-run/src/lib.rs`); `ui.args` | The first window chosen by script from `ui.args`; window options for transparency and desktop blur |
-| Draws a bar of its own around the app's view, above anything a plugin opens | `View::top_layer` in Rust; `ui.decision` and `ui.sealed` for regions plugins can't cover | An app-only script root named in `zgx.json`, composed above the app's view in the top layer, in a VM no plugin reaches |
+| Draws a bar of its own around the app's view, above anything a script opens | `View::top_layer` in Rust | A script root named in `zgx.json`, composed above the app's view in the top layer |
 | The application menu and its standard items | `ui.command` (menu items and shortcuts) | The platform's standard menus (About, Services, Window) declared in `zgx.json` |
 | File and folder dialogs | `ui.open_files`, `ui.open_folder`, `ui.save_file` | Nothing |
 | Renders agent visuals offscreen with its own GPU renderer | `ui.shader`, `ui.scene3d`, `ui.render_canvas`; `ScriptHost::image` | Images by name through the module interface (section 2), so a module that renders hands pixels to `ui.image` |
@@ -336,7 +336,7 @@ Zeron's host goes past functions and state in six places. The target is a generi
 - **A `Str` is not an `Rc<str>`** (section 2): Rust that hands a value's string to something wanting an `Rc<str>` copies it.
 - **Size.** Each module carries its own standard library and dependencies. Zeron's small module is 341 KB stripped; one with an app's usual dependencies 4.1 MB (section 4).
 - **Two allocators.** A module frees what it allocates and the runtime what it allocates; values are always the runtime's, so nothing crosses to be freed by the other. A module that wants mimalloc sets it itself.
-- **A module is trusted code.** It runs in the app's process with the app's rights. The sandbox is for scripts and plugins; nothing here extends it to modules, which is why only the app may name one.
+- **A module is trusted code.** It runs in the app's process with the app's rights. A script runs in a Luau VM within its limits; nothing here extends that to modules, which is why only the app may name one.
 - **Signing.** macOS's hardened runtime loads only libraries signed by the app's team (section 6, step 5). Windows and Linux ask nothing.
 - **A panic is caught wherever the runtime calls a module** (section 2), but in a state's `Default`.
 - **The runtime's features are fixed at its build.** An app that needs a feature the published runtime lacks (an audio codec, say) needs another published flavour, or the interim build of section 8.

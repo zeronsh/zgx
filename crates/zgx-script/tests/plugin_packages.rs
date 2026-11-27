@@ -1,15 +1,15 @@
-//! Packages lent to plugins (`Capability::Package`, `grant_all_plugins`):
-//! a plugin requires a lent package's modules into its own VM, with state
-//! of its own; they require only inside lent packages, lend no authority,
-//! and follow the package's files as the app does.
+//! Packages from scripts beside the root: each requires any package's
+//! modules into its own VM, with state of its own; a package's module
+//! requires the other packages and the root script's `@app/…` modules, and
+//! follows the package's files as the root's do.
 mod common;
 use common::Harness;
 use std::path::{Path, PathBuf};
-use zgx_script::{Capability, Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 /// A directory of files, made fresh for one test.
 fn files(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = common::temp_dir_named(&format!("zgx-lent-{}-{name}", std::process::id()));
+    let dir = common::temp_dir_named(&format!("zgx-script-pkg-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (path, code) in files {
         let path = dir.join(path);
@@ -20,7 +20,7 @@ fn files(name: &str, files: &[(&str, &str)]) -> PathBuf {
 }
 
 /// A design system: a badge, a counter module with state, and modules that
-/// reach out of it.
+/// reach another package and the root script's modules.
 fn ds(name: &str) -> PathBuf {
     files(
         &format!("{name}-ds"),
@@ -32,25 +32,16 @@ return function(label) return ui.text { label .. " " .. tone.name } end"#,
             ),
             ("tone.luau", r#"return { name = "calm" }"#),
             ("count.luau", r#"return { n = 0 }"#),
-            (
-                "copy.luau",
-                r#"return function() return pcall(ui.clipboard.write, "x") end"#,
-            ),
             ("to_app.luau", r#"return require("@app/secret")"#),
             ("to_kit.luau", r#"return require("@kit/button")"#),
-            ("to_plugin.luau", r#"return require("../plugin/own")"#),
         ],
     )
 }
 
-fn plugin(dir: &Path, name: &str, code: &str) -> Plugin {
+fn script(dir: &Path, name: &str, code: &str) -> Script {
     let entry = dir.join(format!("{name}.luau"));
     std::fs::write(&entry, code).unwrap();
-    Plugin {
-        name: name.into(),
-        entry,
-        grants: Vec::new(),
-    }
+    Script::file(name, entry)
 }
 
 const APP: &str = r#"
@@ -59,29 +50,32 @@ count.n += 1
 return ui.column { id = "app", ui.text { id = "mine", "app " .. count.n } }
 "#;
 
-/// An app with `@ds` and `@kit`, and the plugins `make` gives, `@ds` lent
-/// to every plugin.
-fn host(name: &str, make: impl FnOnce(&Path) -> Vec<Plugin> + 'static) -> Harness {
+/// An app with `@ds` and `@kit` and a module of its own, `@app/secret`, and
+/// the scripts `make` gives beside it.
+fn host(name: &str, make: impl FnOnce(&Path) -> Vec<Script> + 'static) -> Harness {
     let ds = ds(name);
     let kit = files(
         &format!("{name}-kit"),
         &[("button.luau", r#"return "button""#)],
     );
-    let app = files(&format!("{name}-app"), &[("app.luau", APP)]).join("app.luau");
-    let dir = files(&format!("{name}-plugins"), &[]);
+    let app = files(
+        &format!("{name}-app"),
+        &[("app.luau", APP), ("secret.luau", r#"return "secret""#)],
+    )
+    .join("app.luau");
+    let dir = files(&format!("{name}-scripts"), &[]);
     Harness::new(move |runtime| {
         let host = ScriptHost::new(runtime, &app)
             .package("ds", &ds)
-            .package("kit", &kit)
-            .grant_all_plugins(Capability::Package("ds".into()));
-        host.set_plugins(make(&dir));
+            .package("kit", &kit);
+        host.set_scripts(make(&dir));
         host
     })
 }
 
 #[test]
-fn a_lent_package_is_required_into_each_plugins_own_vm() {
-    let mut h = host("lent", |dir| {
+fn a_package_is_required_into_each_scripts_own_vm() {
+    let mut h = host("vms", |dir| {
         let code = |n| {
             format!(
                 r##"local badge, count = require("@ds/badge"), require("@ds/count")
@@ -89,7 +83,7 @@ count.n += 1
 ui.contribute {{ target = "#mine", after = ui.column {{ badge("p{n} " .. count.n) }} }}"##
             )
         };
-        vec![plugin(dir, "one", &code(1)), plugin(dir, "two", &code(2))]
+        vec![script(dir, "one", &code(1)), script(dir, "two", &code(2))]
     });
     h.frames(1);
     assert_eq!(h.error(), None);
@@ -97,67 +91,29 @@ ui.contribute {{ target = "#mine", after = ui.column {{ badge("p{n} " .. count.n
     assert_eq!(h.texts(), ["app 1", "p1 1 calm", "p2 1 calm"]);
 }
 
+/// A script requires every package, and a package's module requires the
+/// others and the root script's modules: nothing is lent.
 #[test]
-fn an_unlent_package_or_the_apps_modules_say_what_is_missing() {
-    for (name, code, says) in [
-        (
-            "unlent",
-            r#"require("@kit/button")"#,
-            "package `@kit` isn't lent to plugin `p`: the host lends it with \
-             Capability::Package(\"kit\")",
-        ),
-        (
-            "from-ds",
-            r#"require("@ds/to_kit")"#,
-            "package `@kit` isn't lent to plugin `p`",
-        ),
-        (
-            "to-app",
-            r#"require("@ds/to_app")"#,
-            "`@app/…` names the app's modules",
-        ),
-        (
-            "to-plugin",
-            r#"require("@ds/to_plugin")"#,
-            "a module of package `@ds` requires only inside it",
-        ),
-    ] {
-        let mut h = host(name, move |dir| {
-            std::fs::create_dir_all(dir.join("plugin")).unwrap();
-            std::fs::write(dir.join("plugin/own.luau"), "return 1").unwrap();
-            vec![plugin(dir, "p", code)]
-        });
-        h.frames(1);
-        let error = h.error().unwrap_or_default();
-        assert!(error.contains(says), "{name}: {error}");
-        assert_eq!(h.text("mine"), "app 1", "{name}: the app runs");
-    }
-}
-
-#[test]
-fn a_lent_module_has_only_the_plugins_authority() {
-    let mut h = host("authority", |dir| {
-        vec![plugin(
+fn a_script_requires_every_package_and_the_roots_modules() {
+    let mut h = host("reach", |dir| {
+        vec![script(
             dir,
             "p",
-            r##"local copy = require("@ds/copy")
-local ok, err = copy()
-ui.contribute { target = "#mine", after = ui.text { id = "said", ok and "copied" or tostring(err) } }"##,
+            r##"local said = require("@kit/button") .. " " .. require("@ds/to_kit") .. " "
+    .. require("@ds/to_app") .. " " .. require("@app/secret")
+ui.contribute { target = "#mine", after = ui.text { id = "said", said } }"##,
         )]
     });
     h.frames(1);
     assert_eq!(h.error(), None);
-    let said = h.text("said");
-    assert!(
-        said.contains("Clipboard"),
-        "denied by the plugin's grants: {said}"
-    );
+    assert_eq!(h.text("said"), "button button secret secret");
+    assert_eq!(h.text("mine"), "app 1", "the root runs");
 }
 
 #[test]
-fn an_edit_to_a_lent_package_reaches_its_plugins() {
+fn an_edit_to_a_package_reaches_the_scripts_using_it() {
     let mut h = host("edit", |dir| {
-        vec![plugin(
+        vec![script(
             dir,
             "p",
             r##"local badge = require("@ds/badge")
@@ -166,8 +122,10 @@ ui.contribute { target = "#mine", after = ui.column { badge("p") } }"##,
     });
     h.frames(1);
     assert_eq!(h.texts(), ["app 1", "p calm"]);
-    let tone =
-        std::env::temp_dir().join(format!("zgx-lent-{}-edit-ds/tone.luau", std::process::id()));
+    let tone = std::env::temp_dir().join(format!(
+        "zgx-script-pkg-{}-edit-ds/tone.luau",
+        std::process::id()
+    ));
     // A later modification time, as an editor's save gives.
     std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::write(&tone, r#"return { name = "bright" }"#).unwrap();
@@ -175,48 +133,4 @@ ui.contribute { target = "#mine", after = ui.column { badge("p") } }"##,
     h.frames(1);
     assert_eq!(h.error(), None);
     assert_eq!(h.texts(), ["app 1", "p bright"]);
-}
-
-#[test]
-fn contributions_list_what_each_plugin_was_lent() {
-    let h = host("listed", |dir| {
-        vec![plugin(dir, "p", r#"local badge = require("@ds/badge")"#)]
-    });
-    h.frames(1);
-    let lent: Vec<_> = h
-        .host
-        .contributions()
-        .into_iter()
-        .filter(|r| r.place == "package")
-        .map(|r| (r.plugin, r.target, r.matches))
-        .collect();
-    // `matches`: the modules it required from it (badge and tone).
-    assert_eq!(lent, [("p".to_string(), "@ds".to_string(), 2)]);
-}
-
-#[test]
-fn a_lent_module_compiles_once_for_every_plugin() {
-    let mut h = host("once", |dir| {
-        (1..=10)
-            .map(|n| {
-                plugin(
-                    dir,
-                    &format!("p{n}"),
-                    &format!(
-                        r##"local badge = require("@ds/badge")
-ui.contribute {{ target = "#mine", after = ui.column {{ badge("p{n}") }} }}"##
-                    ),
-                )
-            })
-            .collect()
-    });
-    h.frames(1);
-    assert_eq!(h.error(), None);
-    assert_eq!(h.texts().len(), 11);
-    // badge and tone, once each, for ten plugin VMs.
-    assert_eq!(h.host.lent_compiles(), 2);
-    // A reload finds them compiled still.
-    h.host.reload().unwrap();
-    h.frames(1);
-    assert_eq!(h.host.lent_compiles(), 2);
 }

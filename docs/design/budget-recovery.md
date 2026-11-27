@@ -1,7 +1,7 @@
 # Recovering a Luau call stopped by its time budget
 
 Status: design only (internal). Nothing here is built. Asked by the Plugin
-Store: an untrusted plugin rendering a 64 KiB README as markdown ran one
+Store: a plugin rendering a 64 KiB README as markdown ran one
 build call past the 50 ms release budget, and wanted to catch the stop and
 draw the text plain instead.
 
@@ -16,8 +16,8 @@ That is correct: any recovery inside the same call is more script time
 past `B`. A runaway is stopped within `B`, the watchdog's wake-up and 64
 interrupts.
 
-Plugins are untrusted, so whatever recovers must keep a fixed bound on how
-far a script can run past its budget.
+A call budget (`Limits::call`) is a bound the host chose, so whatever
+recovers must keep a fixed bound on how far a script can run past it.
 
 ## (a) A one-time grace for the call that caught the stop
 
@@ -27,7 +27,7 @@ never renewed; then stops are final, as today.
 - **Bound:** `B + G` plus the watchdog's wake-up and 64 interrupts. A loop
   of `pcall` and work cannot extend it: the grace is the outermost call's,
   spent once.
-- **But:** every plugin can take `G` on purpose (pcall a runaway, then
+- **But:** every script can take `G` on purpose (pcall a runaway, then
   spend the grace), so it is a bigger budget for all scripts. The handler's
   fallback must also fit in `G`, which "draw it plain" may not for a large
   document. And it changes what the budget means everywhere.
@@ -56,14 +56,14 @@ boundaries and their parent share one per-frame script budget (`B_frame`),
 so N boundaries cannot multiply it. A fallback is never itself a
 boundary's build, so nothing nests to extend time. The worst case per frame
 is `B_frame` plus the watchdog's wake-up and 64 interrupts: today's bound,
-with no extra time for untrusted code.
+with no extra time for any script.
 
 It fits the README case: the plain text is built cheaply up front, and the
-markdown build stops at its slice without the plugin's own `pcall`.
+markdown build stops at its slice without the script's own `pcall`.
 
 ## Decision
 
-(b): its bound is today's, and the fallback is data. (a) gives every plugin
+(b): its bound is today's, and the fallback is data. (a) gives every script
 `G` more by design.
 
 What (b) costs, when it is built:

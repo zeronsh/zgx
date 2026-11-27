@@ -936,7 +936,7 @@ enum Rendered {
 /// drawing is what a `ui.canvas` given that `draw` shows: its shapes and
 /// text in the same layers, clips and transforms, `x`, `y` at the
 /// picture's top left. No window shows
-/// it, so it works with none showing (a plugin's tool, an export). It draws
+/// it, so it works with none showing (a script's tool, an export). It draws
 /// now; the pixels and the PNG are made on a thread of their own.
 fn render_canvas(
     lua: &Lua,
@@ -950,11 +950,7 @@ fn render_canvas(
     let target = match options.get::<mlua::Value>("file")? {
         mlua::Value::Nil => None,
         file => {
-            if !env.grants.allows(&crate::Capability::Files) {
-                return Err(crate::io::denied("ui.render_canvas { file }", "Files"));
-            }
             let path = crate::io::chosen(&env.picked, &file, "ui.render_canvas")?;
-            crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
             Some(path)
         }
     };

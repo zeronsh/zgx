@@ -1,5 +1,5 @@
--- The app's row with a badge on what is done. It runs as the app's code,
--- so it reaches the original (`@app-original/…`) and the app's package.
+-- The app's row with a badge on what is done. It runs in the app's VM, and
+-- reaches the original (`@app-original/…`) and the app's package.
 local original = require("@app-original/components/task_row")
 local kit = require("@kit/badge")
 

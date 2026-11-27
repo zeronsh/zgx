@@ -4,7 +4,7 @@
 mod common;
 use common::Harness;
 use std::time::{Duration, Instant};
-use zgx_script::{ScriptHost, Value};
+use zgx_script::{Script, ScriptHost, Value};
 
 const APP: &str = r#"
 local result = ui.state("result", "")
@@ -441,44 +441,31 @@ fn without_a_fetcher_fetch_says_so() {
     assert!(error.contains("the host has no fetcher"), "{error}");
 }
 
-const PLUGIN_APP: &str =
+const BESIDE_APP: &str =
     r#"return ui.column { ui.text { "app", id = "app" }, ui.slot("bar", { id = "bar" }) }"#;
-const FETCHING_PLUGIN: &str = r#"
+const FETCHING_SCRIPT: &str = r#"
 local seen = ui.state("seen", "")
 ui.fetch("https://api.test/user"):after(function(r) seen:set(r.json.name) end)
-ui.contribute("bar", ui.text { id = "plugin", function() return seen:get() end })
+ui.contribute("bar", ui.text { id = "beside", function() return seen:get() end })
 "#;
 
 #[test]
-fn a_plugin_fetches_only_if_granted() {
+fn a_script_beside_the_root_fetches() {
     let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::inline(runtime, "app", PLUGIN_APP)
-            .plugin("fetcher.luau", FETCHING_PLUGIN)
-            .grant("fetcher.luau", zgx_script::Capability::Fetch);
+        let host = ScriptHost::inline(runtime, "app", BESIDE_APP);
+        host.set_scripts(vec![Script::code("fetcher.luau", FETCHING_SCRIPT)]);
         fetching(&host);
         host
     });
-    wait_for(&mut h, "plugin", "Ada");
-
-    let mut h = Harness::new(|runtime| {
-        let host =
-            ScriptHost::inline(runtime, "app", PLUGIN_APP).plugin("fetcher.luau", FETCHING_PLUGIN);
-        fetching(&host);
-        host
-    });
-    let error = h.host.error().get().unwrap_or_default();
-    assert!(error.contains("only if the host grants it"), "{error}");
-    // Left out, not the app.
-    assert_eq!(h.text("app"), "app");
-    assert!(h.find("plugin").is_none());
+    wait_for(&mut h, "beside", "Ada");
+    assert_eq!(h.host.error().get(), None);
 }
 
+/// `Body::script` names the script that made a request, a `ui.fetch` or a
+/// remote picture, the root script's included.
 #[test]
-fn a_transport_hears_who_asked_and_the_hosts_policy() {
-    struct Open;
-    impl zgx_script::FetchPolicy for Open {}
-
-    type Asked = (String, Option<String>, bool);
+fn a_transport_hears_which_script_asked() {
+    type Asked = (String, Option<String>);
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Asked>::new()));
     let log = asked.clone();
     let h = Harness::new(move |runtime| {
@@ -492,23 +479,18 @@ fn a_transport_hears_who_asked_and_the_hosts_policy() {
                 ui.slot("bar"),
             }
             "#,
-        )
-        .plugin(
+        );
+        host.set_scripts(vec![Script::code(
             "fetcher.luau",
             r#"
-            ui.fetch("https://api.test/plugin")
-            ui.contribute("bar", ui.image { src = "https://img.test/plugin.png", w = 20, h = 20 })
+            ui.fetch("https://api.test/beside")
+            ui.contribute("bar", ui.image { src = "https://img.test/beside.png", w = 20, h = 20 })
             "#,
-        )
-        .grant("fetcher.luau", zgx_script::Capability::Fetch);
-        host.fetch_policy(Open);
+        )]);
         let log = log.clone();
         host.streaming_fetcher(move |request, body| {
-            log.borrow_mut().push((
-                request.url,
-                body.caller().map(str::to_owned),
-                body.fetch_policy().is_some(),
-            ));
+            log.borrow_mut()
+                .push((request.url, body.script().map(str::to_owned)));
             async { Err("nothing here".to_string()) }
         });
         host
@@ -521,32 +503,94 @@ fn a_transport_hears_who_asked_and_the_hosts_policy() {
     }
     let mut asked = asked.borrow().clone();
     asked.sort();
-    let plugin = Some("fetcher.luau".to_string());
+    let (app, beside) = (Some("app".to_string()), Some("fetcher.luau".to_string()));
     assert_eq!(
         asked,
         [
-            ("https://api.test/app".to_string(), None, true),
-            ("https://api.test/plugin".to_string(), plugin.clone(), true),
-            ("https://img.test/app.png".to_string(), None, true),
-            ("https://img.test/plugin.png".to_string(), plugin, true),
+            ("https://api.test/app".to_string(), app.clone()),
+            ("https://api.test/beside".to_string(), beside.clone()),
+            ("https://img.test/app.png".to_string(), app),
+            ("https://img.test/beside.png".to_string(), beside),
         ]
     );
 }
 
 #[test]
-fn a_broken_plugin_is_left_out_and_the_rest_loads() {
+fn a_broken_script_is_left_out_and_the_rest_loads() {
     let mut h = Harness::new(|runtime| {
-        ScriptHost::inline(runtime, "app", PLUGIN_APP)
-            .plugin("broken.luau", "error('plugin bug')")
-            .plugin(
+        let host = ScriptHost::inline(runtime, "app", BESIDE_APP);
+        host.set_scripts(vec![
+            Script::code("broken.luau", "error('script bug')"),
+            Script::code(
                 "fine.luau",
                 r#"ui.contribute("bar", ui.text { "fine", id = "fine" })"#,
-            )
+            ),
+        ]);
+        host
     });
     assert_eq!(h.text("app"), "app");
     assert_eq!(h.text("fine"), "fine");
     let error = h.host.error().get().unwrap_or_default();
-    assert!(error.contains("plugin bug"), "{error}");
+    assert!(error.contains("script bug"), "{error}");
+}
+
+/// A host function (`ui.call_sync`) and an async action as it starts
+/// (`ui.call`) read which script calls them, each call its own.
+#[test]
+fn a_host_function_and_async_action_read_the_calling_script() {
+    let heard: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+    let mut h = Harness::new({
+        let heard = heard.clone();
+        move |runtime| {
+            let host = ScriptHost::inline(
+                runtime,
+                "app",
+                r#"local said = ui.state("said", "")
+                return ui.column {
+                    ui.button { id = "root", w = 40, h = 20, "r", on_click = function()
+                        said:set(ui.call_sync("who"))
+                    end },
+                    ui.text { id = "said", function() return said:get() end },
+                    ui.slot("bar", { id = "bar" }),
+                }"#,
+            );
+            let asking = host.clone();
+            host.function("who", move |_| {
+                Value::from(asking.calling_script().as_deref().unwrap_or("none"))
+            });
+            let asking = host.clone();
+            let log = heard.clone();
+            host.async_action("log", move |_| {
+                log.borrow_mut().push(
+                    asking
+                        .calling_script()
+                        .map_or("none".into(), |name| name.to_string()),
+                );
+                async { Ok(Value::Nil) }
+            });
+            host.set_scripts(vec![Script::code(
+                "other",
+                r#"local said = ui.state("other_said", "")
+                ui.contribute("bar", ui.column {
+                    ui.button { id = "other", w = 40, h = 20, "o", on_click = function()
+                        said:set(ui.call_sync("who"))
+                        ui.call("log")
+                    end },
+                    ui.text { id = "other-said", function() return said:get() end },
+                })"#,
+            )]);
+            host
+        }
+    });
+    h.click("other");
+    h.settle();
+    h.click("root");
+    h.settle();
+    assert_eq!(h.text("other-said"), "other");
+    assert_eq!(h.text("said"), "app");
+    assert_eq!(*heard.borrow(), ["other"]);
+    assert_eq!(h.host.calling_script(), None, "no call under way");
+    assert_eq!(h.host.error().get(), None);
 }
 
 /// A 2×2 PNG.
@@ -916,116 +960,6 @@ fn remote_images_tell_whether_they_came() {
         "{heard}"
     );
     assert_eq!(h.host.error().get(), None);
-}
-
-/// An app showing a picture, once `show` is clicked or from the start, and
-/// a plugin showing the same one; a transport refusing the plugin's request
-/// after `refused_after`, each ask's caller in the log.
-fn refused_plugin_image(
-    shown: bool,
-    refused_after: Duration,
-    asked: std::rc::Rc<std::cell::RefCell<Vec<Option<String>>>>,
-) -> Harness {
-    Harness::new(move |runtime| {
-        let host = ScriptHost::inline(
-            runtime,
-            "app",
-            format!(
-                r#"local shown = ui.state("shown", {shown})
-                local loaded = ui.state("loaded", "")
-                return ui.column {{
-                    ui.button {{ id = "show", on_click = function() shown:set(true) end, "s" }},
-                    ui.slot("bar"),
-                    ui.show(shown, ui.image {{ src = "https://img.test/shared.png", w = 20, h = 20,
-                        on_load = function(size) loaded:set(`{{size.w}}`) end }}),
-                    ui.text {{ id = "loaded", function() return loaded:get() end }},
-                }}"#
-            ),
-        )
-        .plugin(
-            "pics.luau",
-            r#"local why = ui.state("why", "")
-            ui.contribute("bar", ui.column {
-                ui.image { src = "https://img.test/shared.png", w = 20, h = 20,
-                    on_error = function(e) why:set(e) end },
-                ui.text { id = "why", function() return why:get() end },
-            })"#,
-        )
-        .grant("pics.luau", zgx_script::Capability::Fetch);
-        host.streaming_fetcher(move |_, body| {
-            let caller = body.caller().map(str::to_owned);
-            asked.borrow_mut().push(caller.clone());
-            async move {
-                if caller.is_some() {
-                    zgx::timer::sleep(refused_after).await;
-                    return Err("not for plugins".to_string());
-                }
-                zgx::timer::sleep(Duration::from_millis(2)).await;
-                Ok(zgx_script::Response {
-                    status: 200,
-                    headers: vec![],
-                    body: PNG.to_vec(),
-                })
-            }
-        });
-        host
-    })
-}
-
-/// Settle until `done`, for less than the five seconds of a failure's backoff.
-fn within_a_backoff(h: &mut Harness, done: impl Fn(&mut Harness) -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !done(h) && Instant::now() < deadline {
-        h.settle();
-        h.ui.prepare_frame();
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    done(h)
-}
-
-#[test]
-fn a_plugins_refused_image_leaves_the_app_loading_it_at_once() {
-    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut h = refused_plugin_image(false, Duration::from_millis(2), asked.clone());
-    assert!(within_a_backoff(&mut h, |h| !h.text("why").is_empty()));
-    // The refusal is the plugin's, and says why.
-    assert!(
-        h.text("why").contains("not for plugins"),
-        "{}",
-        h.text("why")
-    );
-    let plugin = Some("pics.luau".to_string());
-    assert_eq!(*asked.borrow(), std::slice::from_ref(&plugin));
-
-    // The app shows the same URL: asked at once, not held to the plugin's backoff.
-    h.click("show");
-    h.settle();
-    assert_eq!(*asked.borrow(), [plugin.clone(), None]);
-    assert!(
-        within_a_backoff(&mut h, |h| h.text("loaded") == "2"),
-        "the app's picture: {:?}",
-        h.text("loaded")
-    );
-    assert_eq!(*asked.borrow(), [plugin, None], "no one else asks again");
-}
-
-#[test]
-fn a_plugins_request_on_its_way_does_not_hold_up_the_apps() {
-    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    // Refused long after the app's picture has come, whichever asked first.
-    let mut h = refused_plugin_image(true, Duration::from_secs(30), asked.clone());
-    assert!(
-        within_a_backoff(&mut h, |h| h.text("loaded") == "2"),
-        "the app's picture: {:?}",
-        h.text("loaded")
-    );
-    let mut asked = asked.borrow().clone();
-    asked.sort();
-    assert_eq!(
-        asked,
-        [None, Some("pics.luau".to_string())],
-        "each asks for itself: the policy hears the plugin's request"
-    );
 }
 
 #[test]

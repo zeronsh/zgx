@@ -1,14 +1,12 @@
--- Tasks, made to be extended: plugins (in plugins/) add to it, filter it
--- and replace parts of it without the app preparing a slot for each. What
--- the app offers them:
+-- Tasks, made to be extended: plugins (in plugins/), each a script of its
+-- own, add to it, filter it and replace parts of it without the app
+-- preparing a slot for each. What the app offers them:
 -- - every `id` is a target; `hook = "toolbar.add"` is one it promises
 --   to keep across versions;
--- - `hook = false` keeps the Clear button out of every plugin's reach;
--- - `tasks` is shared state the host exposes to plugins read only, and
---   `complete` and `clear_done` are host actions, so plugins see the list
---   and change it only through what the host lets them;
--- - rows come from `@app/components/task_row`, a module a trusted plugin
---   may replace.
+-- - `tasks` is shared state and `complete` and `clear_done` are host
+--   actions, which every script reaches;
+-- - rows come from `@app/components/task_row`, a module a plugin may
+--   replace.
 local row = require("@app/components/task_row")
 local kit = require("@kit/badge")
 
@@ -40,7 +38,7 @@ return ui.column {
 		end),
 		ui.div { grow = 1 },
 		ui.button { id = "add", hook = "toolbar.add", "Add", on_click = add },
-		ui.button { id = "clear", hook = false, "Clear done", on_click = ui.action("clear_done") },
+		ui.button { id = "clear", "Clear done", on_click = ui.action("clear_done") },
 	},
 	ui.column {
 		id = "body",

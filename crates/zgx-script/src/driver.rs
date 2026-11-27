@@ -15,7 +15,7 @@
 //! - `@12`: a node by its number, as [`tree`] shows it (stable while the
 //!   node lives);
 //! - `hook:toolbar.save`: an element the app declared a hook (`hook =
-//!   "toolbar.save"`), for plugins (`ui.contribute { target }`);
+//!   "toolbar.save"`), for scripts (`ui.contribute { target }`);
 //! - parts together narrow (`role:button "Send"`), `>>` looks inside what
 //!   is before it (`#sidebar >> "Inbox"`), `row 3` is a list's third row
 //!   (`#messages row 3`), and `[2]` picks the second of several matches.
@@ -99,7 +99,7 @@ struct Part {
     /// `~"part"`: what its label or text holds, anywhere in it.
     holding: Option<String>,
     role: Option<String>,
-    /// `.name`: classes it has, all of them (plugin targets only).
+    /// `.name`: classes it has, all of them (script targets only).
     classes: Vec<String>,
     number: Option<u32>,
     row: Option<usize>,
@@ -204,7 +204,7 @@ pub fn parse(text: &str) -> Result<Target, String> {
     Ok(Target(parts))
 }
 
-/// What a plugin's contribution targets (`ui.contribute { target }`): a
+/// What a script's contribution targets (`ui.contribute { target }`): a
 /// target's static parts, matched against an element as the interface is
 /// built, not against the scene. An id, a declared hook, a role, classes,
 /// a name (its label, or its text as written); together they narrow.
@@ -232,7 +232,7 @@ impl Static {
                 || part.holding.is_some()
             {
                 return Err(format!(
-                    "`{text}`: a plugin's target is matched as the interface is built: \
+                    "`{text}`: a script's target is matched as the interface is built: \
                      an id, `hook:`, `role:`, `.class` or a name, not `@n`, `row` or `[n]`"
                 ));
             }
@@ -465,7 +465,7 @@ pub fn find_all(ui: &Ui, handle: &ViewHandle, target: &Target) -> Result<Vec<Nod
             };
             if let Some(hook) = &part.hook {
                 return Err(format!(
-                    "`hook:{hook}` names a plugin hook; target the element by its id or name"
+                    "`hook:{hook}` names a point scripts add at; target the element by its id or name"
                 ));
             }
 

@@ -20,7 +20,7 @@ mod session;
 
 use std::{path::Path, time::Duration};
 use zgx_desktop::{Application, FontData, Glass, Titlebar, WindowOptions};
-use zgx_script::{Capability, ScriptHost, Value};
+use zgx_script::{ScriptHost, Value};
 
 const TITLE: &str = "Terminal";
 const WIDTH: f64 = 1180.;
@@ -206,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let found = plugins::find();
             listed.set(plugins::published(&found));
             let running = plugins::enabled(&found);
-            host.set_plugins(running.clone());
+            host.set_scripts(running.clone());
             let (rescan, mut rescans) = zgx::task::latest::<()>();
             {
                 let host = host.clone();
@@ -218,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let now = plugins::enabled(&found);
                         if now != running {
                             running = now;
-                            host.set_plugins(running.clone());
+                            host.set_scripts(running.clone());
                             let _ = host.reload();
                         }
                     }
@@ -241,10 +241,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .arg(plugins::dir())
                     .spawn();
             });
-            // What plugins reach: the agents list with `terminals` (as
-            // `ui.term` is), the network with `network`; nothing else of
-            // the app's.
-            host.expose_shared("agents", Some(Capability::Terminals));
             host.fetcher(|request| {
                 let (answer, mut answered) = zgx::task::latest();
                 std::thread::spawn(move || answer.send(plugins::fetch(&request)));

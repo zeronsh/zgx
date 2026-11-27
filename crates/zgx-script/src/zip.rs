@@ -1,6 +1,6 @@
 //! `ui.zip(file)`: a `.zip` written into a file the user picked
 //! (`ui.save_file`), one entry at a time, so a script never holds the whole
-//! archive (a plugin's memory is capped):
+//! archive (a script's memory is capped):
 //!
 //! ```luau
 //! local z = ui.zip(file)

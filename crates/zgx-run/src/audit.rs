@@ -76,7 +76,10 @@ fn start(script: &Path) -> Result<(TestApp, zgx::inspect::Inspector), String> {
     let given = (inspector.clone(), desktop.clone());
     let script = script.to_path_buf();
     let mut app = TestApp::wrapped(
-        move |runtime| app_host.apply(ScriptHost::new(runtime, script)),
+        move |runtime| {
+            app_host
+                .apply(ScriptHost::new(runtime, script).limits(zgx_script::Limits::app_budgets()))
+        },
         move |view| {
             let (inspector, desktop) = given;
             provide(

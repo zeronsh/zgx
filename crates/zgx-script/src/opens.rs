@@ -89,20 +89,14 @@ fn event(files: &[PathBuf], urls: &[String]) -> Value {
     )
 }
 
-/// Installs `ui.args` and `ui.on_open` (a plugin's `ui.on_open` is an
-/// error: what the system opens is the app's).
-pub(crate) fn install(lua: &Lua, ui: &Table, opens: Rc<Opens>, plugin: bool) -> mlua::Result<()> {
+/// Installs `ui.args` and `ui.on_open`.
+pub(crate) fn install(lua: &Lua, ui: &Table, opens: Rc<Opens>) -> mlua::Result<()> {
     let args = lua.create_sequence_from(opens.args.borrow().iter().cloned())?;
     args.set_readonly(true);
     ui.set("args", args)?;
     ui.set(
         "on_open",
         lua.create_function(move |lua, handler: Function| {
-            if plugin {
-                return Err(mlua::Error::runtime(
-                    "ui.on_open is the app's: a plugin is not handed the files the system opens",
-                ));
-            }
             crate::reloads::top_level(lua, "ui.on_open");
             let vm = crate::node::env(lua)?.vm.clone();
             opens.handlers.borrow_mut().push((vm, handler));

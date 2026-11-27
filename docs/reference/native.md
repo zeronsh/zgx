@@ -316,8 +316,6 @@ Each platform shows them its own way, and needs the app to say who it is:
 | Windows | A toast, for the app's AppUserModelID: its `application_id` (`Application::application_id`, `zgx.json`'s `application_id`). Without one, `"unsupported"`. The first notification sets it as the process's AppUserModelID and registers it for the user, as an unpackaged app's toasts need: the key `HKEY_CURRENT_USER\Software\Classes\AppUserModelId\<application_id>` with a `DisplayName` value, the executable's name, which the toast shows as its sender. Nothing else is written, and nothing needs administrator rights. | An overlay on the taskbar button (`ITaskbarList3::SetOverlayIcon`): a red disc with the count (`9+` past 99), a plain disc for text, described to screen readers as "3 unread" (or the text). |
 | Linux | The desktop's notification server (`org.freedesktop.Notifications` on the session bus); none running gets `"unsupported"`. | The count docks read from a launcher entry (Dash to Dock, KDE's task manager, Plank), matched to the app's desktop file (`Application::desktop_id`, else `application_id`). |
 
-A plugin can do neither: they are the app's.
-
 ```lua
 local unread = ui.state("unread", 0)
 local function arrived(from: string, text: string)
@@ -358,9 +356,7 @@ ui.text_of(handle: number, cap: number?) -> string
 
 `ui.text_of(handle, cap)` is the text the control shows, its texts a word apart, at most `cap` characters (400 if not given), leaving out what is hidden from assistive technology or does not show: a dialog's, say, to send as a notice. `""` once the control is gone.
 
-A Rust host gives the window with `ScriptHost::window_controls(&ui)` (`zgx-run` does); without one they do nothing (`{}`, false and `""`). They are the app's own: a plugin that calls one gets an error.
-
-Under a host's guard (`ScriptHost::guard`: a template previewed), a script's reach is its own view: `ui.controls` lists only what it mounted, its popups, menus and dialogs with it, not a control the host draws beside it or a `ui.host_view`'s. `ui.press` and `ui.text_of` of any other control are errors that say so, `ui.text_of` leaves out a host view inside what it reads, and a press whose middle lies over a host view does nothing. The guard is not asked: a host that wrote one before needs no new answer. With no view mounted in the window, nothing is listed.
+A Rust host gives the window with `ScriptHost::window_controls(&ui)` (`zgx-run` does); without one they do nothing (`{}`, false and `""`).
 
 ## Example
 

@@ -1,9 +1,9 @@
-//! What plugins add before or after a list row's root: drawn a row each,
-//! keyed with the row (it follows a reorder and goes with a removal), and
-//! reading what the row provides, live.
+//! What scripts beside the root add before or after a list row's root:
+//! drawn a row each, keyed with the row (it follows a reorder and goes with
+//! a removal), and reading what the row provides, live.
 mod common;
 use common::Harness;
-use zgx_script::{Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 fn with(test: &str, app: &'static str, code: &str) -> Harness {
     let dir = common::temp_dir(&format!("rows-{test}"));
@@ -12,11 +12,7 @@ fn with(test: &str, app: &'static str, code: &str) -> Harness {
     std::fs::write(&entry, code).unwrap();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", app);
-        host.set_plugins(vec![Plugin {
-            name: "marks".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("marks", entry)]);
         host
     })
 }
@@ -48,7 +44,7 @@ return ui.column {
 }
 "##;
 
-const PLUGIN: &str = r##"
+const MARKS: &str = r##"
 local Badge = ui.component(function()
     local row = ui.use_context("row")
     return ui.text { function() return `[{row:get().title}]` end }
@@ -63,7 +59,7 @@ fn shown(h: &mut Harness) -> Vec<String> {
 
 #[test]
 fn a_row_contribution_follows_its_row_and_reads_it_live() {
-    let mut h = with("rows", APP, PLUGIN);
+    let mut h = with("rows", APP, MARKS);
     assert_eq!(
         shown(&mut h),
         ["Alpha", "[Alpha]", "Beta", "[Beta]", "Gamma", "[Gamma]"],

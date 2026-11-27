@@ -6,9 +6,9 @@
 //! [`crate::ScriptHost::run_command`]. Menus reach the app wherever focus is,
 //! a terminal or a web page included.
 //!
-//! A plugin's commands are its own: their ids are `<plugin>/<id>`, and a
-//! shortcut the app's commands (or an earlier plugin's) have stays theirs,
-//! so a plugin neither replaces nor breaks the app's ⌘C.
+//! Every script's commands share one list, their ids too. A shortcut the
+//! root script's commands (or an earlier script's) have stays theirs, so the
+//! menu bar never has a key twice.
 use crate::{Vm, node::env};
 use mlua::{Function, Lua, Table};
 use std::{
@@ -37,25 +37,27 @@ pub struct Command {
 /// A command's shortcut zgx dropped because a command declared before it
 /// holds the same one (`Shift+Cmd+D` is `cmd+shift+d`), as
 /// `ScriptHost::dropped_shortcuts` reports it: the command stays, without
-/// the key, so the app can tell the plugin's author (or the person
+/// the key, so the app can tell the script's author (or the person
 /// rebinding) why.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct DroppedShortcut {
-    /// The plugin whose command lost the key; empty for the app's.
-    pub plugin: String,
-    /// The command's id (`<plugin>/<id>`).
+    /// The script beside the root whose command lost the key; empty for the
+    /// root script's.
+    pub script: String,
+    /// The command's id.
     pub command: String,
-    /// The shortcut as the plugin wrote it.
+    /// The shortcut as the script wrote it.
     pub key: String,
-    /// "taken by the app", or "taken by the plugin `<name>`".
+    /// "taken by the root script", or "taken by the script `<name>`".
     pub reason: String,
     /// The id of the command that holds the shortcut.
     pub holder: String,
 }
 
 type Runner = (Function, Weak<Vm>);
-/// A declared command, its runner and the plugin that declared it.
+/// A declared command, its runner and the script beside the root that
+/// declared it (none for the root script's).
 type Pending = (Command, Option<Runner>, Option<Rc<str>>);
 /// A shortcut that follows what it reads (`key = state` or a function):
 /// the list is published again as it changes, no reload needed.
@@ -88,16 +90,14 @@ impl KeySource {
 /// What a load declared, kept to publish again as dynamic shortcuts change.
 struct Declared {
     commands: Vec<(Command, Option<Rc<str>>)>,
-    /// The commands whose shortcut follows what it reads, by index, and
-    /// whether a key alone is refused.
-    keys: Vec<(usize, KeySource, bool)>,
+    /// The commands whose shortcut follows what it reads, by index.
+    keys: Vec<(usize, KeySource)>,
     reserved: Vec<String>,
 }
 pub(crate) struct Commands {
     pending: RefCell<Vec<Pending>>,
-    /// Pending commands' dynamic shortcuts, by id, and whether a key alone
-    /// is refused (a plugin's, without the grant).
-    pending_keys: RefCell<Vec<(String, KeySource, bool)>>,
+    /// Pending commands' dynamic shortcuts, by id.
+    pending_keys: RefCell<Vec<(String, KeySource)>>,
     /// While a load's commands have dynamic shortcuts: what publishes them
     /// again as those change.
     following: RefCell<Option<Effect>>,
@@ -106,7 +106,7 @@ pub(crate) struct Commands {
     pending_reserved: RefCell<Vec<String>>,
     runners: RefCell<HashMap<String, Runner>>,
     pub list: Signal<Vec<Command>>,
-    /// The plugin shortcuts the last publish dropped, set before `list`.
+    /// The shortcuts the last publish dropped, set before `list`.
     pub dropped: RefCell<Vec<DroppedShortcut>>,
     /// The shortcuts of the commands declared `reserved`: the app's whatever
     /// has the keyboard (`ScriptHost::reserved_keys`).
@@ -141,7 +141,7 @@ impl Commands {
         )
     }
     /// A script failed as it loaded: what it declared since `mark` goes, so
-    /// no command of a failed plugin stays in the menu bar unable to run.
+    /// no command of a failed script stays in the menu bar unable to run.
     pub fn discard_since(&self, (commands, keys, reserved): (usize, usize, usize)) {
         self.pending.borrow_mut().truncate(commands);
         self.pending_keys.borrow_mut().truncate(keys);
@@ -158,19 +158,17 @@ impl Commands {
             keys: Vec::new(),
             reserved: std::mem::take(&mut *self.pending_reserved.borrow_mut()),
         };
-        for (command, runner, plugin) in pending {
+        for (command, runner, script) in pending {
             if let Some(runner) = runner {
                 runners.insert(command.id.clone(), runner);
             }
             if !dynamic.is_empty()
-                && let Some(at) = dynamic.iter().position(|(id, _, _)| *id == command.id)
+                && let Some(at) = dynamic.iter().position(|(id, _)| *id == command.id)
             {
-                let (_, source, no_bare) = dynamic.swap_remove(at);
-                declared
-                    .keys
-                    .push((declared.commands.len(), source, no_bare));
+                let (_, source) = dynamic.swap_remove(at);
+                declared.keys.push((declared.commands.len(), source));
             }
-            declared.commands.push((command, plugin));
+            declared.commands.push((command, script));
         }
         *self.runners.borrow_mut() = runners;
         // The last load's following, if any, is done with.
@@ -180,9 +178,9 @@ impl Commands {
             let pending = declared
                 .commands
                 .into_iter()
-                .map(|(command, plugin)| (command, None, plugin))
+                .map(|(command, script)| (command, None, script))
                 .collect();
-            self.publish_list(pending, &declared.reserved, false, Vec::new());
+            self.publish_list(pending, &declared.reserved, false);
             return;
         }
         let commands = Rc::downgrade(self);
@@ -195,45 +193,27 @@ impl Commands {
     }
     /// Publish `declared`, its dynamic shortcuts read now. A shortcut a
     /// command before it holds is dropped (and said so in `dropped`): the
-    /// app's first, then each plugin's, so neither a plugin nor a rebinding
-    /// gives the menu bar a key twice.
+    /// root script's first, then each other script's, so neither another
+    /// script nor a rebinding gives the menu bar a key twice.
     fn publish_declared(&self, declared: &Declared) {
         let mut pending: Vec<Pending> = declared
             .commands
             .iter()
-            .map(|(command, plugin)| (command.clone(), None, plugin.clone()))
+            .map(|(command, script)| (command.clone(), None, script.clone()))
             .collect();
-        let mut refused = Vec::new();
-        for (at, source, no_bare) in &declared.keys {
-            let entry = &mut pending[*at];
-            entry.0.key = source.read();
-            if *no_bare && entry.0.key.as_deref().is_some_and(crate::rules::is_bare) {
-                refused.push(DroppedShortcut {
-                    plugin: entry.2.as_deref().unwrap_or_default().to_string(),
-                    command: entry.0.id.clone(),
-                    key: entry.0.key.take().unwrap_or_default(),
-                    reason: bare_refused(),
-                    holder: String::new(),
-                });
-            }
+        for (at, source) in &declared.keys {
+            pending[*at].0.key = source.read();
         }
-        self.publish_list(pending, &declared.reserved, true, refused);
+        self.publish_list(pending, &declared.reserved, true);
     }
     /// Publish `pending`. A `rebinding`'s key may be one an earlier command
-    /// holds: the app's own are checked then too (as declared, they are the
-    /// app's to keep apart).
-    fn publish_list(
-        &self,
-        mut pending: Vec<Pending>,
-        reserved: &[String],
-        rebinding: bool,
-        refused: Vec<DroppedShortcut>,
-    ) {
-        let mut dropped = match rebinding || pending.iter().any(|(_, _, plugin)| plugin.is_some()) {
+    /// holds: the root script's own are checked then too (as declared, they
+    /// are the root's to keep apart).
+    fn publish_list(&self, mut pending: Vec<Pending>, reserved: &[String], rebinding: bool) {
+        let dropped = match rebinding || pending.iter().any(|(_, _, script)| script.is_some()) {
             false => Vec::new(),
             true => drop_taken(&mut pending, rebinding),
         };
-        dropped.extend(refused);
         if *self.dropped.borrow() != dropped {
             *self.dropped.borrow_mut() = dropped;
         }
@@ -284,28 +264,19 @@ impl Commands {
     }
 }
 
-/// Why a plugin's shortcut that is a key alone is refused.
-#[cold]
-fn bare_refused() -> String {
-    format!(
-        "a plugin's shortcut has a modifier, unless the host grants \
-         `Capability::Named(\"{}\")`: a key alone would be taken from every field",
-        crate::rules::BARE_KEYS
-    )
-}
-
-/// Take each plugin command's shortcut that a command before it holds: the
-/// app's shortcuts first, then each plugin's not yet taken. What was taken.
+/// Take each command's shortcut that a command before it holds: the root
+/// script's shortcuts first, then each other script's not yet taken. What
+/// was taken.
 #[cold]
 #[inline(never)]
 fn drop_taken(pending: &mut [Pending], apps_too: bool) -> Vec<DroppedShortcut> {
-    // Shortcut → the id of its command and the plugin that declared it.
+    // Shortcut → the id of its command and the script that declared it.
     let mut taken: HashMap<String, (String, Option<Rc<str>>)> = HashMap::new();
     let mut dropped = Vec::new();
-    // The app's first, in order: one rebound to a key an earlier one has
+    // The root's first, in order: one rebound to a key an earlier one has
     // loses it (`apps_too`; otherwise both keep it, as declared).
-    for (command, _, plugin) in pending.iter_mut() {
-        let (None, Some(key)) = (&plugin, &command.key) else {
+    for (command, _, script) in pending.iter_mut() {
+        let (None, Some(key)) = (&script, &command.key) else {
             continue;
         };
         match taken.entry(shortcut(key)) {
@@ -315,7 +286,7 @@ fn drop_taken(pending: &mut [Pending], apps_too: bool) -> Vec<DroppedShortcut> {
             std::collections::hash_map::Entry::Occupied(_) if !apps_too => {}
             std::collections::hash_map::Entry::Occupied(held) => {
                 dropped.push(DroppedShortcut {
-                    plugin: String::new(),
+                    script: String::new(),
                     command: command.id.clone(),
                     key: command.key.take().unwrap_or_default(),
                     reason: format!("taken by the command `{}`", held.get().0),
@@ -324,23 +295,23 @@ fn drop_taken(pending: &mut [Pending], apps_too: bool) -> Vec<DroppedShortcut> {
             }
         }
     }
-    for (command, _, plugin) in pending.iter_mut() {
-        let (Some(plugin), Some(key)) = (plugin, &command.key) else {
+    for (command, _, script) in pending.iter_mut() {
+        let (Some(script), Some(key)) = (script, &command.key) else {
             continue;
         };
         match taken.entry(shortcut(key)) {
             std::collections::hash_map::Entry::Vacant(free) => {
-                free.insert((command.id.clone(), Some(plugin.clone())));
+                free.insert((command.id.clone(), Some(script.clone())));
             }
             std::collections::hash_map::Entry::Occupied(held) => {
                 let (holder, by) = held.get();
                 dropped.push(DroppedShortcut {
-                    plugin: plugin.to_string(),
+                    script: script.to_string(),
                     command: command.id.clone(),
                     key: command.key.take().unwrap_or_default(),
                     reason: match by {
-                        None => "taken by the app".to_string(),
-                        Some(by) => format!("taken by the plugin `{by}`"),
+                        None => "taken by the root script".to_string(),
+                        Some(by) => format!("taken by the script `{by}`"),
                     },
                     holder: holder.clone(),
                 });
@@ -392,22 +363,10 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                 return Ok(());
             }
             let env = env(lua)?;
-            let plugin = match &*env.grants {
-                crate::Grants::All => None,
-                crate::Grants::Only(_) => Some(env.owner.clone()),
-            };
+            let script = (!env.root).then(|| env.owner.clone());
             let id: String = table
                 .get::<Option<String>>("id")?
                 .ok_or_else(|| mlua::Error::runtime("ui.command needs an `id`"))?;
-            let id = match &plugin {
-                Some(plugin) => {
-                    // Already its own (`<plugin>/…`), but what a host keeps
-                    // for itself isn't for a plugin to write.
-                    crate::rules::not_reserved(lua, plugin, &id, "ui.command")?;
-                    format!("{plugin}/{id}")
-                }
-                None => id,
-            };
             let title = table
                 .get::<Option<String>>("title")?
                 .unwrap_or_else(|| id.clone());
@@ -429,27 +388,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     }
                 },
             };
-            // A key alone from a plugin would be taken from every field,
-            // page and terminal. One a state says is refused as it's read.
-            let no_bare = plugin.is_some()
-                && !env.grants.allows(&crate::Capability::Named(
-                    crate::rules::BARE_KEYS.to_owned(),
-                ));
-            if no_bare && key.as_deref().is_some_and(crate::rules::is_bare) {
-                return Err(mlua::Error::runtime(format!(
-                    "ui.command `{id}`: `key = \"{}\"`: {}",
-                    key.as_deref().unwrap_or_default(),
-                    bare_refused()
-                )));
-            }
-            // The app's alone to keep: a plugin's would take a key from
-            // every page and terminal.
             let reserved = table.get::<Option<bool>>(&reserved_key)?.unwrap_or(false);
-            if reserved && plugin.is_some() {
-                return Err(mlua::Error::runtime(format!(
-                    "ui.command `{id}`: a plugin's command cannot be reserved"
-                )));
-            }
             let vm = env.vm.clone();
             let mut pending = commands.pending.borrow_mut();
             if pending.iter().any(|(c, _, _)| c.id == id) {
@@ -464,7 +403,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                 commands
                     .pending_keys
                     .borrow_mut()
-                    .push((id.clone(), source, no_bare));
+                    .push((id.clone(), source));
             }
             pending.push((
                 Command {
@@ -475,15 +414,15 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     separator: false,
                 },
                 Some((run, vm)),
-                plugin,
+                script,
             ));
             Ok(())
         })?,
     )
 }
 
-/// Installs `ui.shortcut_owner(keys)`: the id of the command (the app's or
-/// a plugin's) holding a shortcut now, for a rebinding to show a conflict.
+/// Installs `ui.shortcut_owner(keys)`: the id of the command (any script's)
+/// holding a shortcut now, for a rebinding to show a conflict.
 /// Apart from `ui.command`: made only for a script that asks.
 pub(crate) fn install_owner(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Result<()> {
     ui.set(

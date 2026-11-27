@@ -207,11 +207,6 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (name, colors): (String, Option<Table>)| {
             let functions = {
                 let env = crate::node::env(lua)?;
-                if !matches!(*env.grants, crate::Grants::All) {
-                    return Err(mlua::Error::runtime(format!(
-                        "ui.highlighter `{name}`: a module's highlighter is the app's own"
-                    )));
-                }
                 Rc::downgrade(&env.functions)
             };
             let native = NATIVE

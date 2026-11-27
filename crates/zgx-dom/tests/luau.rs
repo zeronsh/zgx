@@ -366,7 +366,7 @@ fn runaway_luau_is_stopped_by_its_budget_in_the_browser() {
     // look a few steps in (one look in 1,024 stopped it seconds late).
     let runtime = Runtime::new();
     let limits = zgx_script::Limits {
-        load: std::time::Duration::from_millis(30),
+        load: Some(std::time::Duration::from_millis(30)),
         ..zgx_script::Limits::default()
     };
     for (code, slow) in [
