@@ -399,6 +399,25 @@ impl GroupFrame {
             content,
         }
     }
+    // A builder for each field, named as the field is.
+    /// With this `left` (see the field).
+    #[must_use]
+    pub fn left(mut self, left: impl Into<Option<f32>>) -> Self {
+        self.left = left.into();
+        self
+    }
+    /// With this `width` (see the field).
+    #[must_use]
+    pub fn width(mut self, width: impl Into<Option<f32>>) -> Self {
+        self.width = width.into();
+        self
+    }
+    /// With this `content` (see the field).
+    #[must_use]
+    pub fn content(mut self, content: impl Into<Option<f32>>) -> Self {
+        self.content = content.into();
+        self
+    }
 }
 /// Each line's room (`LineInset`), given its index, its text and what the
 /// line before it left its highlighter (`Highlighter`'s state; 0 for the
@@ -441,17 +460,81 @@ pub struct LineMark {
     /// Text drawn from its top left (an ordinal), its colour and size; a
     /// finite height is its line pitch.
     pub label: Option<(std::sync::Arc<str>, crate::scene::Color, f32)>,
-    /// Its label in the monospaced font (a code block's line numbers).
-    pub mono: bool,
-    /// Its label in tabular figures (OpenType's `tnum`), each digit a
-    /// figure's width: an ordered list's numbers, lined up as the web's are.
-    pub tabular: bool,
+    /// Its label's font (`mono`, `tabular`).
+    pub(crate) label_font: u8,
     /// Drawn over the text, not under it.
     pub over_text: bool,
     /// It stays where it is as its line's scroll group scrolls sideways (a
     /// code block's wash and line numbers): only the text, and the marks not
     /// pinned, move.
     pub pinned: bool,
+    /// What few marks have (`look`); none, for a plain one.
+    pub(crate) look: Option<Arc<MarkLook>>,
+}
+/// What few line marks have (`LineMark::look`), set by `LineMark`'s builders
+/// of the same names: apart, so a plain mark (a wash, a rule, a number) is no
+/// bigger for it.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct MarkLook {
+    /// A picture filling it (a note's image above its caption), its corners
+    /// rounded by `radius`: a negative `y` puts it in its line's room above.
+    pub image: Option<MarkImage>,
+    /// Where it sits across the line's width (left, centre or right; `x`
+    /// then offsets it); none: at `x` (or from the right edge with
+    /// `from_right`).
+    pub align: Option<crate::text_layout::TextAlign>,
+    /// A picture drawn as given in its box, in place of its fill and border.
+    pub svg: Option<Arc<crate::svg::SvgData>>,
+    /// Per-side borders and per-corner radii (a table's outer cells), over
+    /// `radius` and `border_width`.
+    pub decoration: Option<Arc<crate::decoration::Decoration>>,
+    /// Turned this far clockwise about its centre, in degrees (a toggle's
+    /// chevron, 90 open): a change eases there over `motion.duration.fast`,
+    /// easing out, unless the system reduces motion.
+    pub rotate: f32,
+}
+/// `LineMark::label_font`'s bits.
+pub(crate) const LABEL_MONO: u8 = 1;
+pub(crate) const LABEL_TABULAR: u8 = 2;
+/// A line mark's picture (`LineMark::image`): decoded pixels and how they
+/// fit the mark's box. A file is decoded by the app, as an image view's is
+/// (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkImage {
+    /// The pixels.
+    pub image: Arc<crate::image::ImageData>,
+    /// How they fit the mark's box
+    /// ([`ObjectFit::Cover`](crate::style::ObjectFit::Cover): filling it,
+    /// cropped).
+    pub fit: crate::style::ObjectFit,
+}
+impl MarkImage {
+    /// `image`, fitting the mark's box as `fit`.
+    pub fn new(image: Arc<crate::image::ImageData>, fit: crate::style::ObjectFit) -> Self {
+        Self { image, fit }
+    }
+    /// With this `image` (see `MarkLook`).
+    #[must_use]
+    pub fn image(mut self, image: Arc<crate::image::ImageData>) -> Self {
+        self.image = image;
+        self
+    }
+    /// With this `fit` (see the field).
+    #[must_use]
+    pub fn fit(mut self, fit: crate::style::ObjectFit) -> Self {
+        self.fit = fit;
+        self
+    }
+    /// `image` filling the mark, cropped to its box.
+    pub fn cover(image: Arc<crate::image::ImageData>) -> Self {
+        Self {
+            image,
+            fit: crate::style::ObjectFit::Cover,
+        }
+    }
 }
 impl Default for LineMark {
     fn default() -> Self {
@@ -467,10 +550,10 @@ impl Default for LineMark {
             border_width: 0.,
             from_right: false,
             label: None,
-            mono: false,
-            tabular: false,
+            label_font: 0,
             over_text: false,
             pinned: false,
+            look: None,
         }
     }
 }
@@ -487,11 +570,196 @@ impl LineMark {
             ..Self::default()
         }
     }
+    // A builder for each field, named as the field is: the struct gains
+    // fields, so code outside sets them so.
+    /// With this `x` (see the field).
+    #[must_use]
+    pub fn x(mut self, x: f32) -> Self {
+        self.x = x;
+        self
+    }
+    /// With this `y` (see the field).
+    #[must_use]
+    pub fn y(mut self, y: f32) -> Self {
+        self.y = y;
+        self
+    }
+    /// With this `width` (see the field).
+    #[must_use]
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+    /// With this `height` (see the field).
+    #[must_use]
+    pub fn height(mut self, height: f32) -> Self {
+        self.height = height;
+        self
+    }
+    /// With this `bottom` (see the field).
+    #[must_use]
+    pub fn bottom(mut self, bottom: f32) -> Self {
+        self.bottom = bottom;
+        self
+    }
+    /// With this `fill` (see the field).
+    #[must_use]
+    pub fn fill(mut self, fill: crate::scene::Color) -> Self {
+        self.fill = fill;
+        self
+    }
+    /// With this `radius` (see the field).
+    #[must_use]
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+    /// With this `border_color` (see the field).
+    #[must_use]
+    pub fn border_color(mut self, border_color: crate::scene::Color) -> Self {
+        self.border_color = border_color;
+        self
+    }
+    /// With this `border_width` (see the field).
+    #[must_use]
+    pub fn border_width(mut self, border_width: f32) -> Self {
+        self.border_width = border_width;
+        self
+    }
+    /// With this `from_right` (see the field).
+    #[must_use]
+    pub fn from_right(mut self, from_right: bool) -> Self {
+        self.from_right = from_right;
+        self
+    }
+    /// Its label in the monospaced font (a code block's line numbers).
+    #[must_use]
+    pub fn mono(mut self, mono: bool) -> Self {
+        self.set_label_font(LABEL_MONO, mono);
+        self
+    }
+    /// With this `label` (see the field).
+    #[must_use]
+    pub fn label(mut self, label: impl Into<Option<(Arc<str>, crate::scene::Color, f32)>>) -> Self {
+        self.label = label.into();
+        self
+    }
+    /// With this `image` (see `MarkLook`).
+    #[must_use]
+    pub fn image(self, image: impl Into<Option<MarkImage>>) -> Self {
+        let image = image.into();
+        self.with_look(|look| look.image = image)
+    }
+    /// With this `align` (see `MarkLook`).
+    #[must_use]
+    pub fn align(self, align: impl Into<Option<crate::text_layout::TextAlign>>) -> Self {
+        let align = align.into();
+        self.with_look(|look| look.align = align)
+    }
+    /// With this `svg` (see `MarkLook`).
+    #[must_use]
+    pub fn svg(self, svg: impl Into<Option<Arc<crate::svg::SvgData>>>) -> Self {
+        let svg = svg.into();
+        self.with_look(|look| look.svg = svg)
+    }
+    /// With this `decoration` (see `MarkLook`).
+    #[must_use]
+    pub fn decoration(
+        self,
+        decoration: impl Into<Option<Arc<crate::decoration::Decoration>>>,
+    ) -> Self {
+        let decoration = decoration.into();
+        self.with_look(|look| look.decoration = decoration)
+    }
+    /// With this `pinned` (see the field).
+    #[must_use]
+    pub fn pinned(mut self, pinned: bool) -> Self {
+        self.pinned = pinned;
+        self
+    }
+    /// With this `over_text` (see the field).
+    #[must_use]
+    pub fn over_text(mut self, over_text: bool) -> Self {
+        self.over_text = over_text;
+        self
+    }
+    /// With this `rotate` (see `MarkLook`).
+    #[must_use]
+    pub fn rotate(mut self, rotate: f32) -> Self {
+        // Kept at 0 too: a mark that turns back eases there.
+        match &mut self.look {
+            Some(look) => Arc::make_mut(look).rotate = rotate,
+            None => self.set_look(MarkLook {
+                rotate,
+                ..MarkLook::default()
+            }),
+        }
+        self
+    }
+    /// Its label in the monospaced font (`mono`).
+    pub fn is_mono(&self) -> bool {
+        self.label_font & LABEL_MONO != 0
+    }
+    /// Its label in tabular figures (`tabular`).
+    pub fn is_tabular(&self) -> bool {
+        self.label_font & LABEL_TABULAR != 0
+    }
+    fn set_label_font(&mut self, bit: u8, on: bool) {
+        self.label_font = match on {
+            true => self.label_font | bit,
+            false => self.label_font & !bit,
+        };
+    }
+    /// What few marks have; none, for a plain one.
+    pub fn look(&self) -> Option<&MarkLook> {
+        self.look.as_deref()
+    }
+    /// Its look changed so; a plain mark given nothing stays plain.
+    fn with_look(mut self, change: impl FnOnce(&mut MarkLook)) -> Self {
+        let mut look = MarkLook::default();
+        match &mut self.look {
+            Some(look) => change(Arc::make_mut(look)),
+            None => {
+                change(&mut look);
+                if look != MarkLook::default() {
+                    self.set_look(look);
+                }
+            }
+        }
+        self
+    }
+    fn set_look(&mut self, look: MarkLook) {
+        self.look = Some(Arc::new(look));
+    }
+    /// Its label in tabular figures (OpenType's `tnum`), each digit a
+    /// figure's width: an ordered list's numbers, lined up as the web's are.
+    #[must_use]
+    pub fn tabular(mut self, tabular: bool) -> Self {
+        self.set_label_font(LABEL_TABULAR, tabular);
+        self
+    }
 }
 /// Each line's marks (`LineMark`), given its index, its text and what the
 /// line before it left its highlighter, as `LineInsets` are.
 #[doc(hidden)]
 pub type LineMarks = Rc<dyn Fn(usize, &str, u32) -> Vec<LineMark>>;
+/// `LineMarks` whose answers are kept by who gives them, and shared: a draw
+/// copies none of them.
+#[doc(hidden)]
+pub type KeptLineMarks = Rc<dyn Fn(usize, &str, u32) -> Rc<[LineMark]>>;
+/// What gives a text area's lines their marks.
+#[derive(Clone)]
+pub(crate) enum MarksGiver {
+    /// Made at each call.
+    Each(LineMarks),
+    /// Kept, and shared.
+    Kept(KeptLineMarks),
+}
+/// A line's marks, as they were given.
+pub(crate) enum MarksOf {
+    Each(Vec<LineMark>),
+    Kept(Rc<[LineMark]>),
+}
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
 pub type LineSpans = Vec<(Range<usize>, SpanStyle)>;
 /// A `Highlighter` that styles its ranges (`SpanStyle`) beyond colouring
@@ -899,7 +1167,7 @@ struct RareLines {
     /// Each line's room (`set_insets`): a note's list items and headings.
     insets: Option<LineInsets>,
     /// Each line's marks (`set_marks`): a quote's rule, a code block's wash.
-    marks: Option<LineMarks>,
+    marks: Option<MarksGiver>,
     /// Its scroll groups' offsets and frames (`LineInset::scroll_group`):
     /// made as the first is moved, framed or listened to.
     groups: Option<Box<GroupState>>,
@@ -1165,7 +1433,7 @@ impl LineCache {
             && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.insets.is_some())
     }
     /// Give each line the marks `marks` gives it (none: none).
-    pub(crate) fn set_marks(&self, marks: Option<LineMarks>) {
+    pub(crate) fn set_marks(&self, marks: Option<MarksGiver>) {
         let mut rare = self.rare.borrow_mut();
         if marks.is_some() || rare.is_some() {
             rare.get_or_insert_default().marks = marks;
@@ -1180,12 +1448,16 @@ impl LineCache {
     /// Line `i` of `layout`'s marks (`set_marks`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn marks(&self, layout: &LinesLayout, i: usize) -> Vec<LineMark> {
+    pub(crate) fn marks(&self, layout: &LinesLayout, i: usize) -> MarksOf {
         let Some(marks) = (self.rare.borrow().as_ref()).and_then(|rare| rare.marks.clone()) else {
-            return Vec::new();
+            return MarksOf::Each(Vec::new());
         };
         let before = self.state_before(layout, i);
-        marks(i, &layout.line_text(i), before)
+        let text = layout.line_text(i);
+        match marks {
+            MarksGiver::Each(marks) => MarksOf::Each(marks(i, &text, before)),
+            MarksGiver::Kept(marks) => MarksOf::Kept(marks(i, &text, before)),
+        }
     }
     /// Scroll group `group`'s offset (0 until set).
     pub(crate) fn group_scroll(&self, group: u32) -> f32 {
@@ -2412,7 +2684,7 @@ impl LinesLayout {
         self.cache.has_marks()
     }
     /// Line `i`'s marks (`EditorHandle::set_line_marks`).
-    pub(crate) fn marks(&self, i: usize) -> Vec<LineMark> {
+    pub(crate) fn marks(&self, i: usize) -> MarksOf {
         self.cache.marks(self, i)
     }
     /// Line `i`'s room (`EditorHandle::set_line_insets`).
@@ -2579,6 +2851,14 @@ impl TextLayout for LinesLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plain mark is as small as it was before marks had looks: a note's
+    /// marks are kept by their thousands.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_plain_mark_is_no_bigger_for_the_looks_few_have() {
+        assert_eq!(std::mem::size_of::<LineMark>(), 72);
+    }
 
     /// A highlighted line's spans are this big and no bigger: main's
     /// sixteen bytes, an underline, and a four-byte name of the rare rest

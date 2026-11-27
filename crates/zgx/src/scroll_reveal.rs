@@ -144,7 +144,21 @@ struct Reveal {
 #[derive(Default)]
 pub(crate) struct State {
     reveals: Vec<Reveal>,
+    /// Text areas with a line mark turning (`mark_turn`): they step with the
+    /// reveals.
+    turning: Vec<NodeId>,
     next: Option<Instant>,
+}
+impl State {
+    /// Text area `node` has a mark still turning at `now`: drawn again one
+    /// step on (`mark_turn::STEP`).
+    pub(crate) fn turning(&mut self, node: NodeId, now: Instant) {
+        if !self.turning.contains(&node) {
+            self.turning.push(node);
+        }
+        let next = now + crate::mark_turn::STEP;
+        self.next = Some(self.next.map_or(next, |at| at.min(next)));
+    }
 }
 
 /// Scroll `viewport` by `dx`, `dy` in its own points, as a key or find
@@ -228,7 +242,8 @@ pub(crate) fn next_step(ui: &Ui) -> Option<Instant> {
     ui.scroll_reveal_state().borrow().next
 }
 
-/// Step the reveals due by `now`: whether any moved.
+/// Step the reveals, and the line marks turning, due by `now`: whether any
+/// moved.
 pub(crate) fn advance(ui: &Ui, now: Instant) -> bool {
     let due = {
         let state = ui.scroll_reveal_state().borrow();
@@ -237,7 +252,13 @@ pub(crate) fn advance(ui: &Ui, now: Instant) -> bool {
     if !due {
         return false;
     }
-    let reveals = std::mem::take(&mut ui.scroll_reveal_state().borrow_mut().reveals);
+    let (reveals, turning) = {
+        let mut state = ui.scroll_reveal_state().borrow_mut();
+        (
+            std::mem::take(&mut state.reveals),
+            std::mem::take(&mut state.turning),
+        )
+    };
     let mut going = Vec::new();
     for mut reveal in reveals {
         if !ui.scene.borrow().contains(reveal.viewport) {
@@ -263,6 +284,9 @@ pub(crate) fn advance(ui: &Ui, now: Instant) -> bool {
     going.append(&mut state.reveals);
     state.reveals = going;
     state.next = (!state.reveals.is_empty()).then(|| now + ui.refresh_interval());
+    drop(state);
+    // Each asks for its next step as it draws (`State::turning`).
+    crate::mark_turn::step(ui, turning);
     true
 }
 
@@ -272,6 +296,8 @@ pub(crate) fn cancel(ui: &Ui) {
     let mut state = ui.scroll_reveal_state().borrow_mut();
     if !state.reveals.is_empty() {
         state.reveals.clear();
-        state.next = None;
+        if state.turning.is_empty() {
+            state.next = None;
+        }
     }
 }

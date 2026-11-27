@@ -553,7 +553,7 @@ pub(crate) struct CodeOptions {
     /// `line_insets`: each line's room (`EditorHandle::set_line_insets`).
     line_insets: Option<crate::widgets::LineInsets>,
     /// `line_marks`: each line's marks (`EditorHandle::set_line_marks`).
-    line_marks: Option<crate::widgets::LineMarks>,
+    line_marks: Option<crate::editor_lines::MarksGiver>,
     decorations: Option<Box<dyn FnMut() -> Decorations>>,
     underlines: Option<Box<dyn FnMut() -> Underlines>>,
     current_line: Option<Box<dyn FnMut() -> Option<crate::scene::Color>>>,
@@ -2075,7 +2075,19 @@ impl View {
         mut self,
         marks: impl Fn(usize, &str, u32) -> Vec<crate::widgets::LineMark> + 'static,
     ) -> Self {
-        self.code_mut().line_marks = Some(std::rc::Rc::new(marks));
+        let marks = crate::editor_lines::MarksGiver::Each(std::rc::Rc::new(marks));
+        self.code_mut().line_marks = Some(marks);
+        self
+    }
+    /// `line_marks`, by an app that keeps its answers: shared with it, a
+    /// draw copies no mark.
+    #[doc(hidden)]
+    pub fn kept_line_marks(
+        mut self,
+        marks: impl Fn(usize, &str, u32) -> std::rc::Rc<[crate::widgets::LineMark]> + 'static,
+    ) -> Self {
+        let marks = crate::editor_lines::MarksGiver::Kept(std::rc::Rc::new(marks));
+        self.code_mut().line_marks = Some(marks);
         self
     }
     /// A text area's scroll groups (`LineInset::scroll_group`, a code
@@ -7803,7 +7815,7 @@ fn open_element(
                 editor.set_line_insets(line_insets);
             }
             if line_marks.is_some() {
-                editor.set_line_marks(line_marks);
+                editor.set_marks_giver(line_marks);
             }
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
@@ -9160,7 +9172,7 @@ fn mount_image(
         );
     });
 }
-fn fitted_image_size(
+pub(crate) fn fitted_image_size(
     width: f32,
     height: f32,
     source_width: f32,

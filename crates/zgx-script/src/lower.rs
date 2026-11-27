@@ -6705,7 +6705,7 @@ fn line_marks_of<C: Fn(&str) -> Option<zgx::scene::Color> + 'static>(
     states: Rc<std::cell::RefCell<LineStates>>,
     color_of: Rc<C>,
     theme: Rc<zgx::theme::ThemeScope>,
-) -> impl Fn(usize, &str, u32) -> Vec<zgx::widgets::LineMark> + 'static {
+) -> impl Fn(usize, &str, u32) -> Rc<[zgx::widgets::LineMark]> + 'static {
     /// Line texts and states kept, at most: about a long note's lines.
     const KEPT_MARKS: usize = 4096;
     // By state, then text; how many, and the theme's revision they're of.
@@ -6718,7 +6718,7 @@ fn line_marks_of<C: Fn(&str) -> Option<zgx::scene::Color> + 'static>(
             if known.2 != theme.revision() {
                 *known = (HashMap::new(), 0, theme.revision());
             } else if let Some(marks) = known.0.get(&state).and_then(|by| by.get(line)) {
-                return marks.to_vec();
+                return marks.clone();
             }
         }
         let called = if state & KEPT == 0 {
@@ -6771,8 +6771,7 @@ fn line_marks_of<C: Fn(&str) -> Option<zgx::scene::Color> + 'static>(
             made.border_color = color("border_color").unwrap_or(clear);
             made.border_width = number("border_width", 0.).max(0.);
             made.from_right = yes("from_right");
-            made.mono = yes("mono");
-            made.tabular = yes("tabular");
+            made = made.mono(yes("mono")).tabular(yes("tabular"));
             made.over_text = yes("over_text");
             made.pinned = yes("pinned");
             if let Ok(Some(label)) = mark.raw_get::<Option<String>>("label") {
@@ -6790,9 +6789,10 @@ fn line_marks_of<C: Fn(&str) -> Option<zgx::scene::Color> + 'static>(
             known.1 = 0;
         }
         known.1 += 1;
-        let kept: Rc<[zgx::widgets::LineMark]> = out.clone().into();
-        known.0.entry(state).or_default().insert(line.into(), kept);
-        out
+        let kept: Rc<[zgx::widgets::LineMark]> = out.into();
+        let by = known.0.entry(state).or_default();
+        by.insert(line.into(), kept.clone());
+        kept
     }
 }
 /// What a `highlight` leaves the next line, read where it lies: a whole
@@ -7042,7 +7042,7 @@ fn code_editor(
         ));
     }
     if let Some(line_marks) = &code.line_marks {
-        view = view.line_marks(line_marks_of(
+        view = view.kept_line_marks(line_marks_of(
             line_marks.clone(),
             vm.clone(),
             states.clone(),
