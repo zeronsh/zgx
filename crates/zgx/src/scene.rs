@@ -3684,8 +3684,8 @@ pub struct Scene {
     #[cfg(test)]
     pub(crate) read_bits_calls: std::cell::Cell<u64>,
     /// Hit tests walked (not answered from `HitMemo`), for tests of how often
-    /// hover is looked for.
-    #[cfg(test)]
+    /// hover is looked for (`hit_walks`): tests and debug builds count.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) hit_walks: std::cell::Cell<u64>,
     /// While a mount defers its text inputs' layout: the observer running
     /// now, whose geometry reads (`bounds` and the boxes made from it) are
@@ -4057,7 +4057,7 @@ impl Scene {
             grown_inks: Default::default(),
             #[cfg(test)]
             inks_asked: Default::default(),
-            #[cfg(test)]
+            #[cfg(any(test, debug_assertions))]
             hit_walks: Default::default(),
             hit_memo: Default::default(),
             #[cfg(debug_assertions)]
@@ -6672,6 +6672,17 @@ impl Scene {
         #[cfg(not(debug_assertions))]
         0
     }
+    /// How many hit tests walked the scene so far, rather than answer from
+    /// the last one's hits: a probe's measure of how often a window looks
+    /// for what is under the pointer. Debug builds count; a release build
+    /// says 0.
+    #[doc(hidden)]
+    pub fn hit_walks(&self) -> u64 {
+        #[cfg(any(test, debug_assertions))]
+        return self.hit_walks.get();
+        #[cfg(not(any(test, debug_assertions)))]
+        0
+    }
     /// Front-to-back hit targets, including containers; call after flushing layout.
     /// The point maps through each transformed ancestor's inverse, so nodes
     /// are hit where they are drawn; a singular transform hits nothing.
@@ -6703,7 +6714,7 @@ impl Scene {
         f(&memo)
     }
     fn hit_test_all_walked(&self, x: f32, y: f32) -> Vec<NodeId> {
-        #[cfg(test)]
+        #[cfg(any(test, debug_assertions))]
         self.hit_walks.set(self.hit_walks.get() + 1);
         // Before the others, which compile as they did: a scene with
         // targets walks apart (`hit_test_targets`).
