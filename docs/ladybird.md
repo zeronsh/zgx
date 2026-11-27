@@ -3,10 +3,11 @@
 A web view can show its page in [Ladybird](https://ladybird.org) instead of the platform's engine: `WebViewOptions { engine: WebEngine::Ladybird, .. }` in Rust, `engine = "ladybird"` in Luau (`ui.webview`, `ui.web`). The default stays the platform's (WKWebView, WebView2, WebKitGTK). The rest of the web view's API is the same; what Ladybird pages can't do yet is [below](#what-they-do-and-dont-yet).
 
 ```sh
-# Find a host built elsewhere (an install of zgx-ladybird-sys):
+# Build the host with Ladybird, from its pinned release (about 50 minutes on 16 cores the first time, then
+# cached); it prints the install it made:
+python3 crates/zgx-ladybird-sys/ladybird/build.py --print-install-dir
+# Then run against that install:
 ZGX_LADYBIRD_DIR=/path/to/install cargo run -p zgx-desktop --features ladybird --example web_view -- --ladybird
-# Or build one, with Ladybird, from its pinned release (about 50 minutes on 16 cores the first time, then cached):
-cargo run -p zgx-desktop --features ladybird-build --example web_view -- --ladybird
 ```
 
 ## How a page is shown
@@ -17,7 +18,7 @@ Ladybird's Compositor paints each page into backing stores in shared memory. The
 
 Input goes to the page's box as to any node's and on to Ladybird: pointer presses (with double and triple clicks), moves, leaving, wheel and trackpad scrolling, keys with their modifiers, typed text, input methods' compositions and commits, and focus. The page's cursor is its box's.
 
-Without a host (the `ladybird` feature on but no `ZGX_LADYBIRD_DIR` or built install, or a host that won't start), a Ladybird page shows its placeholder and says why once on stderr. Without the feature nothing of this is compiled, and the option shows the placeholder too.
+The host is found in the install `ZGX_LADYBIRD_DIR` names, else in `zgx-ladybird` beside the app's executable (where an app that ships Ladybird pages puts the install). Without one (or a host that won't start), a Ladybird page shows its placeholder and says why once on stderr. Without the feature nothing of this is compiled, and the option shows the placeholder too.
 
 ## What they do and don't yet
 

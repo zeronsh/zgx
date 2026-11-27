@@ -55,13 +55,12 @@ webkitgtk = []
 # Web views whose options ask for Ladybird (`WebEngine::Ladybird`): pages run
 # in zgx-ladybird-host, a process of zgx's that links Ladybird's LibWebView,
 # and are drawn as images in the window's own paint
-# (src/native_host/ladybird). Linux and macOS. The host is found at run time
-# (`ZGX_LADYBIRD_DIR`): building needs none of it, and where it is missing
-# Ladybird pages are placeholders. `ladybird-build` also builds the host and
-# Ladybird from a pinned release (crates/zgx-ladybird-sys: an hour or more
-# the first time, then cached).
-ladybird = ["dep:zgx-ladybird-sys", "dep:libc"]
-ladybird-build = ["ladybird", "zgx-ladybird-sys/build"]
+# (src/native_host/ladybird). Linux and macOS. The host is found at run time,
+# in `ZGX_LADYBIRD_DIR` or a `zgx-ladybird` folder beside the executable:
+# building needs none of it, and where it is missing Ladybird pages are
+# placeholders. crates/zgx-ladybird-sys builds the host, with Ladybird from a
+# pinned release (an hour or more the first time, then cached).
+ladybird = ["dep:libc"]
 # mimalloc as the program's allocator, in place of the system's: 1-10%
 # fewer cycles in zgx's headless scenes (text 7%, layout 6%, animation
 # 9%), for up to 3 MB more resident memory. A program has one allocator:
@@ -80,7 +79,6 @@ zgx-terminal = { path = "../zgx-terminal", version = "0.1.10", optional = true }
 zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
-zgx-ladybird-sys = { path = "../zgx-ladybird-sys", version = "0.1.10", optional = true }
 winit = "0.30.13"
 softbuffer = "0.4.8"
 fontdue = "0.9.3"

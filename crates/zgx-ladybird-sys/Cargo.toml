@@ -9,6 +9,9 @@ keywords = ["ladybird", "browser", "web-view", "zgx"]
 categories = ["gui"]
 description = "zgx's Ladybird host (zgx-ladybird-host), built with Ladybird from a pinned release fetched at build time."
 build = "build.rs"
+# Not published yet: building Ladybird from source isn't yet a story for a
+# crates.io user. zgx-desktop finds the host it builds at run time.
+publish = false
 # The host's source and build glue, not Ladybird's (fetched at build time).
 include = ["build.rs", "src/**", "host/**", "ladybird/**", "README.md"]
 
