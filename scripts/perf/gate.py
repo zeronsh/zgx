@@ -316,6 +316,12 @@ SCENES = [
                                                           'CLOCK': 'frames', 'READS': 'CLOCK'}),
     ('md-stream-fade-between', 'zgx-script', 'list_state_bench', {'APP': 'stream', 'FADE': 'native', 'COUNT': 'between',
                                                                    'REPS': '40', 'CLOCK': 'frames', 'READS': 'CLOCK'}),
+    # The same reply faded in from script, as an app without `fade_in` does:
+    # each fading chunk's colour a function of the time, re-run by a tick
+    # state animated every frame. Its chunks' frames and those between, in
+    # one cell: what a span's colour function costs a paragraph.
+    ('md-stream-fade-bindings', 'zgx-script', 'list_state_bench', {'APP': 'stream', 'FADE': 'bindings', 'COUNT': 'all',
+                                                                    'REPS': '40', 'CLOCK': 'frames', 'READS': 'CLOCK'}),
     # A sort with no order kept (the honest whole sort) on its own, as the
     # code editor's new-letter search is.
     ('app-dashboard', 'zgx-script', 'list_state_bench', {'APP': 'dashboard', 'ROWS': '2000', 'REPS': '2',
@@ -363,7 +369,8 @@ SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.
 # md-stream-fade's cells too: on a fixed clock (`Bench::clock`), three runs
 # under it counted alike, and without it a few hundred instructions apart.
 FAIR = ('spans-plain', 'spans-md', 'spans-follow', 'micro-state-luau', 'script-update', 'md-stream', 'md-stream-text',
-        'startup', 'app-dashboard', 'app-dashboard-sort', 'md-stream-fade', 'md-stream-fade-between')
+        'startup', 'app-dashboard', 'app-dashboard-sort', 'md-stream-fade', 'md-stream-fade-between',
+        'md-stream-fade-bindings')
 # Built apart from the rest, each: see `build`.
 ALONE = ('zgx-3d', 'zgx-video', 'zgx-terminal')
 

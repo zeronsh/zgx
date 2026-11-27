@@ -487,6 +487,8 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
+    // (Inlined where layout asks, `Scene::set_kind`, as when that was its one caller.)
+    #[inline]
     pub(crate) fn same_metrics(&self, other: &Self) -> bool {
         self.overflow == other.overflow
             && self.line_clamp == other.line_clamp
