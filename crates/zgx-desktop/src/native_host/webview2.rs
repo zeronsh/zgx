@@ -2759,7 +2759,8 @@ fn ask_permission(
 }
 
 /// A permission answer, given once: denied if it's dropped unanswered.
-struct DenyUnanswered(RefCell<Option<Box<dyn FnOnce(bool)>>>);
+struct DenyUnanswered(RefCell<Option<PermissionAnswer>>);
+type PermissionAnswer = Box<dyn FnOnce(bool)>;
 impl DenyUnanswered {
     fn answer(&self, allowed: bool) {
         if let Some(answer) = self.0.borrow_mut().take() {
