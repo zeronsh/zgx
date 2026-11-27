@@ -24,10 +24,10 @@ A page's own click that starts no download fails the run; the app opening
 the file itself (`open-download`) then only lets the handler's checks run.
 Then certificates and credentials (`trust_servers`): with no handler, or a
 responder dropped, a server whose certificate isn't trusted loads nothing
-and a credentials challenge gets the refusal; proceeding loads that one
-page, and the next load from the server, in the page or in a second page on
-the same profile, is asked again, even the second page's load started the
-moment the app proceeded.
+and a credentials challenge gets the refusal; a proceed loads nothing either
+(WebView2 can't hold one to a single load), and every later load from the
+server, in the page or in a second page on the same profile, is asked
+again, even the second page's load started the moment the app proceeded.
 """
 import argparse
 import os
@@ -193,20 +193,23 @@ def trust_cases(proc, lines, heard):
     send("cert drop")
     wait_for(lambda: heard("CERTS drop"), "the dropping handler")
     send(f"load {tls}/drop")
-    wait_for(lambda: heard("CERT 127.0.0.1 can_proceed=true"), "the handler to hear the certificate error", 20)
+    wait_for(lambda: heard("CERT 127.0.0.1 can_proceed=false"), "the handler to hear the certificate error", 20)
     refused("/drop", "a dropped responder")
     print("ok: a certificate responder dropped unanswered loads nothing")
     send("cert race")
     wait_for(lambda: heard("CERTS race"), "the proceeding handler")
     asked, second_asked = count("CERT "), count("SECOND_CERT ")
     send(f"load {tls}/proceed")
-    wait_for(lambda: loaded("MESSAGE ", "/proceed"), "the page the app proceeded to", 20)
+    # WebView2 can't hold a proceed to one load (the same view's next load
+    # went through unasked), so it's refused: told can't proceed, cancelled.
+    wait_for(lambda: count("CERT ") > asked, "the handler to hear the certificate error", 20)
+    refused("/proceed", explain("a proceed WebView2 can't hold to one load"))
     wait_for(lambda: count("SECOND_CERT ") > second_asked,
              "the second page, loading the same server as the app proceeded, to be asked", 20)
     time.sleep(2.0)
-    assert not loaded("SECOND_MESSAGE ", "/race"), "the second page loaded on the first page's proceed"
+    assert not loaded("SECOND_MESSAGE ", "/race"), explain("the second page loaded on the first page's proceed")
     assert count("CERT ") == asked + 1, [line for line in lines if line.startswith("CERT ")]
-    print("ok: proceeding loads that page; a second page on the profile, loading the server at once, is still asked")
+    print("ok: a proceed loads nothing (WebView2 can't hold it to one load); a second page on the profile is still asked")
     send("cert cancel")
     wait_for(lambda: heard("CERTS cancel"), "the cancelling handler")
     asked, second_asked = count("CERT "), count("SECOND_CERT ")
@@ -220,7 +223,7 @@ def trust_cases(proc, lines, heard):
     send(f"load2 {tls}/later")
     wait_for(lambda: count("SECOND_CERT ") > second_asked, "the second page's later load to be asked", 20)
     assert not loaded("SECOND_MESSAGE ", "/later"), "the second page loaded past the certificate"
-    print("ok: proceeding was for that load: the next ones, in either page, are asked again")
+    print("ok: after a proceed, the next loads, in either page, are asked again")
 
     send(f"load {auth}/none")
     wait_for(lambda: any(line.startswith("MESSAGE ") and "refused" in line for line in lines),

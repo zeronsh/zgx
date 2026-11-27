@@ -496,11 +496,6 @@ pub(crate) struct Page {
     serving: RefCell<Option<String>>,
     /// The URL of the last top-frame navigation that started.
     navigating: RefCell<String>,
-    /// The server the app loaded past a certificate error from, for this
-    /// page alone: its host, the certificate (PEM) and the page's URL.
-    /// That page's own further requests to it are let through until the
-    /// next top-frame navigation starts; nothing else is.
-    proceeded: RefCell<Option<(String, String, String)>>,
     /// The folder of HTML shown with a file base (see `served_url`).
     files: RefCell<Option<std::path::PathBuf>>,
     /// The app schemes it serves (its options' that WebView2 can take).
@@ -961,7 +956,6 @@ pub(crate) fn backend(web: &WebView, parent: HWND, scale: f32) -> Option<Rc<Page
         loading: Cell::new(false),
         html: RefCell::new(None),
         serving: RefCell::new(None),
-        proceeded: RefCell::new(None),
         navigating: RefCell::new(String::new()),
         files: RefCell::new(None),
         schemes: RefCell::new(Vec::new()),
@@ -1392,99 +1386,34 @@ impl Page {
                     &mut token,
                 );
             }
-            // Certificate errors are the app's, and proceeding is for one
-            // load alone: WebView2 keeps an allow for the host and
-            // certificate for the session, so it's cleared as soon as it's
-            // given. The same page's further requests to that server (its
-            // pictures, its scripts) go through with it; any other load, in
-            // this view or another on the profile, is asked again.
+            // Certificate errors are the app's to hear, never to load past:
+            // WebView2 keeps a proceed for the host and certificate, and even
+            // with its decisions cleared at once, the same view's next load
+            // from that server went through unasked (a TLS session or
+            // connection kept). A proceed that can't be held to one load is
+            // refused: each error is cancelled and the app told it can't
+            // proceed, as on WebKitGTK.
             if let Ok(view14) = view.cast::<ICoreWebView2_14>() {
                 let page = on.clone();
-                let clearer = view14.clone();
                 let _ = view14.add_ServerCertificateErrorDetected(
                     &ServerCertificateErrorDetectedEventHandler::create(Box::new(
-                        move |sender, args| {
+                        move |_, args| {
                             let Some(args) = args else { return Ok(()) };
+                            let _ =
+                                args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL);
                             let url = take(|v| args.RequestUri(v));
                             let host = zgx::web_view::site_host(&url).unwrap_or_default();
-                            let pem = args
-                                .ServerCertificate()
-                                .ok()
-                                .map(|certificate| take(|v| certificate.ToPemEncoding(v)))
-                                .unwrap_or_default();
-                            let source = sender
-                                .map(|sender| take(|v| sender.Source(v)))
-                                .unwrap_or_default();
                             let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
                             let _ = args.ErrorStatus(&mut status);
-                            let clear = {
-                                let clearer = clearer.clone();
-                                move || {
-                                    let _ = clearer.ClearServerCertificateErrorActions(
-                                        &ClearServerCertificateErrorActionsCompletedHandler::create(
-                                            Box::new(|_| Ok(())),
-                                        ),
-                                    );
-                                }
-                            };
-                            // This page's own requests to the server it proceeded past.
-                            let same_page = Cell::new(false);
-                            page(&|page| {
-                                same_page.set(page.proceeded.borrow().as_ref().is_some_and(
-                                    |(h, p, at)| {
-                                        *h == host && *p == pem && (*at == source || *at == url)
-                                    },
-                                ));
-                            });
-                            if same_page.get() {
-                                let _ = args.SetAction(
-                                    COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
-                                );
-                                clear();
-                                return Ok(());
-                            }
-                            // The page proceeding: the one loading, or the one
-                            // asking for a picture or script from the server.
-                            let navigation = Cell::new(false);
-                            page(&|page| navigation.set(*page.navigating.borrow() == url));
-                            let at = if navigation.get() {
-                                url.clone()
-                            } else {
-                                source
-                            };
-                            let deferral = args.GetDeferral()?;
-                            let answer = {
-                                let page = page.clone();
-                                let (host, pem) = (host.clone(), pem);
-                                move |proceed: bool| {
-                                    let action = if proceed {
-                                        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW
-                                    } else {
-                                        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL
-                                    };
-                                    // WebView2 on the UI thread, where answers come
-                                    // (inside the handlers' `unsafe` block).
-                                    let _ = args.SetAction(action);
-                                    let _ = deferral.Complete();
-                                    if proceed {
-                                        page(&|page| {
-                                            *page.proceeded.borrow_mut() =
-                                                Some((host.clone(), pem.clone(), at.clone()));
-                                        });
-                                        clear();
-                                    }
-                                }
-                            };
                             let error = certificate_status(status);
                             page(&|page| {
-                                let answer = answer.clone();
                                 let (url, host, error) = (url.clone(), host.clone(), error.clone());
                                 page.post(move |web| {
                                     web.certificate_error(
                                         zgx::web_view::CertificateError::new(
-                                            url, host, error, true,
+                                            url, host, error, false,
                                         ),
-                                        zgx::web_view::CertificateResponder::new(true, answer),
+                                        zgx::web_view::CertificateResponder::new(false, |_| {}),
                                     );
                                 });
                             });
@@ -1991,8 +1920,6 @@ impl Page {
         if main_frame {
             self.loading.set(true);
             self.navigating.replace(url.clone());
-            // A load past a certificate error was that load alone.
-            self.proceeded.replace(None);
             self.post(move |web| {
                 web.update_state(|state| {
                     state.error = None;
