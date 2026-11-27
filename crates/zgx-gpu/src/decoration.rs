@@ -2,7 +2,7 @@
 use crate::GpuError;
 use zgx::{
     canvas::*,
-    decoration::{Background, BorderStyle, Corners},
+    decoration::{Background, BorderStyle, CornerCurve, Corners},
     scene::{Insets, QuadStyle, Rect},
 };
 fn radii(c: Corners, w: f32, h: f32) -> [(f32, f32); 4] {
@@ -28,6 +28,79 @@ fn radii(c: Corners, w: f32, h: f32) -> [(f32, f32); 4] {
     })
     .clamp(0., 1.);
     r.map(|r| (r * factor, r * factor))
+}
+/// How far along its sides a continuous corner starts, by its radius.
+const CONTINUOUS_REACH: f32 = 1.528_665;
+/// continuous.wgsl's field at `a`, for a way's progress `t` to the circle.
+fn supercircle(a: [f32; 2], t: [f32; 2]) -> f32 {
+    let (high, low) = (a[0].max(a[1]), a[0].min(a[1]));
+    let s = if high > 0. { (low / high).min(1.) } else { 0. };
+    let p = (((3.156_01 - 0.926_054 * s) * s - 3.641_22) * s + 1.268_03) * s + 0.268_531;
+    let round = a[0].hypot(a[1]) + 1. - 1. / (1. - s * s * p);
+    let v = a.map(|side| (side * CONTINUOUS_REACH - 0.528_665).max(0.));
+    let circle = v[0].hypot(v[1]) * 0.654_165_6 + 0.345_834_4;
+    let k = if a[1] > a[0] { t[0] } else { t[1] };
+    round + (circle - round) * k - 1.
+}
+/// Lines to a corner's curve.
+const CORNER_LINES: usize = 32;
+/// `rounded`, its corners what continuous.wgsl draws: found along rays from
+/// where the sides' straight parts end, for what can't draw on the quad path.
+fn rounded_continuous(rect: Rect, r: [(f32, f32); 4]) -> Path {
+    let points = continuous_points(rect, r);
+    let mut p = Path::builder();
+    for (i, &(x, y)) in points.iter().enumerate() {
+        match i {
+            0 => p.move_to(x, y),
+            _ => p.line_to(x, y),
+        };
+    }
+    p.close();
+    p.build().expect("finite normalized corners")
+}
+/// `rounded_continuous`'s corners in order round the box, each once, from
+/// the end of the top left corner, where `rounded` starts: dashes start there
+/// on either curve.
+fn continuous_points(rect: Rect, r: [(f32, f32); 4]) -> Vec<(f32, f32)> {
+    let (x, y, right, bottom) = (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+    let mut points: Vec<(f32, f32)> = Vec::with_capacity(4 * (CORNER_LINES + 1));
+    // Each corner, with the way its sides run from it.
+    for (radius, corner, across, down) in [
+        (r[1].0, (right, y), -1., 1.),
+        (r[2].0, (right, bottom), -1., -1.),
+        (r[3].0, (x, bottom), 1., -1.),
+        (r[0].0, (x, y), 1., 1.),
+    ] {
+        let reach = radius * CONTINUOUS_REACH;
+        let t = [rect.width, rect.height]
+            .map(|size| (2.891_557 - 1.445_778_5 * size / reach.max(1e-6)).clamp(0., 1.));
+        // Clockwise round the box: a corner starts on its side across or down.
+        let flip = across * down < 0.;
+        for line in 0..=CORNER_LINES {
+            let angle = std::f32::consts::FRAC_PI_2 * line as f32 / CORNER_LINES as f32;
+            let (sin, cos) = angle.sin_cos();
+            let (a, b) = if flip { (sin, cos) } else { (cos, sin) };
+            // How far out along the ray, in `a`: the field rises along it.
+            let (mut low, mut high) = (0.0_f32, 2.0_f32);
+            for _ in 0..24 {
+                let middle = (low + high) * 0.5;
+                if supercircle([middle * a, middle * b], t) < 0. {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            let (px, py) = (
+                corner.0 + across * reach * (1. - low * a),
+                corner.1 + down * reach * (1. - low * b),
+            );
+            if points.last() != Some(&(px, py)) {
+                points.push((px, py));
+            }
+        }
+    }
+    points.rotate_right(1);
+    points
 }
 fn rounded(rect: Rect, r: [(f32, f32); 4]) -> Path {
     let (x, y, right, bottom) = (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
@@ -64,6 +137,15 @@ fn rounded(rect: Rect, r: [(f32, f32); 4]) -> Path {
 /// A box's detailed decoration (`style.decoration`) as canvas commands, at
 /// `width` by `height`: what rasterizes when it can't draw analytically.
 pub fn canvas(style: &QuadStyle, width: f32, height: f32) -> Result<Canvas, GpuError> {
+    canvas_on(style, CornerCurve::Circular, width, height)
+}
+/// `canvas`, its corners on `curve`.
+pub(crate) fn canvas_on(
+    style: &QuadStyle,
+    curve: CornerCurve,
+    width: f32,
+    height: f32,
+) -> Result<Canvas, GpuError> {
     let Some(detail) = &style.decoration else {
         return Err(GpuError("missing detailed decoration".into()));
     };
@@ -82,7 +164,11 @@ pub fn canvas(style: &QuadStyle, width: f32, height: f32) -> Result<Canvas, GpuE
         return Err(GpuError("nonfinite decoration dimensions".into()));
     }
     let radius = radii(corners, width, height);
-    let outer = rounded(Rect::new(0., 0., width, height), radius);
+    let shape = match curve {
+        CornerCurve::Continuous => rounded_continuous,
+        CornerCurve::Circular => rounded,
+    };
+    let outer = shape(Rect::new(0., 0., width, height), radius);
     let mut canvas = Canvas::new();
     let background = match &detail.background {
         None => Brush::Solid(style.fill),
@@ -128,7 +214,7 @@ pub fn canvas(style: &QuadStyle, width: f32, height: f32) -> Result<Canvas, GpuE
             (height - top - bottom).max(0.),
         );
         if inner.width > 0. && inner.height > 0. {
-            ring.append(&rounded(
+            ring.append(&shape(
                 inner,
                 [
                     ((radius[0].0 - left).max(0.), (radius[0].1 - top).max(0.)),
@@ -147,6 +233,7 @@ pub fn canvas(style: &QuadStyle, width: f32, height: f32) -> Result<Canvas, GpuE
             &mut canvas,
             ring,
             frame,
+            curve,
             maximum,
             detail.border_style,
             style.border_color,
@@ -154,7 +241,7 @@ pub fn canvas(style: &QuadStyle, width: f32, height: f32) -> Result<Canvas, GpuE
     }
     Ok(canvas)
 }
-/// A ring inside `outer` (rounded by its radii), `width` wide at most, drawn
+/// A ring inside `outer` (rounded by its radii, on `curve`), `width` wide at most, drawn
 /// solid, dashed (its ring stroked along `outer`, cut to the ring) or dotted
 /// (`BorderStyle::DOTTED`: round dots `width` across along its middle,
 /// spaced evenly all round), in `color`. `ring` is its area.
@@ -162,6 +249,7 @@ fn styled_ring(
     canvas: &mut Canvas,
     ring: Path,
     (outer, radius): (Rect, [(f32, f32); 4]),
+    curve: CornerCurve,
     width: f32,
     style: BorderStyle,
     color: zgx::scene::Color,
@@ -178,11 +266,15 @@ fn styled_ring(
     {
         return Err(GpuError("invalid dashed border".into()));
     }
+    let shape = match curve {
+        CornerCurve::Continuous => rounded_continuous,
+        CornerCurve::Circular => rounded,
+    };
     if length > 0. {
         canvas
             .clip(ring, FillRule::EvenOdd)
             .stroke(
-                rounded(outer, radius),
+                shape(outer, radius),
                 color,
                 Stroke {
                     width: width * 2.,
@@ -203,14 +295,22 @@ fn styled_ring(
         (outer.height - width).max(0.),
     );
     let corners = radius.map(|(x, y)| ((x - half).max(0.), (y - half).max(0.)));
-    let around = perimeter(middle, corners);
+    let around = match curve {
+        CornerCurve::Circular => perimeter(middle, corners),
+        CornerCurve::Continuous => {
+            let points = continuous_points(middle, corners);
+            let next = points.iter().cycle().skip(1);
+            let lines = points.iter().zip(next);
+            lines.map(|(a, b)| (b.0 - a.0).hypot(b.1 - a.1)).sum()
+        }
+    };
     let pitch = width + if gap > 0. { gap } else { width };
     if around <= 0. || pitch <= 0. {
         return Ok(());
     }
     let dots = (around / pitch).round().max(1.);
     canvas.stroke(
-        rounded(middle, corners),
+        shape(middle, corners),
         color,
         Stroke {
             width,
@@ -273,6 +373,8 @@ pub fn outline_canvas(
         &mut canvas,
         ring.build().unwrap(),
         (outer, corners),
+        // (A dashed or dotted outline keeps to the circular corner.)
+        CornerCurve::Circular,
         w,
         outline_style,
         outline.color,

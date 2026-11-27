@@ -18,6 +18,8 @@ const MAX_ENTRIES: usize = 1024;
 struct Entry {
     canvas: Weak<Canvas>,
     decoration: Option<zgx::scene::QuadStyle>,
+    /// What `decoration`'s corners were drawn on.
+    curve: zgx::decoration::CornerCurve,
     width: f32,
     height: f32,
     scale: f32,
@@ -928,6 +930,17 @@ impl CanvasCache {
             self.retain_pyramids(|id| id != node);
         }
     }
+    /// Forget the rasters drawn on a curve other than the circle.
+    #[cold]
+    pub(crate) fn forget_curved(&mut self) {
+        let curved: Vec<NodeId> = (self.entries.iter())
+            .filter(|(_, entry)| entry.curve != zgx::decoration::CornerCurve::Circular)
+            .map(|(node, _)| *node)
+            .collect();
+        for node in curved {
+            self.forget(node);
+        }
+    }
     /// How many rasterizations it has done.
     pub fn rasterizations(&self) -> u64 {
         self.rasterizations
@@ -961,6 +974,37 @@ impl CanvasCache {
         let image = self.get(node, &canvas, width, height, scale)?;
         if let Some(entry) = self.entries.get_mut(&node) {
             entry.decoration = Some(style.clone());
+        }
+        Ok(image)
+    }
+    /// `get_decoration`, its corners on `curve`: for frames of scenes with
+    /// continuous corners. (`forget_curved` drops what it drew on another
+    /// curve, for `get_decoration` once none are left.)
+    pub(crate) fn get_decoration_on(
+        &mut self,
+        node: NodeId,
+        style: &zgx::scene::QuadStyle,
+        curve: zgx::decoration::CornerCurve,
+        width: f32,
+        height: f32,
+        scale: f32,
+    ) -> Result<Raster, GpuError> {
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(entry) = self.entries.get_mut(&node)
+            && entry.decoration.as_ref() == Some(style)
+            && entry.curve == curve
+            && entry.width == width
+            && entry.height == height
+            && entry.scale == scale
+        {
+            entry.used = self.clock;
+            return Ok(entry.raster());
+        }
+        let canvas = Arc::new(crate::decoration::canvas_on(style, curve, width, height)?);
+        let image = self.get(node, &canvas, width, height, scale)?;
+        if let Some(entry) = self.entries.get_mut(&node) {
+            entry.decoration = Some(style.clone());
+            entry.curve = curve;
         }
         Ok(image)
     }
@@ -1450,6 +1494,7 @@ impl CanvasCache {
             Entry {
                 canvas: Arc::downgrade(canvas),
                 decoration: None,
+                curve: Default::default(),
                 width,
                 height,
                 scale,

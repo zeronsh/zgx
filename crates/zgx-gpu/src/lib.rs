@@ -5,6 +5,7 @@
 use cosmic_text::{Buffer, CacheKey, FontSystem, Metrics, SwashCache, SwashContent};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
+use zgx::decoration::CornerCurve;
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
 // Text shaping and measuring, in a crate of their own (zgx-text) that a host
 // with no renderer links alone; here as they always were.
@@ -735,6 +736,12 @@ enum Shading {
     /// An opaque flat colour: `basic` without blending, which reads every
     /// pixel it writes. Same pixels.
     Opaque,
+    /// `shade` with corners `CornerCurve::Continuous`, where `shape.w` says
+    /// so (`continuous_source`): its own pipeline, compiled when a box first
+    /// asks for it. Draws whatever `Full` draws, to the same bytes.
+    /// (Declared here: `push_draw` and `merged_shading` each ask for a run of
+    /// neighbours, one compare; apart, a bit test for every draw.)
+    Continuous,
     /// A shader fill (`FillShader`, by id): its pipeline, `shade` for
     /// whatever else the draw holds.
     Fill(u64),
@@ -844,7 +851,8 @@ impl QuadPipelines {
             | Shading::Filter(_)
             | Shading::Blend
             | Shading::FilterBlend(_)
-            | Shading::ImageEffect => (&self.full, false, Some(OVER)),
+            | Shading::ImageEffect
+            | Shading::Continuous => (&self.full, false, Some(OVER)),
             Shading::Basic => (&self.basic, true, Some(OVER)),
             Shading::Opaque => (&self.basic_clear, true, None),
             Shading::Polyline => return &self.polylines().pipeline,
@@ -967,6 +975,7 @@ fn push_draw(
                 | Shading::Blend
                 | Shading::FilterBlend(_)
                 | Shading::ImageEffect
+                | Shading::Continuous
         );
     if !(split || polylines) || draw.end <= draw.start {
         draws.push(draw);
@@ -4099,7 +4108,8 @@ impl<'p> Picks<'p> {
             | Shading::Filter(_)
             | Shading::Blend
             | Shading::FilterBlend(_)
-            | Shading::ImageEffect => self.full,
+            | Shading::ImageEffect
+            | Shading::Continuous => self.full,
             Shading::Basic => self.basic,
             Shading::Opaque => self.opaque,
             Shading::Polyline => self.polyline.expect("made for a frame with polylines"),
@@ -4163,6 +4173,8 @@ fn merged_shading(a: Shading, b: Shading) -> Option<Shading> {
         Shading::Opaque => Some(0),
         Shading::Basic => Some(1),
         Shading::Full => Some(2),
+        // Draws all of those, and is never drawn by them.
+        Shading::Continuous => Some(3),
         Shading::Fill(_)
         | Shading::Filter(_)
         | Shading::Blend
@@ -5549,6 +5561,11 @@ pub struct GpuRenderer {
     /// The image effects' pipeline (image_effects.wgsl), made when an image
     /// first draws with one.
     image_effect_pipeline: std::cell::OnceCell<wgpu::RenderPipeline>,
+    /// `Shading::Continuous`'s pipeline, compiled off the frame when a box
+    /// first asks for it (`prepare_continuous`).
+    continuous_pipeline: std::cell::OnceCell<compile::Slot<wgpu::RenderPipeline>>,
+    /// Whether the last frame's scene had continuous corners (`curves_changed`).
+    drew_curves: bool,
     fill_shaders: FxHashMap<u64, Arc<zgx::decoration::FillShader>>,
     /// Layer shaders' pipelines by shader id (`None`: it failed to compile).
     filter_pipelines: FxHashMap<u64, compile::Compiled<wgpu::RenderPipeline>>,
@@ -6247,6 +6264,8 @@ impl GpuRenderer {
             blend_layouts: std::cell::OnceCell::new(),
             backdrops: FxHashMap::default(),
             image_effect_pipeline: Default::default(),
+            continuous_pipeline: Default::default(),
+            drew_curves: false,
             fill_shaders: FxHashMap::default(),
             filter_shaders: FxHashMap::default(),
             plane: None,
@@ -8638,6 +8657,7 @@ impl GpuRenderer {
             Shading::Blend => self.blend_pipelines.get(&BLEND_PLAIN)?.get(),
             Shading::FilterBlend(id) => self.blend_pipelines.get(&id)?.get(),
             Shading::ImageEffect => self.image_effect_pipeline.get(),
+            Shading::Continuous => self.continuous_pipeline.get()?.get(),
             _ => None,
         }
     }
@@ -8658,6 +8678,68 @@ impl GpuRenderer {
                 "zgx_image_effect",
             )
         });
+    }
+    /// A box with continuous corners (`Scene::corner_curve`): its draw takes
+    /// their pipeline and its quads say so. Out of line, and reached only in
+    /// frames of scenes that have such boxes (`render_flat_taking::<_, true>`).
+    /// Its shader fill, if any, shades it as it is: circular. So is the box
+    /// while the pipeline compiles (`prepare_continuous`).
+    #[cold]
+    #[inline(never)]
+    fn continuous_box(
+        &mut self,
+        quads: &mut [Quad],
+        start: u32,
+        fill_shading: Option<Shading>,
+    ) -> Option<Shading> {
+        if fill_shading.is_some() {
+            return fill_shading;
+        }
+        // Still compiling: drawn as the circular box it otherwise is, its
+        // quads as made, and again once compiled (`images_awaited`).
+        if !self.prepare_continuous() {
+            self.images_awaited = true;
+            return fill_shading;
+        }
+        for quad in &mut quads[start as usize..] {
+            // (Not a transformed quad, whose `shape` is its matrix, nor a stroke.)
+            if quad.options[2] < 0.5
+                && quad.mask[2] <= 0.
+                && (quad.shape[3] > 0.5 || quad.shape[2] > 0.)
+            {
+                quad.shape[3] = 2.;
+            }
+        }
+        Some(Shading::Continuous)
+    }
+    /// The scene's boxes came to have continuous corners, or have none left:
+    /// then rasters drawn on them go (a frame without any reads the cache as
+    /// though every raster were circular).
+    #[cold]
+    #[inline(never)]
+    fn curves_changed(&mut self, curves: bool) {
+        self.drew_curves = curves;
+        if !curves {
+            self.canvases.forget_curved();
+        }
+    }
+    /// The pipeline for continuous corners, compiled or compiling: before the
+    /// first quad asking for them is drawn, as the choice of path below reads.
+    /// Whether it can draw: else started compiling on the shader-compile
+    /// thread (`compile::start`), a window's frame going on without it, as
+    /// for a shader fill; an offscreen renderer waits for it.
+    fn prepare_continuous(&self) -> bool {
+        let slot = self.continuous_pipeline.get_or_init(|| {
+            let (device, layout) = (self.device.clone(), self.context.inner.quad_layout.clone());
+            compile::start(self.waits_for_shaders(), move || {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("continuous corners"),
+                    source: wgpu::ShaderSource::Wgsl(continuous_source().into()),
+                });
+                fill_pipeline(&device, &module, &module, &layout, "fs")
+            })
+        });
+        slot.get().is_some()
     }
     /// A shader's pipeline from WGSL `source`, built by `build(vertex,
     /// fragment)`, or none if it fails. `apps`: an app's own shader, which
@@ -9332,6 +9414,7 @@ impl GpuRenderer {
         // kept must lie in one.
         let mut splices: Vec<(usize, usize, NodeId)> = Vec::new();
         let (mut leaving, mut entering) = (Vec::new(), Vec::new());
+        let curves = scene.has_corner_curves();
         for &(id, flags) in repaints {
             let first = kept.by_node.get(id, &kept.items);
             if !scene.contains(id) {
@@ -9347,8 +9430,10 @@ impl GpuRenderer {
                 }
                 continue;
             };
+            // (A box with continuous corners isn't made alone, as plain ones are.)
             if flags & (zgx::scene::repaint::COMPOSITE | zgx::scene::repaint::CHILDREN) != 0
                 || !scene.children(id).is_empty()
+                || (curves && scene.corner_curve(id) != CornerCurve::Circular)
             {
                 splices.push((first, kept.items[first].end as usize, id));
                 continue;
@@ -10027,13 +10112,22 @@ impl GpuRenderer {
                 .map(|job| (job.node, job.purpose))
                 .collect(),
         };
-        let result = self.render_flat_taking::<MODE>(scene, items, damage, merged, record);
+        // A scene with continuous corners draws with the copy that asks each
+        // box for its curve; any other with the one that has no such code.
+        let curves = scene.has_corner_curves();
+        if self.drew_curves != curves {
+            self.curves_changed(curves);
+        }
+        let result = match curves {
+            false => self.render_flat_taking::<MODE, false>(scene, items, damage, merged, record),
+            true => self.render_flat_taking::<MODE, true>(scene, items, damage, merged, record),
+        };
         if result.is_err() {
             self.forget_slots(&planned);
         }
         result
     }
-    fn render_flat_taking<const MODE: u8>(
+    fn render_flat_taking<const MODE: u8, const CURVES: bool>(
         &mut self,
         scene: &Scene,
         items: Vec<zgx::scene::PaintItem<'_>>,
@@ -10661,6 +10755,9 @@ impl GpuRenderer {
                                     }
                                 }
                             }
+                            if CURVES && scene.corner_curve(item.id) == CornerCurve::Continuous {
+                                fill_shading = self.continuous_box(&mut quads, start, fill_shading);
+                            }
                         } else {
                             // (None for a popup's panel its system shadows,
                             // `set_unshadowed`.)
@@ -10814,6 +10911,11 @@ impl GpuRenderer {
                                 if ring && !later {
                                     quads.push(ring_quad(style, bounds, opacity, edge_fade));
                                 }
+                                if CURVES && scene.corner_curve(item.id) == CornerCurve::Continuous
+                                {
+                                    fill_shading =
+                                        self.continuous_box(&mut quads, start, fill_shading);
+                                }
                             } else if let Some((key, uv)) = (!style.has_border() || ring)
                                 .then(|| axis_gradient(style, bounds))
                                 .flatten()
@@ -10864,10 +10966,21 @@ impl GpuRenderer {
                                 if ring && !later {
                                     quads.push(ring_quad(style, bounds, opacity, edge_fade));
                                 }
+                                if CURVES && scene.corner_curve(item.id) == CornerCurve::Continuous
+                                {
+                                    fill_shading =
+                                        self.continuous_box(&mut quads, start, fill_shading);
+                                }
                             } else if style.decoration.is_some()
                                 && bounds.width > 0.
                                 && bounds.height > 0.
                             {
+                                // (Its shadows; the raster cuts its own corners.)
+                                if CURVES && scene.corner_curve(item.id) == CornerCurve::Continuous
+                                {
+                                    fill_shading =
+                                        self.continuous_box(&mut quads, start, fill_shading);
+                                }
                                 // Its border left to the border pass, when it has one.
                                 let drawn = match later {
                                     true => std::borrow::Cow::Owned(zgx::scene::QuadStyle {
@@ -10885,9 +10998,19 @@ impl GpuRenderer {
                                 let before = self.canvases.rasterizations();
                                 let (width, height, scale) =
                                     (bounds.width, bounds.height, self.scale);
-                                let id = self.canvas_texture(item.id, &mut stats, |cache| {
-                                    cache.get_decoration(item.id, &drawn, width, height, scale)
-                                })?;
+                                let id = match CURVES {
+                                    false => self.canvas_texture(item.id, &mut stats, |cache| {
+                                        cache.get_decoration(item.id, &drawn, width, height, scale)
+                                    })?,
+                                    true => {
+                                        let curve = scene.corner_curve(item.id);
+                                        self.canvas_texture(item.id, &mut stats, |cache| {
+                                            cache.get_decoration_on(
+                                                item.id, &drawn, curve, width, height, scale,
+                                            )
+                                        })?
+                                    }
+                                };
                                 stats.canvas_rasterizations +=
                                     (self.canvases.rasterizations() - before) as usize;
                                 canvas_image = Some(id);
@@ -10908,6 +11031,11 @@ impl GpuRenderer {
                                     self.scale,
                                     self.split_shading,
                                 );
+                                if CURVES && scene.corner_curve(item.id) == CornerCurve::Continuous
+                                {
+                                    fill_shading =
+                                        self.continuous_box(&mut quads, start, fill_shading);
+                                }
                             }
                         }
                     }
@@ -12159,7 +12287,8 @@ impl GpuRenderer {
             && ((self.fill_pipelines.is_empty()
                 && self.filter_pipelines.is_empty()
                 && self.blend_pipelines.is_empty()
-                && self.image_effect_pipeline.get().is_none())
+                && self.image_effect_pipeline.get().is_none()
+                && self.continuous_pipeline.get().is_none())
                 || draws
                     .iter()
                     .chain(bands.iter().flat_map(|band| &band.draws))
@@ -12178,12 +12307,14 @@ impl GpuRenderer {
                     .as_ref()
                     .is_some_and(|frame| frame.image_effects()),
                 // Layer shaders and blend modes take the wgpu path, as layers'
-                // own frames do (gradient text's, `!self.in_layer` above).
+                // own frames do (gradient text's, `!self.in_layer` above), and
+                // so do continuous corners: draw.metal draws circular ones.
                 Shading::Filter(_)
                 | Shading::Blend
                 | Shading::FilterBlend(_)
                 | Shading::SourceIn
-                | Shading::Behind => false,
+                | Shading::Behind
+                | Shading::Continuous => false,
                 _ => true,
             }))
             && effect_jobs.iter().all(|job| {
@@ -12403,8 +12534,8 @@ impl GpuRenderer {
         } else {
             vec![0; regions.len()]
         };
-        // Shader fills and image effects have no pipelines writing two
-        // targets at once.
+        // Shader fills, image effects and continuous corners have no
+        // pipelines writing two targets at once.
         let defer = !self.in_layer
             && self.single_pass_format.is_some()
             && !draws.iter().any(|draw| {
@@ -12415,6 +12546,7 @@ impl GpuRenderer {
                         | Shading::Blend
                         | Shading::FilterBlend(_)
                         | Shading::ImageEffect
+                        | Shading::Continuous
                 )
             })
             && (!self.present_unpremultiplies || self.background.3 == 255)
@@ -12959,6 +13091,13 @@ impl GpuRenderer {
                 draw.end = draw.start;
             }
         }
+        for draw in draws.iter_mut() {
+            // draw.hlsl's corners are circular: the rest of the box is drawn.
+            if draw.shading == Shading::Continuous && draw.end > draw.start {
+                d3d11_frame::left_out("continuous corners (drawn circular)");
+                draw.shading = Shading::Full;
+            }
+        }
     }
     /// What a frame needs that Direct3D 11 neither draws nor leaves out
     /// (`d3d11_leave_out`), if anything: it draws what the Windows suite's
@@ -12983,6 +13122,7 @@ impl GpuRenderer {
                     | Shading::Polyline
                     | Shading::SourceIn
                     | Shading::Behind
+                    | Shading::Continuous
                     // Compiled (`d3d11_app_shaders`).
                     | Shading::Fill(_)
                     | Shading::Filter(_),
@@ -14465,7 +14605,7 @@ impl GpuRenderer {
                                 open.pixels
                             } + if merged == shading { 0. } else { pixels };
                             let budget = match merged {
-                                Shading::Full => PROMOTED_FULL_PIXELS,
+                                Shading::Full | Shading::Continuous => PROMOTED_FULL_PIXELS,
                                 _ => PROMOTED_PIXELS,
                             };
                             (promoted <= budget).then_some((merged, promoted))
@@ -20972,6 +21112,48 @@ pub(crate) fn image_effect_source() -> String {
         include_str!("image_effects.wgsl")
     )
 }
+/// draw.wgsl's lines working out a box's corner, and what they become for
+/// continuous corners: a second `shade` that way, not a copy to keep in step.
+const CONTINUOUS_LINES: [(&str, &str); 6] = [
+    (
+        "   let distance=length(max(q,vec2(0.)))+min(max(q.x,q.y),0.)-radius;\n",
+        "   let continuous=v.shape.w>1.5&&radius>0.;\n   var edge=vec3(0.);\n   if continuous {edge=corner_edge(v.fade.zw*0.5-centred(v.position.xy,v.fade),radius,v.fade.zw);}\n   let distance=select(length(max(q,vec2(0.)))+min(max(q.x,q.y),0.)-radius,edge.x,continuous);\n",
+    ),
+    (
+        "   let gradient=select(select(vec2(0.,1.),vec2(1.,0.),q.x>q.y),outside/max(reach,1e-20),reach>0.);\n",
+        "   let gradient=select(select(select(vec2(0.,1.),vec2(1.,0.),q.x>q.y),outside/max(reach,1e-20),reach>0.),edge.yz,continuous);\n",
+    ),
+    (
+        "     let inside=length(max(iq,vec2(0.)))+min(max(iq.x,iq.y),0.)-inner_radius;\n",
+        "     let curved=continuous&&inner_radius>0.;\n     var inner=vec3(0.);\n     if curved {inner=corner_edge(box.zw*0.5-centred(v.position.xy,box),inner_radius,box.zw);}\n     let inside=select(length(max(iq,vec2(0.)))+min(max(iq.x,iq.y),0.)-inner_radius,inner.x,curved);\n",
+    ),
+    // `CALayer`'s ramp is a pixel across its gradient, however thin that is.
+    (
+        "     let aa=max(slope.x+slope.y,0.5);\n",
+        "     let aa=select(max(slope.x+slope.y,0.5),slope.x+slope.y,continuous);\n",
+    ),
+    (
+        "     let hollow=select(0.,clamp(0.5-inside/aa,0.,1.),box.z>0.&&box.w>0.);\n",
+        "     let inner_aa=select(aa,(inner.y+inner.z)/viewport.z,curved);\n     let hollow=select(0.,clamp(0.5-inside/inner_aa,0.,1.),box.z>0.&&box.w>0.);\n",
+    ),
+    (
+        "let aa=max(select(dx+dy,max(dx,dy),radius<=0.),0.5);",
+        "let aa=select(max(select(dx+dy,max(dx,dy),radius<=0.),0.5),dx+dy,continuous);",
+    ),
+];
+/// The module of `Shading::Continuous`: draw.wgsl, its corners those of
+/// continuous.wgsl where `shape.w` asks.
+pub(crate) fn continuous_source() -> String {
+    let mut source = include_str!("draw.wgsl").to_owned();
+    for (line, continuous) in CONTINUOUS_LINES {
+        assert!(
+            source.matches(line).count() == 1,
+            "draw.wgsl's corner line: {line}"
+        );
+        source = source.replace(line, continuous);
+    }
+    format!("{source}\n{}", include_str!("continuous.wgsl"))
+}
 /// The blends quads draw with besides premultiplied alpha, by name: gradient
 /// text's (`Shading::SourceIn`, `Shading::Behind`), for `tests/every_shader.rs`
 /// to make draw.wgsl's pipelines with.
@@ -20996,6 +21178,7 @@ pub fn shader_modules() -> Vec<(&'static str, String)> {
         ("polyline", polyline_source(false)),
         ("polyline with areas", polyline_source(true)),
         ("image effects", image_effect_source()),
+        ("continuous corners", continuous_source()),
         ("blend", blend_source()),
         (
             "fill",
@@ -21338,6 +21521,8 @@ fn push_panel(quads: &mut Vec<Quad>, quad: Quad, scale: f32, split: bool) {
     } else {
         quad.shape[0]
     };
+    // (The interior lies a radius in from both sides: inside a continuous
+    // corner too, though that starts 1.53 radii along them.)
     let band = radius.max(quad.shape[1] + 1.).max(0.) + 1.;
     let [x, y, width, height] = quad.rect;
     let (right, bottom) = (x + width, y + height);

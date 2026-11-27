@@ -644,6 +644,31 @@ fn a_scroll_view_takes_paging() {
     assert_eq!(scrolled("paging = false,"), (30., false));
 }
 
+/// `corner_curve = "continuous"` is `CornerCurve::Continuous`; unset, it is
+/// circular.
+#[test]
+fn a_box_takes_its_corner_curve() {
+    use zgx::decoration::CornerCurve;
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.div { id = "continuous", w = 20, h = 20, rounded = 6, bg = "#000", corner_curve = "continuous" },
+            ui.div { id = "circular", w = 20, h = 20, rounded = 6, bg = "#000", corner_curve = "circular" },
+            ui.div { id = "plain", w = 20, h = 20, rounded = 6, bg = "#000" } }"##,
+    );
+    h.ui.prepare_frame();
+    let ids = ["continuous", "circular", "plain"].map(|id| h.find(id).unwrap());
+    let scene = h.ui.scene.borrow();
+    let curves = ids.map(|id| scene.corner_curve(id));
+    assert_eq!(
+        curves,
+        [
+            CornerCurve::Continuous,
+            CornerCurve::Circular,
+            CornerCurve::Circular
+        ]
+    );
+}
+
 /// `border_style = "dotted"` dots the border; `outline_style` and
 /// `outline_dash` break the outline.
 #[test]

@@ -737,6 +737,8 @@ pub(crate) struct ColdStyles {
     pub(crate) grid_place: Option<std::sync::Arc<crate::grid_tracks::GridPlace>>,
     /// `Styled::z`.
     pub(crate) z: Option<i32>,
+    /// `Styled::corner_curve`.
+    pub(crate) corner_curve: Option<crate::decoration::CornerCurve>,
     /// `Styled::display_contents`.
     pub(crate) display_contents: bool,
     /// `Styled::sticky_top`.
@@ -1023,6 +1025,9 @@ impl RareStyles {
             }
             if theirs.z.is_some() {
                 mine.z = theirs.z;
+            }
+            if theirs.corner_curve.is_some() {
+                mine.corner_curve = theirs.corner_curve;
             }
             mine.display_contents |= theirs.display_contents;
             if let Some(template) = &theirs.grid_template {
@@ -2446,6 +2451,14 @@ pub trait Styled: Sized {
     fn clip_feather(mut self, px: f32) -> Self {
         self.styles_mut().rare_mut().clip_feather =
             Some(if px.is_finite() { px.max(0.) } else { 0. });
+        self
+    }
+    /// The shape of its rounded corners (see `Scene::set_corner_curve`,
+    /// which says why apps shouldn't ask for the continuous one yet).
+    #[doc(hidden)]
+    fn corner_curve(mut self, curve: crate::decoration::CornerCurve) -> Self {
+        let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
+        cold.corner_curve = Some(curve);
         self
     }
     /// Shadows inside the box (CSS's `inset`): see `Decoration::inset_shadows`.

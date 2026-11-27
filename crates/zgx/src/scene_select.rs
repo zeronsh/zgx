@@ -441,6 +441,42 @@ impl Scene {
         self.sync_cold(id);
         self.invalidate(id, PAINTED);
     }
+    /// Draw box `id`'s corners on `curve`: its fill, border (dashed and dotted
+    /// too), shadows, sharp inset shadows and solid outline follow it. What it
+    /// clips, its blurred inset shadows, a dashed or dotted outline, a backdrop
+    /// blur and a shader fill keep to the circular corner. (Not for apps yet:
+    /// see `CornerCurve::Continuous`.)
+    #[doc(hidden)]
+    pub fn set_corner_curve(&mut self, id: NodeId, curve: crate::decoration::CornerCurve) {
+        if !self.contains(id) || self.corner_curve(id) == curve {
+            return;
+        }
+        let maps = self.cold.get_or_insert_default();
+        match curve {
+            crate::decoration::CornerCurve::Circular => maps.corner_curves.remove(&id),
+            curve => maps.corner_curves.insert(id, curve),
+        };
+        self.sync_cold(id);
+        // Its own paint changed: damaged there.
+        self.invalidate(id, PAINT);
+    }
+    /// Whether any box's corners are other than circular.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn has_corner_curves(&self) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| !cold.corner_curves.is_empty())
+    }
+    /// The curve of box `id`'s corners (`set_corner_curve`).
+    #[doc(hidden)]
+    pub fn corner_curve(&self, id: NodeId) -> crate::decoration::CornerCurve {
+        self.cold
+            .as_ref()
+            .and_then(|cold| cold.corner_curves.get(&id))
+            .copied()
+            .unwrap_or_default()
+    }
     /// Draw node `id`'s image in nine pieces as `slice` cuts it (a
     /// nine-patch, `ImageSlice`); `None`: whole, as it fits.
     pub fn set_image_slice(&mut self, id: NodeId, slice: Option<crate::image::ImageSlice>) {

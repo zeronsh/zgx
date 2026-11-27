@@ -2267,6 +2267,8 @@ struct ColdMaps {
     image_slices: NodeMap<crate::image::ImageSlice>,
     /// Outlines drawn dashed or dotted (`set_outline_style`).
     outline_styles: NodeMap<crate::decoration::BorderStyle>,
+    /// Boxes with continuous corners (`set_corner_curve`): no circular one.
+    corner_curves: NodeMap<crate::decoration::CornerCurve>,
     /// Outlines' inner rings (`set_outline_inner`).
     outline_inners: NodeMap<(f32, Color)>,
     /// Boxes whose width their content doesn't size (`set_contained`).
@@ -9071,6 +9073,7 @@ impl Scene {
                 || cold.image_rendering.contains_key(&id)
                 || cold.image_slices.contains_key(&id)
                 || cold.outline_styles.contains_key(&id)
+                || cold.corner_curves.contains_key(&id)
                 || cold.outline_inners.contains_key(&id)
                 || cold.contained.contains_key(&id)
                 || cold.mask_gradients.contains_key(&id)
@@ -9771,6 +9774,7 @@ impl Scene {
             maps.image_rendering.remove(&id);
             maps.image_slices.remove(&id);
             maps.outline_styles.remove(&id);
+            maps.corner_curves.remove(&id);
             maps.outline_inners.remove(&id);
             maps.steps.remove(&id);
             maps.contained.remove(&id);
