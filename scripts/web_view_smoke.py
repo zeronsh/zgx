@@ -696,6 +696,22 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
         session.click(300, 300, 5)
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")
     checks["scrolled"] = scrolled[0][0]["scrolled"]
+    # Editing commands: Ctrl+O selects all of the page and copies it, which
+    # reaches the system's clipboard (over a sentinel another client put there).
+    session.clipboard("zgx-sentinel")
+    session.key("ctrl+o")
+    session.wait(lambda: session.lines("EDIT ")[-1:] == ["Ok(())"], "the page took no editing command")
+    copied = session.wait(lambda: (lambda text: text if text and text != "zgx-sentinel" else None)(session.clipboard()),
+                          "select all and copy put nothing on the clipboard")
+    if "Probe heading" not in copied:
+        raise AssertionError(f"copying all of the page gave {copied[:80]!r}")
+    checks["edit commands"] = True
+    # Reloading ignoring the cache loads the page again.
+    finished = len(session.lines("FINISHED "))
+    session.key("ctrl+u")
+    session.wait(lambda: session.lines("RELOAD ")[-1:] == ["Ok(())"], "the page didn't take the reload")
+    session.wait(lambda: len(session.lines("FINISHED ")) > finished, "reloading ignoring the cache loaded nothing")
+    checks["reload ignoring the cache"] = True
     return checks
 
 

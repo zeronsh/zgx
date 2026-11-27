@@ -44,6 +44,9 @@ use zgx_gpu::{
 thread_local! {
     /// The UI thread's pages, by their web view's id.
     static PAGES: RefCell<HashMap<u64, Weak<Page>>> = RefCell::new(HashMap::new());
+    /// The system's clipboard, which Ladybird's pages copy to and paste from
+    /// (one for the app: a window's, the last to make pages' boxes).
+    static CLIPBOARD: RefCell<Option<Rc<RefCell<Option<crate::clipboard::Clipboard>>>>> = const { RefCell::new(None) };
 }
 
 /// Run what the host's thread delivered (the UI thread's safe point).
@@ -105,6 +108,47 @@ fn page(view: u64) -> Option<Rc<Page>> {
 
 /// A host message about a page's state, on the UI thread.
 fn take(message: FromHost) {
+    match &message {
+        FromHost::ClipboardWrite { text, html } => {
+            CLIPBOARD.with(|clipboard| {
+                let clipboard = clipboard.borrow();
+                let Some(clipboard) = clipboard.as_ref() else {
+                    return;
+                };
+                if let Some(clipboard) = clipboard.borrow_mut().as_mut() {
+                    let _ = if html.is_empty() {
+                        clipboard.set_text(text.clone())
+                    } else {
+                        clipboard.set_rich_text(text.clone(), html.clone())
+                    };
+                }
+            });
+            return;
+        }
+        FromHost::ClipboardRead { request } => {
+            let (text, html) = CLIPBOARD.with(|clipboard| {
+                let clipboard = clipboard.borrow();
+                let mut held = clipboard.as_ref().map(|clipboard| clipboard.borrow_mut());
+                match held.as_mut().and_then(|held| held.as_mut()) {
+                    Some(clipboard) => (
+                        clipboard.get_text().unwrap_or_default(),
+                        clipboard.get_html().unwrap_or_default(),
+                    ),
+                    None => (String::new(), String::new()),
+                }
+            });
+            if let Some(host) = client::host() {
+                host.send(
+                    Message::new(ToHost::ClipboardData, 0)
+                        .u64(*request)
+                        .str(&text)
+                        .str(&html),
+                );
+            }
+            return;
+        }
+        _ => {}
+    }
     let view = match &message {
         FromHost::Title { view, .. }
         | FromHost::Url { view, .. }
@@ -113,10 +157,11 @@ fn take(message: FromHost) {
         | FromHost::History { view, .. }
         | FromHost::Cursor { view, .. }
         | FromHost::NewWindow { view, .. }
-        | FromHost::Crashed { view }
+        | FromHost::Crashed { view, .. }
         | FromHost::Editing { view, .. }
         | FromHost::LinkHovered { view, .. }
         | FromHost::ThemeColor { view, .. } => *view,
+        FromHost::ClipboardWrite { .. } | FromHost::ClipboardRead { .. } => return,
         FromHost::Ready
         | FromHost::Store { .. }
         | FromHost::Present { .. }
@@ -163,7 +208,19 @@ fn take(message: FromHost) {
         }),
         FromHost::Cursor { cursor, .. } => page.set_cursor(cursor_of(cursor)),
         FromHost::NewWindow { url, .. } => web.emit(WebViewEvent::NewWindowRequested { url }),
-        FromHost::Crashed { .. } => web.emit(WebViewEvent::ProcessTerminated),
+        FromHost::Crashed { reason, .. } => {
+            web.update_state(|state| {
+                state.loading = false;
+                state.error = Some("The page stopped responding.".into());
+                state.termination = Some(match reason {
+                    0 => zgx::web_view::Termination::Crashed,
+                    1 => zgx::web_view::Termination::OutOfMemory,
+                    2 => zgx::web_view::Termination::Killed,
+                    _ => zgx::web_view::Termination::Unknown,
+                });
+            });
+            web.emit(WebViewEvent::ProcessTerminated);
+        }
         FromHost::Editing { editing, .. } => page.editing.set(editing),
         FromHost::LinkHovered { url, .. } => {
             web.update_state(|state| state.hovered_link = (!url.is_empty()).then_some(url));
@@ -174,7 +231,9 @@ fn take(message: FromHost) {
         FromHost::Ready
         | FromHost::Store { .. }
         | FromHost::Present { .. }
-        | FromHost::Snapshot { .. } => {}
+        | FromHost::Snapshot { .. }
+        | FromHost::ClipboardWrite { .. }
+        | FromHost::ClipboardRead { .. } => {}
     }
 }
 
@@ -473,6 +532,24 @@ impl WebViewBackend for LadybirdWebView {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn edit(&self, command: zgx::web_view::EditCommand) -> Result<(), String> {
+        use zgx::web_view::EditCommand;
+        let code = match command {
+            EditCommand::Copy => 0,
+            EditCommand::Cut => 1,
+            EditCommand::Paste => 2,
+            EditCommand::SelectAll => 3,
+            EditCommand::Undo => 4,
+            EditCommand::Redo => 5,
+            _ => return Err("Ladybird has no such editing command".into()),
+        };
+        self.0.send(self.0.message(ToHost::Edit).u8(code));
+        Ok(())
+    }
+    fn reload_ignoring_cache(&self) -> Result<(), String> {
+        self.0.send(self.0.message(ToHost::ReloadIgnoringCache));
+        Ok(())
+    }
     fn snapshot(
         &self,
         area: zgx::web_view::SnapshotArea,
@@ -552,7 +629,11 @@ fn backend(web: &WebView, host: Arc<Host>) -> Rc<Page> {
 /// The service making pages' boxes: Ladybird's pages here (or their
 /// placeholders where there's no host), the others by `others` (WebKitGTK's
 /// on Linux), or as native views where `others` makes none.
-pub(crate) fn page_views(others: Option<PageViews>) -> PageViews {
+pub(crate) fn page_views(
+    others: Option<PageViews>,
+    clipboard: Rc<RefCell<Option<crate::clipboard::Clipboard>>>,
+) -> PageViews {
+    CLIPBOARD.with(|held| *held.borrow_mut() = Some(clipboard));
     PageViews::new(move |web| {
         if web.options().engine != WebEngine::Ladybird {
             return others.as_ref().and_then(|others| others.make(web));
@@ -892,7 +973,8 @@ mod tests {
             for delivery in client::take_deliveries() {
                 let ours = match &delivery {
                     Delivery::Frame(v) | Delivery::Snapshot { view: v, .. } => *v == view,
-                    Delivery::Message(message) => message_view(message) == Some(view),
+                    // The app's own messages (the clipboard's) are any test's.
+                    Delivery::Message(message) => message_view(message).is_none_or(|v| v == view),
                     Delivery::Gone => panic!("the host went away"),
                 };
                 if ours {
@@ -925,14 +1007,16 @@ mod tests {
             | FromHost::History { view, .. }
             | FromHost::Cursor { view, .. }
             | FromHost::NewWindow { view, .. }
-            | FromHost::Crashed { view }
+            | FromHost::Crashed { view, .. }
             | FromHost::Editing { view, .. }
             | FromHost::LinkHovered { view, .. }
             | FromHost::ThemeColor { view, .. }
             | FromHost::Store { view, .. }
             | FromHost::Present { view, .. }
             | FromHost::Snapshot { view, .. } => Some(*view),
-            FromHost::Ready => None,
+            FromHost::Ready | FromHost::ClipboardWrite { .. } | FromHost::ClipboardRead { .. } => {
+                None
+            }
         }
     }
 
@@ -1214,6 +1298,80 @@ mod tests {
     }
 
     #[test]
+    fn edit_commands_copy_to_and_paste_from_the_apps_clipboard() {
+        let Some((host, _serial)) =
+            host_or_skip("edit_commands_copy_to_and_paste_from_the_apps_clipboard")
+        else {
+            return;
+        };
+        let view = 1_000_005;
+        host.send(
+            Message::new(ToHost::CreateView, view)
+                .u32(320)
+                .u32(200)
+                .f64(1.),
+        );
+        host.send(Message::new(ToHost::Focus, view).u8(1));
+        host.send(Message::new(ToHost::LoadHtml, view).str(
+            "<title>ready</title><body style='margin:0'>\
+             <input id=f value='copied text' style='position:absolute;left:0;top:0;width:300px;height:40px' \
+             onfocus=\"document.title='focused'\" oninput='document.title=this.value'>",
+        ));
+        assert!(wait_for(view, title_is("ready")));
+        // Into the field: its text is what select all and copy take.
+        for kind in [MOUSE_DOWN, MOUSE_UP] {
+            host.send(
+                Message::new(ToHost::Mouse, view)
+                    .u8(kind)
+                    .f64(50.)
+                    .f64(20.)
+                    .u8(1)
+                    .u8(u8::from(kind == MOUSE_DOWN))
+                    .u8(0)
+                    .u8(1),
+            );
+        }
+        // Input goes through the Compositor, commands straight to the page:
+        // the field has its focus before select all.
+        assert!(
+            wait_for(view, title_is("focused")),
+            "the click focuses the field"
+        );
+        host.send(Message::new(ToHost::Edit, view).u8(3));
+        host.send(Message::new(ToHost::Edit, view).u8(0));
+        assert!(
+            wait_for(view, |d| matches!(
+                d,
+                Delivery::Message(FromHost::ClipboardWrite { text, .. }) if text == "copied text"
+            )),
+            "copy puts the selection on the app's clipboard"
+        );
+        // Paste asks the app, whose clipboard text replaces the selection.
+        host.send(Message::new(ToHost::Edit, view).u8(2));
+        let mut request = None;
+        assert!(
+            wait_for(view, |d| match d {
+                Delivery::Message(FromHost::ClipboardRead { request: r }) => {
+                    request = Some(*r);
+                    true
+                }
+                _ => false,
+            }),
+            "paste reads the app's clipboard"
+        );
+        host.send(
+            Message::new(ToHost::ClipboardData, 0)
+                .u64(request.unwrap())
+                .str("pasted")
+                .str(""),
+        );
+        assert!(
+            wait_for(view, title_is("pasted")),
+            "the app's text is pasted into the field"
+        );
+    }
+
+    #[test]
     fn a_resize_makes_frames_of_the_new_size() {
         let Some((host, _serial)) = host_or_skip("a_resize_makes_frames_of_the_new_size") else {
             return;
@@ -1267,7 +1425,7 @@ mod tests {
         let width = ui.signal(200_f32);
         let w = width.clone();
         ui.mount(zgx::compose::provide(
-            page_views(None),
+            page_views(None, Rc::new(RefCell::new(None))),
             div()
                 .size(300., 200.)
                 .bg(zgx::scene::Color(0, 0, 0, 255))

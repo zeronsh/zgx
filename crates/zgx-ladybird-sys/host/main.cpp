@@ -26,6 +26,7 @@
 #include <LibWebView/Application.h>
 #include <LibWebView/HeadlessWebView.h>
 #include <LibWebView/PageBackingStores.h>
+#include <LibWebCommon/Clipboard/SystemClipboard.h>
 #include <LibWebView/WebContentPage.h>
 
 #include <errno.h>
@@ -138,6 +139,38 @@ public:
         handle_resize();
     }
 
+    // An editing command from the app: 0 copy, 1 cut, 2 paste, 3 select all, 4 undo, 5 redo. Copy and cut put the
+    // selection on the app's clipboard; paste reads it (the Application's clipboard hooks, below).
+    void edit(u8 command)
+    {
+        auto to_clipboard = [](ByteString const& text) -> ErrorOr<void> {
+            WebView::Application::the().set_clipboard_text(MUST(String::from_byte_string(text)));
+            return {};
+        };
+        switch (command) {
+        case 0:
+            selected_text()->when_resolved(to_clipboard);
+            break;
+        case 1:
+            cut_selected_text()->when_resolved(to_clipboard);
+            break;
+        case 2:
+            paste_from_clipboard(Web::Clipboard::PasteMode::AllMimeTypes);
+            break;
+        case 3:
+            select_all();
+            break;
+        case 4:
+            undo();
+            break;
+        case 5:
+            redo();
+            break;
+        default:
+            break;
+        }
+    }
+
     // The whole document's pixels, painted by WebContent for this, to the app as a shared buffer (`ToZgx::Snapshot`).
     // One at a time, as Ladybird takes them; a request while one is out is answered at once without one.
     void snapshot(u64 request)
@@ -206,6 +239,17 @@ private:
         on_theme_color_change = [this](Gfx::Color color) {
             Writer writer { ToZgx::ThemeColor };
             writer.u64_(m_id).u8_(color.alpha() > 0 ? 1 : 0).u8_(color.red()).u8_(color.green()).u8_(color.blue()).u8_(color.alpha());
+            s_connection->send(writer);
+        };
+        // Why WebContent ended: 0 crashed, 1 out of memory, 2 killed (it broke the IPC protocol).
+        on_web_content_crashed = [this](WebContentCrashReason reason) {
+            u8 why = 0;
+            if (reason == WebContentCrashReason::ExceededMemoryLimit)
+                why = 1;
+            else if (reason == WebContentCrashReason::RejectedIPC)
+                why = 2;
+            Writer writer { ToZgx::Crashed };
+            writer.u64_(m_id).u8_(why);
             s_connection->send(writer);
         };
         on_cursor_change = [this](Gfx::Cursor const& cursor) {
@@ -341,6 +385,12 @@ private:
         s_connection->send(present);
     }
 
+    // A paste reads the app's clipboard (the Application's, below), not the copy LibWebView keeps.
+    virtual void read_clipboard_item(Function<void(Web::Clipboard::SystemClipboardItem)> on_read) const override
+    {
+        WebView::Application::the().read_clipboard_item(move(on_read));
+    }
+
     // Held until the app is done with the frames before (`done`).
     virtual void release_backing_store(i32 bitmap_id) override
     {
@@ -377,6 +427,73 @@ public:
     }
 
     virtual bool should_coordinate_browser_process() const override { return false; }
+
+    // The clipboard is the app's: what pages copy goes to it, and pastes read it (`ToZgx::ClipboardWrite`, `ClipboardRead`,
+    // answered by `ToHost::ClipboardData`).
+    virtual void insert_clipboard_item(Web::Clipboard::SystemClipboardItem item) override
+    {
+        ByteString text, html;
+        for (auto const& representation : item.system_clipboard_representations) {
+            auto const* data = representation.data.get_pointer<ByteString>();
+            if (!data)
+                continue;
+            if (representation.name == "text/plain"sv)
+                text = *data;
+            else if (representation.name == "text/html"sv)
+                html = *data;
+        }
+        WebView::Application::insert_clipboard_item(move(item));
+        Writer writer { ToZgx::ClipboardWrite };
+        writer.u64_(0).str(text).str(html);
+        if (s_connection)
+            s_connection->send(writer);
+    }
+    virtual void set_clipboard_text(String text, ClipboardType type) override
+    {
+        WebView::Application::set_clipboard_text(text, type);
+        Writer writer { ToZgx::ClipboardWrite };
+        writer.u64_(0).str(text.bytes_as_string_view()).str(""sv);
+        if (s_connection)
+            s_connection->send(writer);
+    }
+    virtual void read_clipboard_item(Function<void(Web::Clipboard::SystemClipboardItem)> on_read) const override
+    {
+        auto request = ++m_next_clipboard_read;
+        m_clipboard_reads.set(request, move(on_read));
+        Writer writer { ToZgx::ClipboardRead };
+        writer.u64_(0).u64_(request);
+        if (s_connection)
+            s_connection->send(writer);
+    }
+    virtual void read_clipboard_text(ClipboardType, Function<void(Utf16String)> on_read) const override
+    {
+        read_clipboard_item([on_read = move(on_read)](Web::Clipboard::SystemClipboardItem item) {
+            for (auto const& representation : item.system_clipboard_representations) {
+                if (representation.name == "text/plain"sv) {
+                    if (auto const* data = representation.data.get_pointer<ByteString>()) {
+                        on_read(Utf16String::from_utf8(*data));
+                        return;
+                    }
+                }
+            }
+            on_read({});
+        });
+    }
+    void answer_clipboard(u64 request, ByteString text, ByteString html)
+    {
+        auto on_read = m_clipboard_reads.take(request);
+        if (!on_read.has_value())
+            return;
+        Web::Clipboard::SystemClipboardItem item;
+        if (!text.is_empty())
+            item.system_clipboard_representations.append({ .name = "text/plain"_string, .data = move(text) });
+        if (!html.is_empty())
+            item.system_clipboard_representations.append({ .name = "text/html"_string, .data = move(html) });
+        (*on_read)(move(item));
+    }
+
+    mutable u64 m_next_clipboard_read { 0 };
+    mutable HashMap<u64, Function<void(Web::Clipboard::SystemClipboardItem)>> m_clipboard_reads;
     virtual bool should_use_os_geolocation() const override { return false; }
 };
 
@@ -407,6 +524,14 @@ private:
     void handle(ToHost kind, Reader& reader)
     {
         auto id = reader.u64_();
+        if (kind == ToHost::ClipboardData) {
+            auto request = reader.u64_();
+            auto text = reader.str();
+            auto html = reader.str();
+            if (!reader.failed())
+                static_cast<Application&>(WebView::Application::the()).answer_clipboard(request, move(text), move(html));
+            return;
+        }
         if (kind == ToHost::CreateView) {
             auto width = reader.u32_();
             auto height = reader.u32_();
@@ -513,6 +638,12 @@ private:
             break;
         case ToHost::ImeUnmark:
             target->unmark_text_from_input_method();
+            break;
+        case ToHost::ReloadIgnoringCache:
+            target->reload(WebView::BypassCache::Yes);
+            break;
+        case ToHost::Edit:
+            target->edit(reader.u8_());
             break;
         case ToHost::Snapshot:
             target->snapshot(reader.u64_());

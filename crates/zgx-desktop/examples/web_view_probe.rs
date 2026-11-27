@@ -286,6 +286,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(error) => println!("SNAPSHOT {name} error {error}"),
                         });
                     }
+                    // Ctrl+O: select all of the page and copy it; Ctrl+U:
+                    // reload ignoring the cache (`EDIT`/`RELOAD` say how
+                    // each went).
+                    if action.0 == "o" {
+                        let done = inspect
+                            .edit(zgx::web_view::EditCommand::SelectAll)
+                            .and_then(|()| inspect.edit(zgx::web_view::EditCommand::Copy));
+                        println!("EDIT {done:?}");
+                    }
+                    if action.0 == "u" {
+                        println!("RELOAD {:?}", inspect.reload_ignoring_cache());
+                    }
                     // Ctrl+D: the app saves the page's downloads, into
                     // `ZGX_PROBE_SAVE_DIR`, telling each and how it goes.
                     if action.0 == "d" {
@@ -326,7 +338,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("g").reserved())
                     .bind(bind("d").reserved())
                     .bind(bind("s").reserved())
-                    .bind(bind("y").reserved()),
+                    .bind(bind("y").reserved())
+                    .bind(bind("o").reserved())
+                    .bind(bind("u").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {

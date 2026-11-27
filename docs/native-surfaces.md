@@ -45,6 +45,10 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Hovered link (`WebViewState::hovered_link`, Luau `web.hovered_link`) | none: WKWebView doesn't say | the status bar's text (its bar hidden) | the link under the pointer (`mouse-target-changed`) |
 | Theme colour (`WebViewState::theme_color`, Luau `web.theme_color`) | WebKit's `themeColor` (macOS 12) | none: WebView2 doesn't say | WebKit's `theme-color` (WebKitGTK 2.38); none for a page painted on the CPU (`accelerated: false`) |
 | Snapshots (`WebView::snapshot`, Luau `web:snapshot`) | what shows (`takeSnapshot`); the whole page not | what shows and the whole page (DevTools' `Page.captureScreenshot`) | what shows and the whole page (`webkit_web_view_get_snapshot`) |
+| Editing commands (`WebView::edit`, Luau `web:edit`) | AppKit's `copy:`, `cut:`, `paste:`, `selectAll:` and the undo manager's | Chromium's editing commands, through DevTools | WebKit's (`webkit_web_view_execute_editing_command`), the clipboard bridged on Wayland |
+| Reload ignoring the cache (`WebView::reload_ignoring_cache`) | `reloadFromOrigin` | DevTools' `Page.reload` with `ignoreCache` | `webkit_web_view_reload_bypass_cache` |
+| A page that stops answering (`WebViewEvent::Unresponsive`, `WebViewState::unresponsive`) | not said | `Unresponsive` (no `Responsive` follows: WebView2 doesn't say) | both (`is-web-process-responsive`) |
+| Why a page's process ended (`WebViewState::termination`) | unknown: WebKit doesn't say | crashed, out of memory, killed | crashed, out of memory, killed |
 | Visits (`WebViewEvent::Visited`, Luau `on_visit`) | each finished navigation, with its title then | the same | the same |
 | Missing engine | — | placeholder | placeholder (the library is opened as the first page shows) |
 

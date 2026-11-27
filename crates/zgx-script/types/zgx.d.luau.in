@@ -1663,6 +1663,10 @@ declare extern type Web with
 	-- The page's theme colour (`<meta name="theme-color">`) as "#rrggbbaa";
 	-- nil without one, and on Windows (WebView2 doesn't say).
 	theme_color: string?
+	-- The page's process stopped answering (not on macOS or with Ladybird).
+	unresponsive: boolean
+	-- Why the page's process last ended; nil while it hasn't.
+	termination: ("crashed" | "out_of_memory" | "killed" | "unknown")?
 	function load(self, url: string): ()
 	function html(self, html: string, base_url: string?): ()
 	function back(self): ()
@@ -1689,6 +1693,12 @@ declare extern type Web with
 	-- The page's pixels: what shows ("visible", the default), or the whole
 	-- document ("full_page"; not on macOS, whose WebKit draws only what
 	-- shows). Rejects where the engine can't.
+	-- An editing command, as a browser's Edit menu; raises where the
+	-- engine can't.
+	function edit(self, command: "copy" | "cut" | "paste" | "select_all" | "undo" | "redo"): ()
+	-- Reload, fetching everything again (Shift+reload); raises where the
+	-- engine can't.
+	function reload_ignoring_cache(self): ()
 	function snapshot(self, area: ("visible" | "full_page")?): Promise<Bitmap>
 	-- A page from `ui.web(id, opts)` leaves the host's registry: the next
 	-- `ui.web(id)` makes a new one.

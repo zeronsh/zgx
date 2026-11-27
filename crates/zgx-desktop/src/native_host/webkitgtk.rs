@@ -741,6 +741,14 @@ impl Gtk {
             connect(
                 api,
                 view,
+                "notify::is-web-process-responsive",
+                handler(on_responsive as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
                 "mouse-target-changed",
                 handler(on_mouse_target as *const ()),
                 data,
@@ -1777,6 +1785,24 @@ impl Page {
                         *self.finding.borrow_mut() = Some(search);
                     }
                 }
+                Command::Edit(command) => {
+                    (api.webkit_web_view_execute_editing_command)(view, command.as_ptr());
+                    check_clipboard();
+                }
+                // A page of HTML the app gave is given again, as `Reload` does: its
+                // base URL is only its origin, with nothing at it to fetch.
+                Command::ReloadIgnoringCache => {
+                    let html = self.html.borrow().clone().filter(|(_, base)| {
+                        self.uri() == base.clone().unwrap_or_else(|| "about:blank".into())
+                    });
+                    match html {
+                        Some((html, base)) => self.run(Command::LoadHtml {
+                            html,
+                            base_url: base,
+                        }),
+                        None => (api.webkit_web_view_reload_bypass_cache)(view),
+                    }
+                }
                 Command::Snapshot { full, reply } => {
                     // WEBKIT_SNAPSHOT_REGION_VISIBLE 0, _FULL_DOCUMENT 1; no options.
                     let asked = Box::new((self.id, reply));
@@ -2762,14 +2788,47 @@ unsafe extern "C" fn on_decide_policy(
     });
     1
 }
-unsafe extern "C" fn on_terminated(_: Ptr, _: c_int, data: Ptr) {
+unsafe extern "C" fn on_terminated(_: Ptr, reason: c_int, data: Ptr) {
+    // WEBKIT_WEB_PROCESS_CRASHED, _EXCEEDED_MEMORY_LIMIT, _TERMINATED_BY_API.
+    let termination = match reason {
+        0 => zgx::web_view::Termination::Crashed,
+        1 => zgx::web_view::Termination::OutOfMemory,
+        2 => zgx::web_view::Termination::Killed,
+        _ => zgx::web_view::Termination::Unknown,
+    };
     // SAFETY: GTK passes this handler's page.
-    unsafe { page(data) }.post(|web| {
+    unsafe { page(data) }.post(move |web| {
         web.update_state(|state| {
             state.loading = false;
             state.error = Some("The page stopped responding.".into());
+            state.termination = Some(termination);
+            state.unresponsive = false;
         });
         web.emit(WebViewEvent::ProcessTerminated);
+    });
+}
+/// The web process stopped answering, or answers again
+/// (`is-web-process-responsive`).
+unsafe extern "C" fn on_responsive(view: Ptr, _: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the view GTK passes and this handler's page.
+    let (page, responsive) = unsafe {
+        (
+            page(data),
+            (api.webkit_web_view_get_is_web_process_responsive)(view) != 0,
+        )
+    };
+    page.post(move |web| {
+        let was = web.state().with_untracked(|state| state.unresponsive);
+        if was == !responsive {
+            return;
+        }
+        web.update_state(|state| state.unresponsive = !responsive);
+        web.emit(if responsive {
+            WebViewEvent::Responsive
+        } else {
+            WebViewEvent::Unresponsive
+        });
     });
 }
 /// Each download a context starts (a `download` link, an attachment) goes
@@ -4057,6 +4116,10 @@ enum Command {
         reply: u64,
     },
     ClearFind,
+    /// An editing command WebKit names (`WEBKIT_EDITING_COMMAND_*`).
+    Edit(&'static std::ffi::CStr),
+    /// Reload, fetching everything again.
+    ReloadIgnoringCache,
     /// The page's pixels, the whole document's if `full` (`snapshot`).
     Snapshot {
         full: bool,
@@ -4738,6 +4801,36 @@ impl WebViewBackend for GtkWebView {
             case_sensitive: options.case_sensitive,
             reply: id,
         });
+    }
+    fn edit(&self, command: zgx::web_view::EditCommand) -> Result<(), String> {
+        use zgx::web_view::EditCommand;
+        let page = &self.0;
+        let name = match command {
+            EditCommand::Copy => c"Copy",
+            EditCommand::Cut => c"Cut",
+            EditCommand::Paste => c"Paste",
+            EditCommand::SelectAll => c"SelectAll",
+            EditCommand::Undo => c"Undo",
+            EditCommand::Redo => c"Redo",
+            _ => return Err("WebKitGTK has no such editing command".into()),
+        };
+        // A paste where GTK's clipboard reaches nothing: zgx's text first.
+        if command == EditCommand::Paste && BRIDGED.load(std::sync::atomic::Ordering::Relaxed) {
+            let text = page
+                .clipboard
+                .borrow_mut()
+                .as_mut()
+                .and_then(|clipboard| clipboard.get_text().ok());
+            if let Some(text) = text {
+                page.send(Command::Clipboard(text));
+            }
+        }
+        page.send(Command::Edit(name));
+        Ok(())
+    }
+    fn reload_ignoring_cache(&self) -> Result<(), String> {
+        self.0.send(Command::ReloadIgnoringCache);
+        Ok(())
     }
     fn snapshot(
         &self,

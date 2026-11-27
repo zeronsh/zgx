@@ -39,6 +39,9 @@ enum class ToHost : u8 {
     ImeUnmark = 18,
     Visible = 19,
     Snapshot = 20,
+    ReloadIgnoringCache = 21,
+    Edit = 22,
+    ClipboardData = 23,
 };
 
 enum class ToZgx : u8 {
@@ -57,6 +60,8 @@ enum class ToZgx : u8 {
     LinkHovered = 113,
     ThemeColor = 114,
     Snapshot = 115,
+    ClipboardWrite = 116,
+    ClipboardRead = 117,
 };
 
 class Writer {

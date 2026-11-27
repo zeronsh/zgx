@@ -31,6 +31,9 @@ pub(super) enum ToHost {
     ImeUnmark = 18,
     Visible = 19,
     Snapshot = 20,
+    ReloadIgnoringCache = 21,
+    Edit = 22,
+    ClipboardData = 23,
 }
 
 /// A message to the host, written field by field.
@@ -131,8 +134,20 @@ pub(super) enum FromHost {
         view: u64,
         url: String,
     },
+    /// WebContent ended: 0 crashed, 1 out of memory, 2 killed.
     Crashed {
         view: u64,
+        reason: u8,
+    },
+    /// A page copied: the app's clipboard takes it.
+    ClipboardWrite {
+        text: String,
+        html: String,
+    },
+    /// A page pastes: the app answers `request` with its clipboard
+    /// (`ToHost::ClipboardData`).
+    ClipboardRead {
+        request: u64,
     },
     Editing {
         view: u64,
@@ -257,7 +272,15 @@ pub(super) fn parse(kind: u8, fields: &[u8]) -> Option<FromHost> {
             view,
             url: f.str()?,
         },
-        111 => FromHost::Crashed { view },
+        111 => FromHost::Crashed {
+            view,
+            reason: f.u8().unwrap_or(0),
+        },
+        116 => FromHost::ClipboardWrite {
+            text: f.str()?,
+            html: f.str()?,
+        },
+        117 => FromHost::ClipboardRead { request: f.u64()? },
         112 => FromHost::Editing {
             view,
             editing: f.u8()? != 0,

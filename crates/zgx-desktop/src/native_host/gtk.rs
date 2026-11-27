@@ -273,6 +273,8 @@ api! {
     fn webkit_web_view_load_uri(Ptr, *const c_char);
     fn webkit_web_view_load_html(Ptr, *const c_char, *const c_char);
     fn webkit_web_view_reload(Ptr);
+    fn webkit_web_view_reload_bypass_cache(Ptr);
+    fn webkit_web_view_get_is_web_process_responsive(Ptr) -> gboolean;
     fn webkit_web_view_stop_loading(Ptr);
     fn webkit_web_view_go_back(Ptr);
     fn webkit_web_view_go_forward(Ptr);
