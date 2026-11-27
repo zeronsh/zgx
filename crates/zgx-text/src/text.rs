@@ -598,77 +598,96 @@ impl ShapedText {
     }
     /// Returns visual rectangles, including disjoint spans for mixed-direction text.
     pub fn selection(&self, range: Range<usize>) -> Vec<Rect> {
-        let start = range.start.min(range.end);
-        let end = range.start.max(range.end).min(self.text.len());
-        if start >= end {
-            return Vec::new();
-        }
-        let mut rectangles: Vec<Rect> = Vec::new();
-        for run in self.buffer.layout_runs() {
-            let offset = self.line_offsets[run.line_i];
-            // An empty line in the selection: its line break, a little wide.
-            if run.glyphs.is_empty() && offset >= start && offset < end {
-                let width = zgx::text_layout::empty_line_width(run.line_height);
+        selection_in(
+            self.buffer.layout_runs(),
+            &self.line_offsets,
+            &self.text,
+            range,
+            |offset| {
                 let cursor = TextCursor {
                     byte_index: offset,
                     affinity: Affinity::After,
                 };
-                let x = ShapedText::caret(self, cursor).map_or(0., |caret| caret.x);
-                rectangles.push(Rect::new(x, run.line_top, width, run.line_height));
-                continue;
-            }
-            let mut spans = Vec::new();
-            for glyph in run.glyphs {
-                if glyph.metadata == usize::MAX {
-                    continue;
-                }
-                let cluster_start = offset + glyph.start;
-                let cluster_end = offset + glyph.end;
-                if cluster_start >= end || cluster_end <= start {
-                    continue;
-                }
-                let cluster = &self.text[cluster_start..cluster_end];
-                let count = cluster.graphemes(true).count().max(1);
-                for (index, (local, grapheme)) in cluster.grapheme_indices(true).enumerate() {
-                    if cluster_start + local >= end
-                        || cluster_start + local + grapheme.len() <= start
-                    {
-                        continue;
-                    }
-                    let width = glyph.w / count as f32;
-                    let x = if glyph.level.is_rtl() {
-                        glyph.x + glyph.w - (index + 1) as f32 * width
-                    } else {
-                        glyph.x + index as f32 * width
-                    };
-                    // Strong negative tracking can reverse a glyph's advance.
-                    // Selection paint rectangles still need ordered edges.
-                    spans.push(Rect::new(
-                        x.min(x + width),
-                        run.line_top,
-                        width.abs(),
-                        run.line_height,
-                    ));
-                }
-            }
-            spans.sort_by(|a, b| a.x.total_cmp(&b.x));
-            for span in spans {
-                if let Some(last) = rectangles.last_mut()
-                    && last.y == span.y
-                    && last.x + last.width >= span.x - 0.01
-                {
-                    *last = last.union(span);
-                    continue;
-                }
-                rectangles.push(span);
-            }
-        }
-        rectangles
+                ShapedText::caret(self, cursor).map_or(0., |caret| caret.x)
+            },
+        )
     }
     /// Its line pitch.
     pub fn line_height(&self) -> f32 {
         self.line_height
     }
+}
+
+/// Where `range` of `text` lies in `runs` (of lines starting at
+/// `line_starts`): visual rectangles, disjoint spans for mixed-direction
+/// text, an empty line in it a little wide at `empty_x` of its offset.
+pub(crate) fn selection_in<'a>(
+    runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
+    line_starts: &[usize],
+    text: &str,
+    range: Range<usize>,
+    empty_x: impl Fn(usize) -> f32,
+) -> Vec<Rect> {
+    let start = range.start.min(range.end);
+    let end = range.start.max(range.end).min(text.len());
+    if start >= end {
+        return Vec::new();
+    }
+    let mut rectangles: Vec<Rect> = Vec::new();
+    for run in runs {
+        let offset = line_starts.get(run.line_i).copied().unwrap_or(0);
+        // An empty line in the selection: its line break, a little wide.
+        if run.glyphs.is_empty() && offset >= start && offset < end {
+            let width = zgx::text_layout::empty_line_width(run.line_height);
+            let x = empty_x(offset);
+            rectangles.push(Rect::new(x, run.line_top, width, run.line_height));
+            continue;
+        }
+        let mut spans = Vec::new();
+        for glyph in run.glyphs {
+            if glyph.metadata == usize::MAX {
+                continue;
+            }
+            let cluster_start = offset + glyph.start;
+            let cluster_end = offset + glyph.end;
+            if cluster_start >= end || cluster_end <= start {
+                continue;
+            }
+            let cluster = &text[cluster_start..cluster_end];
+            let count = cluster.graphemes(true).count().max(1);
+            for (index, (local, grapheme)) in cluster.grapheme_indices(true).enumerate() {
+                if cluster_start + local >= end || cluster_start + local + grapheme.len() <= start {
+                    continue;
+                }
+                let width = glyph.w / count as f32;
+                let x = if glyph.level.is_rtl() {
+                    glyph.x + glyph.w - (index + 1) as f32 * width
+                } else {
+                    glyph.x + index as f32 * width
+                };
+                // Strong negative tracking can reverse a glyph's advance.
+                // Selection paint rectangles still need ordered edges.
+                spans.push(Rect::new(
+                    x.min(x + width),
+                    run.line_top,
+                    width.abs(),
+                    run.line_height,
+                ));
+            }
+        }
+        spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+        for span in spans {
+            if let Some(last) = rectangles.last_mut()
+                && last.y == span.y
+                && last.x + last.width >= span.x - 0.01
+            {
+                *last = last.union(span);
+                continue;
+            }
+            rectangles.push(span);
+        }
+    }
+    rectangles
 }
 
 /// Where the inline boxes of `runs` (of lines starting at `line_starts`)

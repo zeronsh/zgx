@@ -4,6 +4,8 @@ use std::{ops::Range, sync::Arc};
 pub(crate) type RichShaper =
     dyn Fn(&RichText, Option<f32>) -> Box<dyn crate::text_layout::TextLayout>;
 pub(crate) type RichMeasurer = dyn Fn(&RichText, Option<f32>) -> (f32, f32);
+pub(crate) type RichSelection =
+    dyn Fn(&RichText, Option<f32>, &[std::ops::Range<usize>]) -> Vec<Vec<crate::scene::Rect>>;
 
 /// Measures rich text exactly as layout does: with the host's installed
 /// measurers (prepared text on desktop, where a size at a new width costs line
@@ -17,6 +19,9 @@ pub struct TextMeasure(std::rc::Rc<std::cell::RefCell<Measurers>>);
 struct Measurers {
     layout: Option<Box<RichMeasurer>>,
     detached: Option<Box<RichMeasurer>>,
+    /// Where ranges of a paragraph lie, from the lines `layout` lays out
+    /// and a renderer draws (`Scene::set_rich_text_selection`).
+    selection: Option<Box<RichSelection>>,
 }
 impl TextMeasure {
     /// `rich`'s (width, height) wrapped at `width`, or unwrapped for `None`.
@@ -43,6 +48,19 @@ impl TextMeasure {
     }
     pub(crate) fn install_detached(&self, measure: Box<RichMeasurer>) {
         self.0.borrow_mut().detached = Some(measure);
+    }
+    pub(crate) fn install_selection(&self, selection: Box<RichSelection>) {
+        self.0.borrow_mut().selection = Some(selection);
+    }
+    /// Where each of `ranges` of `rich`, wrapped at `width`, lies, if a
+    /// host installed a selection measurer (`install_selection`).
+    pub(crate) fn selection(
+        &self,
+        rich: &RichText,
+        width: Option<f32>,
+        ranges: &[std::ops::Range<usize>],
+    ) -> Option<Vec<Vec<crate::scene::Rect>>> {
+        (self.0.borrow().selection.as_ref()).map(|selection| selection(rich, width, ranges))
     }
 }
 

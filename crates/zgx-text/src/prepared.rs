@@ -1466,6 +1466,37 @@ impl TextCache {
         let laid = self.layout(fonts, rich, width);
         crate::text::inline_box_places(laid.runs(None), &laid.line_starts())
     }
+    /// Where each of `ranges` of `rich` lies laid out at `width`, from the
+    /// lines drawn (`TextLayout::selection`'s rectangles): a link's boxes
+    /// found without shaping the paragraph again. Clamped or ellipsized
+    /// text, laid out by its own path, is shaped for it.
+    pub fn selection(
+        &mut self,
+        fonts: &mut FontSystem,
+        rich: &RichText,
+        width: Option<f32>,
+        ranges: &[std::ops::Range<usize>],
+    ) -> Vec<Vec<zgx::scene::Rect>> {
+        if !Self::handles(rich) {
+            let shaped = crate::text::ShapedText::with_runs(fonts, rich, width);
+            return (ranges.iter())
+                .map(|range| shaped.selection(range.clone()))
+                .collect();
+        }
+        let laid = self.layout(fonts, rich, width);
+        let starts = laid.line_starts();
+        (ranges.iter())
+            .map(|range| {
+                crate::text::selection_in(
+                    laid.runs(None),
+                    &starts,
+                    rich.text(),
+                    range.clone(),
+                    |_| 0.,
+                )
+            })
+            .collect()
+    }
     /// Whether plain text goes through the cache: nonempty, at a valid size.
     pub fn handles_plain(text: &str, font_size: f32) -> bool {
         !text.is_empty() && font_size.is_finite() && font_size > 0.
@@ -2549,6 +2580,60 @@ mod tests {
         RichText::new(text, runs).unwrap()
     }
 
+    /// A paragraph's ranges found from its prepared lines (`selection`) are
+    /// where the paragraph shaped for them puts them
+    /// (`ShapedText::selection`): wrapped, right to left among left to
+    /// right, with emoji and marks, across two fonts' runs. So a link's
+    /// boxes found from the lines drawn are those shaping found.
+    #[test]
+    fn a_ranges_boxes_from_prepared_lines_are_its_shaped_boxes() {
+        let mut fonts = FontSystem::new();
+        let bold = FontStyle {
+            weight: 700,
+            ..Default::default()
+        };
+        let texts = [
+            "Read the docs for the details of the layout below, then the notes after it.",
+            "English then עברית ועוד מילים and English again, mixed in one line that wraps.",
+            "مرحبا بالعالم with Latin words in the middle and العربية at the end",
+            "émoji 👩‍💻 and 🇫🇷 flags with e\u{301} marks across a wrap point here",
+            "supercalifragilisticexpialidocious words longer than the line",
+        ];
+        for text in texts {
+            let at: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+            let n = at.len();
+            let rich = rich(
+                text,
+                &[
+                    (at[n / 2], FontStyle::default(), 15.),
+                    (text.len(), bold.clone(), 15.),
+                ],
+            );
+            assert!(TextCache::handles(&rich));
+            let ranges = [
+                0..text.len(),
+                at[2]..at[9],
+                at[n / 2 - 3]..at[n / 2 + 4],
+                at[n - 6]..text.len(),
+            ];
+            for width in [None, Some(400.), Some(160.), Some(90.)] {
+                let found = TextCache::default().selection(&mut fonts, &rich, width, &ranges);
+                let shaped = ShapedText::with_runs(&mut fonts, &rich, width);
+                for (range, rects) in ranges.iter().zip(&found) {
+                    let expected = shaped.selection(range.clone());
+                    assert!(!expected.is_empty(), "{text:?} {range:?} at {width:?}");
+                    assert_eq!(rects, &expected, "{text:?} {range:?} at {width:?}");
+                }
+                if width == Some(90.) {
+                    let lines = found[0]
+                        .iter()
+                        .map(|r| r.y.to_bits())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert!(lines.len() > 2, "{text:?} wraps at 90: {:?}", found[0]);
+                }
+            }
+        }
+    }
     /// A one-line text's list of lines is made with room for one, so the
     /// pool of them (`spare_lists`, which keeps only such lists) takes it
     /// back and the next one-line text reuses it (research B5a: lists made

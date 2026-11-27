@@ -689,3 +689,53 @@ fn a_links_boxes_follow_its_words_from_first_layout_and_none_are_shaped_before()
         "a taller paragraph moves no word"
     );
 }
+
+#[test]
+fn a_links_boxes_come_from_the_lines_laid_out_where_its_host_says() {
+    use zgx::text_layout::TextLayout;
+    let mut ui = Ui::new(600., 400.);
+    let shaped = widths_shaped(&ui);
+    let asked = Rc::new(RefCell::new(0));
+    let count = asked.clone();
+    ui.scene
+        .borrow_mut()
+        .set_rich_text_selection(move |rich, width, ranges| {
+            *count.borrow_mut() += 1;
+            let layout = zgx::text_layout::FallbackTextLayout::with_rich(rich, width);
+            ranges
+                .iter()
+                .map(|range| layout.selection(range.clone()))
+                .collect()
+        });
+    let width = ui.signal(400_f32);
+    let read_width = width.clone();
+    let words = "Read the docs for the details of the layout below.";
+    let _mounted = ui.mount(
+        column().child(
+            rich_text_signal(move || {
+                vec![
+                    text_span("Start: "),
+                    text_span(words).href("https://example.org/docs"),
+                ]
+            })
+            .text_wrap(true)
+            .reactive_style(move || Styles::new().w(read_width.get())),
+        ),
+    );
+    let range = "Start: ".len().."Start: ".len() + words.len();
+    for (step, w) in [(1, 400.), (2, 120.)] {
+        width.set(w);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        let root = ui.scene.borrow().root();
+        let paragraph = paragraph_under(&ui, root).expect("the paragraph");
+        let link = links(&ui)[0];
+        assert_eq!(
+            link_rects(&ui, link),
+            words_at(&ui, paragraph, range.clone()),
+            "at {w}"
+        );
+        assert_eq!(*asked.borrow(), step, "asked once a width, at {w}");
+    }
+    assert_eq!(*shaped.borrow(), [], "nothing shaped for the links' boxes");
+}

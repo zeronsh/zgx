@@ -153,6 +153,14 @@ pub fn install_text(
             .borrow_mut()
             .measure(&mut fonts.borrow_mut(), rich, width)
     });
+    // Where a paragraph's ranges lie (its links' words), from those lines.
+    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
+    scene.set_rich_text_selection(move |rich, width, ranges| {
+        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
+        cache
+            .borrow_mut()
+            .selection(&mut fonts.borrow_mut(), rich, width, ranges)
+    });
     // Plain text nodes, from the same prepared text.
     let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
     scene.set_font_text_measurer(move |text, size, width, font| {
