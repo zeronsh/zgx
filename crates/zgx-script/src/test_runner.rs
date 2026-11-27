@@ -149,8 +149,8 @@ pub fn run(
 /// where an app gets milliseconds; a loop that never ends is still stopped.
 fn test_limits() -> crate::Limits {
     crate::Limits {
-        load: std::time::Duration::from_secs(30),
-        call: std::time::Duration::from_secs(5),
+        load: Some(std::time::Duration::from_secs(30)),
+        call: Some(std::time::Duration::from_secs(5)),
         ..crate::Limits::default()
     }
 }
@@ -395,7 +395,7 @@ fn load(
         "mount",
         lua.create_function(move |_, path: Option<String>| {
             let path = dir.join(path.as_deref().unwrap_or("app.luau"));
-            // Its packages, what it exposes to plugins and its plugins, as
+            // Its packages and its scripts, as
             // `zgx run` gives them.
             let host = crate::app_config::read(&dir)
                 .map_err(|error| mlua::Error::runtime(format!("mount: {error}")))?;

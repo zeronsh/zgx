@@ -56,7 +56,7 @@ ui.on_open(handler: (e: { files: { File }, urls: { string } }) -> ())
 | Function | Kept by | |
 | --- | --- | --- |
 | `ui.state(key, initial)` | the script (or module) and `key` | private to the script; a reload gets the same state back, `initial` only counts the first time |
-| `ui.shared(key, initial)` | `key`, for the whole host | shared with Rust (`ScriptHost::shared`, see below) and every script and plugin |
+| `ui.shared(key, initial)` | `key`, for the whole host | shared with Rust (`ScriptHost::shared`, see below) and every script |
 | `ui.persist(key, initial)` | the script (or module) and `key`, on disk | as `ui.state`, and saved for the next run: each key a JSON file in the host's storage (`ScriptHost::app_id` or `storage`), written within 250 ms of a change, off the main thread. Without storage it lasts until the app quits, with a warning |
 | `ui.use_state(initial)` | the component instance | a new state per instance; only inside a component's function (or an `each` row, `presence` content, a `list` row) |
 | `ui.computed(f)` | what built it | derived: `f` runs now and again when what it reads changes; its value is the state's |
@@ -307,7 +307,7 @@ return ui.column {
 
 `ui.socket(url, opts)` keeps a connection open (a WebSocket: a chat's, a feed's) through the host's connector, as React's `useWebSocket`. Its `status` is a state, `"connecting"`, `"open"`, `"reconnecting"` or `"closed"`, for a banner; each message goes to `on_message(message, binary)`, text as a string (decoded first with `json = true`) or a binary message's bytes as a string. A decoded message is the script's own: a plain table, made for it alone, that it may change and keep (add a field, put it in state), where tables read from state are read-only. `send(v)` sends a string as text and any other value as JSON, and `send_bytes(s)` a binary message; sent while the connection is not open, they wait and go in order once it is. `buffered` is a state of the bytes sent and not yet taken by the connection, and past `max_buffered` (16 MB) `send` refuses, returning false, as it does once the socket is closed for good. A connection that ends or fails opens again after a wait: `reconnect = { min = 500, max = 30000, factor = 2, jitter = 0.2, attempts = math.huge }` is the default (true), `false` none. Meanwhile `attempt` counts and `retry_in` is the wait in ms; out of attempts it is `"closed"`, and `error` (a `UiError`, tracked) says why it last ended. `on_open` and `on_close(err)` hear each connection begin and end. `close()` closes it until `reconnect()`, which also cuts a wait short. `url` may be a function: a state it reads changing (a room, a token) opens it again at once. It closes with its owner (a component, or the script on reload).
 
-The host connects with `ScriptHost::socket_connector(|request, socket| async { … })`: it opens `request.url`, calls `socket.opened()`, hands each message that arrives to `socket.receive`, and sends what `socket.next().await` gives, as fast as the connection takes it, until that answers `None` (the script closed it); its future answers `Ok(())` when the connection ends and `Err(message)` when it fails. A plugin needs the host's `Capability::Fetch`, and the app's `fetch_policy` is asked of its URL and addresses (see Plugins in `docs/scripting.md`). `ui.sleep(ms)` is a promise settled after `ms`, to await in a task.
+The host connects with `ScriptHost::socket_connector(|request, socket| async { … })`: it opens `request.url`, calls `socket.opened()`, hands each message that arrives to `socket.receive`, and sends what `socket.next().await` gives, as fast as the connection takes it, until that answers `None` (the script closed it); its future answers `Ok(())` when the connection ends and `Err(message)` when it fails. `Socket::script()` names the script that opened it, for a connector that answers each script in its own way. `ui.sleep(ms)` is a promise settled after `ms`, to await in a task.
 
 ```lua
 type Message = { from: string, text: string }
@@ -376,7 +376,7 @@ Everything runs off the main thread, and a failure is a `UiError`: `kind` `"deni
 
 **What a handle can't reach:** paths are relative with `/` between their parts, so `..`, `.`, an absolute path, a drive and a backslash are refused. A symbolic link counts as where it leads: a link leading out of the folder is refused, left out of `list`, and not written through, and a link inside it is read but not entered by `recursive` (links can loop). It holds no delete or rename. A hard link can't be told from a file, so one made outside the app does reach out, and a link swapped by another process between the check and the open is out of its hands: the guarantee is against scripts, which can make neither.
 
-**Who gets one:** a plugin only with the `folders` grant (`zgx.json`, or `ScriptHost::grant(plugin, Capability::Folders)`). A Rust host can refuse it to every script, the app's own too, with `ScriptHost::refuse_folders()`, and a platform without a folder dialog settles with an error.
+A platform without a folder dialog settles with an error.
 
 **A handle lasts the run, unless the host keeps it.** `ui.persist` doesn't save one. `ui.open_folder({ remember = "library" })` asks the host to keep the grant under that key, and on a later launch `ui.remembered_folder("library")` settles with the handle if the folder still resolves, or nil (gone, refused, or never kept). The handle keeps every rule above, and `folder:forget()` drops the grant.
 
@@ -393,15 +393,15 @@ end
 return ui.button { "Choose a library", on_click = choose }
 ```
 
-What the host keeps, and where: on macOS a bookmark, which follows the folder moved or renamed. In the sandbox it's security-scoped, the scope entered while the handle lasts. Outside it's plain, because a security-scoped bookmark resolves only under the code-signing identifier that made it, and an unbundled app's (zgx-run's) changes with each version, which would forget every folder at an upgrade. Elsewhere it's the folder's path. It goes in the host's storage (`ScriptHost::storage`, or the app's data directory under `app_id`, in `.folders`, a file per key), where no script reads, since scripts read only what was picked. A host without storage keeps it in memory, for the run. A sandboxed macOS app needs the `com.apple.security.files.user-selected.read-write` entitlement for the dialog's folder to be readable at all, and `com.apple.security.files.bookmarks.app-scope` to make bookmarks. Plugins keep no folders. A Rust host can refuse to keep any with `ScriptHost::refuse_remembered_folders()`: `remember` then picks as without it, and `ui.remembered_folder` settles with nil. `ui.remembered_folder` is a promise rather than a value because a script's first load runs before its window exists, and resolving a grant takes the window's platform (on macOS, resolving the bookmark and entering its scope). It settles once the window is there, so it works at a script's top level, inside `ui.task`.
+What the host keeps, and where: on macOS a bookmark, which follows the folder moved or renamed. In the sandbox it's security-scoped, the scope entered while the handle lasts. Outside it's plain, because a security-scoped bookmark resolves only under the code-signing identifier that made it, and an unbundled app's (zgx-run's) changes with each version, which would forget every folder at an upgrade. Elsewhere it's the folder's path. It goes in the host's storage (`ScriptHost::storage`, or the app's data directory under `app_id`, in `.folders`, a file per key), where no script reads, since scripts read only what was picked. A host without storage keeps it in memory, for the run. A sandboxed macOS app needs the `com.apple.security.files.user-selected.read-write` entitlement for the dialog's folder to be readable at all, and `com.apple.security.files.bookmarks.app-scope` to make bookmarks. A Rust host can refuse to keep any with `ScriptHost::refuse_remembered_folders()`: `remember` then picks as without it, and `ui.remembered_folder` settles with nil. `ui.remembered_folder` is a promise rather than a value because a script's first load runs before its window exists, and resolving a grant takes the window's platform (on macOS, resolving the bookmark and entering its scope). It settles once the window is there, so it works at a script's top level, inside `ui.task`.
 
 In a test, `app:pick_folder(name)` answers the next dialog with a folder of the test's own files ([testing](../scripting.md#testing-an-app)).
 
 ### The clipboard and files
 
-A desktop window gives scripts its clipboard and file dialogs (`zgx::platform`). `ui.clipboard.read()` returns its text, `ui.clipboard.write(text)` replaces it. `ui.clipboard.read_html()` returns its HTML, or nil: what a browser or word processor copied, with its markup, its text still `read()`'s. `ui.clipboard.write_html(text, html)` puts HTML there with its text beside it, for apps that paste either. `ui.clipboard.write { text = t, html = h, types = { ["application/x-notes"] = data } }` puts the text, the HTML (optional) and types of the app's own (optional; MIME types, each with its text) there in one change: the types go where a web page's copy puts its own (Chromium's web custom data: `org.chromium.web-custom-data` on macOS, `Chromium Web Custom MIME Data Format` on Windows, `chromium/x-web-custom-data` on X11 and Wayland), so a page's paste in Chrome, Edge or an Electron app reads them with `event.clipboardData.getData("application/x-notes")`, and `ui.clipboard.read_type("application/x-notes")` reads them back, from this app or from a page's copy that set them (nil where the clipboard holds none). Firefox and Safari keep a page's types to themselves: there the text and HTML paste. Without `types`, `write` is a copy of text and HTML as ever. With `image`, a PNG's bytes (a canvas rendered with `ui.render_canvas`, a file read with `{ base64 = true }` and decoded, a server's reply), the image goes on the clipboard as the platform's image beside the text, HTML and types, in the same change, and `write` settles with whether it took them: an image editor or a document pastes the picture, a text field its text, a page's paste its types (an image with its citation). The image goes as `public.png` on macOS, `image/png` on X11 and Wayland, and `PNG` with a DIB of it beside on Windows, decoded off the main thread there. Anything but a PNG is an error. On the web it goes as one `ClipboardItem` (`image/png` beside `text/plain` and `text/html`); a page's own types can't go with an image there, and are left out. On the web, a write with types copies as a person's ⌘C does, so it takes them within a click or a key's handler (else the text and HTML alone go), and `read_type` reads the paste being handled. `ui.clipboard.read_image()` settles with its image as a full-colour `Bitmap` (`w`, `h`; a screenshot, an image editor's copy, a browser's Copy Image), or nil, and `ui.clipboard.write_image(bitmap)` puts one there (a `ui.bitmap`, or one read before) for other apps to paste, settling with whether it took it: promises, as a large image is decoded and encoded off the main thread (a 4K one took 15 to 70 ms to read and 130 ms to write). State can keep a `Bitmap`, its pixels counted against a plugin's memory limit, and `ui.image { src = state }` shows the one it holds (a pasted picture: `ui.clipboard.read_image():after(function(b) if b then pasted:set(b) end end)`). `ui.open_files({ title, directory, filters = { { "Images", { "png" } } }, multiple })` settles with the files the user picks (an empty list if they cancel) and `ui.save_file({ name })` with where they choose to save (or nil), each a `{ path, name }`. A script reads and writes only files the user picked in this host's dialogs, as a web page does: `ui.read_file(file)` settles with its text (a byte that isn't UTF-8 becomes U+FFFD), `ui.read_file(file, { base64 = true })` with every byte in base64 (a picture to keep or send), and `ui.write_file(file, data)` writes beside it and renames over it (never half a file), both off the main thread. `data` is a string, written as its bytes (any byte, NUL and those that aren't UTF-8 too), or `{ base64 = text }`, decoded first (a PNG a canvas rendered, a file a server sent; up to 256 MiB); text that isn't base64 rejects and writes nothing. A dialog asked for as a script loads (a task at its top level, before its view mounts in a window) opens once the window is there. Headless, without a window, they are errors, shown as any script error is.
+A desktop window gives scripts its clipboard and file dialogs (`zgx::platform`). `ui.clipboard.read()` returns its text, `ui.clipboard.write(text)` replaces it. `ui.clipboard.read_html()` returns its HTML, or nil: what a browser or word processor copied, with its markup, its text still `read()`'s. `ui.clipboard.write_html(text, html)` puts HTML there with its text beside it, for apps that paste either. `ui.clipboard.write { text = t, html = h, types = { ["application/x-notes"] = data } }` puts the text, the HTML (optional) and types of the app's own (optional; MIME types, each with its text) there in one change: the types go where a web page's copy puts its own (Chromium's web custom data: `org.chromium.web-custom-data` on macOS, `Chromium Web Custom MIME Data Format` on Windows, `chromium/x-web-custom-data` on X11 and Wayland), so a page's paste in Chrome, Edge or an Electron app reads them with `event.clipboardData.getData("application/x-notes")`, and `ui.clipboard.read_type("application/x-notes")` reads them back, from this app or from a page's copy that set them (nil where the clipboard holds none). Firefox and Safari keep a page's types to themselves: there the text and HTML paste. Without `types`, `write` is a copy of text and HTML as ever. With `image`, a PNG's bytes (a canvas rendered with `ui.render_canvas`, a file read with `{ base64 = true }` and decoded, a server's reply), the image goes on the clipboard as the platform's image beside the text, HTML and types, in the same change, and `write` settles with whether it took them: an image editor or a document pastes the picture, a text field its text, a page's paste its types (an image with its citation). The image goes as `public.png` on macOS, `image/png` on X11 and Wayland, and `PNG` with a DIB of it beside on Windows, decoded off the main thread there. Anything but a PNG is an error. On the web it goes as one `ClipboardItem` (`image/png` beside `text/plain` and `text/html`); a page's own types can't go with an image there, and are left out. On the web, a write with types copies as a person's ⌘C does, so it takes them within a click or a key's handler (else the text and HTML alone go), and `read_type` reads the paste being handled. `ui.clipboard.read_image()` settles with its image as a full-colour `Bitmap` (`w`, `h`; a screenshot, an image editor's copy, a browser's Copy Image), or nil, and `ui.clipboard.write_image(bitmap)` puts one there (a `ui.bitmap`, or one read before) for other apps to paste, settling with whether it took it: promises, as a large image is decoded and encoded off the main thread (a 4K one took 15 to 70 ms to read and 130 ms to write). State can keep a `Bitmap`, its pixels counted against the script's memory limit (`Limits::memory`), and `ui.image { src = state }` shows the one it holds (a pasted picture: `ui.clipboard.read_image():after(function(b) if b then pasted:set(b) end end)`). `ui.open_files({ title, directory, filters = { { "Images", { "png" } } }, multiple })` settles with the files the user picks (an empty list if they cancel) and `ui.save_file({ name })` with where they choose to save (or nil), each a `{ path, name }`. A script reads and writes only files the user picked in this host's dialogs, as a web page does: `ui.read_file(file)` settles with its text (a byte that isn't UTF-8 becomes U+FFFD), `ui.read_file(file, { base64 = true })` with every byte in base64 (a picture to keep or send), and `ui.write_file(file, data)` writes beside it and renames over it (never half a file), both off the main thread. `data` is a string, written as its bytes (any byte, NUL and those that aren't UTF-8 too), or `{ base64 = text }`, decoded first (a PNG a canvas rendered, a file a server sent; up to 256 MiB); text that isn't base64 rejects and writes nothing. A dialog asked for as a script loads (a task at its top level, before its view mounts in a window) opens once the window is there. Headless, without a window, they are errors, shown as any script error is.
 
-A file, from `ui.open_files`, a drop (`on_file_drop`, [events](events.md)) or `ui.on_open`, is `{ path, name, size, type }` as the web's `File` is: `size` in bytes and `type` its media type by its extension (`"image/png"`, `""` when unknown). `ui.fetch(url, { file = f })` sends it as the request's body with its type (a POST unless `method` says otherwise), and `multipart = { caption = "Hi", attachment = f }` sends a form's fields, text or files, as `multipart/form-data` (the web's `FormData`). The files are read on a thread of their own, so a large one never holds up the window. `on_progress = function(sent, total)` hears the body go out: the transport tells it as it writes (zgx-run's does; a host's streaming fetcher calls `Body::sent`), and one that does not say reports it all at the answer. Cancelling the task or the promise stops the upload, as it stops any fetch. A plugin needs `Capability::Files` as well as `Fetch` to send files.
+A file, from `ui.open_files`, a drop (`on_file_drop`, [events](events.md)) or `ui.on_open`, is `{ path, name, size, type }` as the web's `File` is: `size` in bytes and `type` its media type by its extension (`"image/png"`, `""` when unknown). `ui.fetch(url, { file = f })` sends it as the request's body with its type (a POST unless `method` says otherwise), and `multipart = { caption = "Hi", attachment = f }` sends a form's fields, text or files, as `multipart/form-data` (the web's `FormData`). The files are read on a thread of their own, so a large one never holds up the window. `on_progress = function(sent, total)` hears the body go out: the transport tells it as it writes (zgx-run's does; a host's streaming fetcher calls `Body::sent`), and one that does not say reports it all at the answer. Cancelling the task or the promise stops the upload, as it stops any fetch.
 
 ```lua
 local progress = ui.state("progress", 0)
@@ -430,9 +430,9 @@ return ui.column {
 }
 ```
 
-`ui.args` is what the app was launched with after its script (`zgx-run app/ notes.txt` gives `{ "notes.txt" }`), and `ui.on_open(handler)` is handed the files and URLs the system asks it to open: those among its launch's arguments, and with an `application_id` (reverse-DNS, in `zgx.json` or `Application::application_id`) a file opened with the app, a link to it, or a second launch's on Windows. Its files are the user's choice, as a dialog's are, so `ui.read_file` takes them; what arrives before the script registers its handler waits for it. It is the app's: a plugin's `ui.on_open` is an error.
+`ui.args` is what the app was launched with after its script (`zgx-run app/ notes.txt` gives `{ "notes.txt" }`), and `ui.on_open(handler)` is handed the files and URLs the system asks it to open: those among its launch's arguments, and with an `application_id` (reverse-DNS, in `zgx.json` or `Application::application_id`) a file opened with the app, a link to it, or a second launch's on Windows. Its files are the user's choice, as a dialog's are, so `ui.read_file` takes them; what arrives before the script registers its handler waits for it.
 
-Plugins reach the network, the clipboard and files only if the host grants each: `ScriptHost::grant("plugin.luau", Capability::Fetch)` (or `Clipboard`, `Files`; `Plugin::grants` for the plugins an app sets), where it may reach is the app's `ScriptHost::fetch_policy(impl FetchPolicy)`, and the app's actions and shared state only where it exposes them (see Plugins in `docs/scripting.md`). A plugin that fails to load is left out and its error reported; the app and the other plugins load.
+Every script reaches the network, the clipboard and files, as it reaches the host's actions and shared state. A host that wants to decide per script reads which script asks: `Body::script()` in its transport, `ScriptHost::calling_script()` in an action ([plugins](../plugins.md#rules-are-the-apps)). A script beside the root that fails to load is left out and its error reported; the root and the others load.
 
 ## Computeds, effects, batches
 
@@ -675,7 +675,7 @@ Back and forward come from the platform's own input as well: the mouse's back an
 
 ## Plugins and slots
 
-A host's plugins (`ScriptHost::plugins(dir)`) are scripts in their own sandboxed VMs. A plugin returns nothing; it adds nodes to the application's slots with `ui.contribute(name, node)`. `ui.slot(name, props)` is a column holding every contribution to `name`, in plugin order; `props` style it. Plugins see the `ui.shared` state the host exposes (`expose_shared`, or `expose_shared_read` to read and follow only: a plugin's write is an error), never the application's `ui.state`.
+A host loads scripts beside its root script (`ScriptHost::set_scripts`, `scripts_in`, or zgx.json's `scripts`), each in a VM of its own ([plugins](../plugins.md)). Every script is equal: each reaches every host action, shared state and element the root does. One beside the root returns nothing; it adds nodes to the root's slots with `ui.contribute(name, node)`. `ui.slot(name, props)` is a column holding every contribution to `name`, in load order; `props` style it. Scripts share the `ui.shared` state; each one's `ui.state` is its own.
 
 ```lua
 -- file: app.luau
@@ -686,12 +686,11 @@ return ui.column {
 	ui.text { "Hello, {user}" },
 	ui.slot("sidebar", { gap = 6 }),
 	ui.button { id = "save", label = "Save" },
-	ui.input { private = true, value = ui.state("password", "") },
 }
 ```
 
 ```lua
--- file: plugins/stats.luau
+-- file: scripts/stats.luau
 local user = ui.shared("user", "")
 ui.contribute(
 	"sidebar",
@@ -705,40 +704,39 @@ ui.contribute(
 
 ### Hooks
 
-`ui.contribute { target, before | after | replace = node }` adds at an element of the app's without a slot. `target` takes the inspector's and `zgx test`'s selectors, matched against what the app's source writes as the interface is built:
+`ui.contribute { target, before | after | replace = node }` adds at an element of the root script's without a slot. `target` takes the inspector's and `zgx test`'s selectors, matched against what the app's source writes as the interface is built:
 
 - `#id`; `hook:name` (an element declaring `hook = "name"`); `.class`, every element with that class (`class = "session-row"`), and `.a.b`, both; `role:button "Save"` or a name (its `role` or its kind's, its `label` or literal text). Parts in one element narrow it: `#save .primary`.
 - `a >> b`: `b` anywhere inside `a`, as `#sidebar >> .session-row`. A chain is checked as each element mounts, so it holds inside list rows and components built later; where it doesn't, nothing is added.
 - A target matching several elements contributes at each. `@n`, `row` and `[n]` are refused: they are known only once the interface shows.
+- Targets match only the root script's elements, never what a script contributed.
 
 Under strict types a `target` is one of the app's ids, declared hooks or classes (`HookTarget`, which `zgx types` writes from its source, for an editor to offer), a chain (`HookChain`, any text: its parts combine freely, and `zgx lint` warns of each `#id`, `hook:` or `.class` in it that the app doesn't declare), or `ui.selector('role:button "Save"')` for a role or a name, which marks it as the app's internals.
 
-- `before` and `after` add beside the element, in plugin order, wherever it is built; the host can make a target ask a capability with `expose_hook(target, Some(capability))`.
+- `before` and `after` add beside the element, in load order, wherever it is built.
 - At the root of a `ui.show`'s or `ui.switch`'s branch, a component or a `ui.presence`'s content, they are siblings in the parent's flow that come and go with it (a presence's leave when its exit ends) and read what the root provides; at the app's root or a window's root, which can't have siblings, they are an error (`contributions()`).
-- At the root of a `ui.each` or `ui.list` row they apply a row each: what is added lays out as the list's own items, moves with its row as the list reorders, goes with it when it is removed, and reads what the row's root provides (`ui.use_context`), live. What a plugin adds reads what the app provides above where it lands, nearest first: a value converted into the plugin's script, a state as the same state, read only.
-- `replace` takes the element's place (an element in a container's children, or the root of a `ui.presence`'s content at any depth, each entry replaced as it enters and leaving with it: not the app's root, nor a split's panes) and needs `Capability::Override(target)` or `Capability::Override("*")`; the last plugin's wins.
-- `private = true` (or `hook = false`) on an element puts it and everything in it out of reach.
-- What a plugin adds has the accessible description "From the plugin `<name>`".
-- `host.contributions()` (`zgx inspect contributions`, MCP `zgx_contributions`) says what each does now: its target, place, how many elements it applies at (0: its target matches nothing showing) and its latest error, then each plugin command's shortcut dropped because the app (or an earlier plugin) holds it (place `shortcut`; typed: `host.dropped_shortcuts()`). `host.elements(&ui, &handle)` (`zgx inspect elements`, MCP `zgx_elements`) lists the app's ids, classes and hooks grouped by the elements that provide context, with a selector that reaches each group and the names it provides and inherits: where a plugin can put something, and what it can read there.
+- At the root of a `ui.each` or `ui.list` row they apply a row each: what is added lays out as the list's own items, moves with its row as the list reorders, goes with it when it is removed, and reads what the row's root provides (`ui.use_context`), live. What a script adds reads what the app provides above where it lands, nearest first: a value converted into the script's VM, a state as the same state, which it may write. A function can't cross: an error naming it.
+- `replace` takes the element's place (an element in a container's children, or the root of a `ui.presence`'s content at any depth, each entry replaced as it enters and leaving with it: not the app's root, nor a split's panes); the last script's wins.
+- `host.contributions()` (`zgx inspect contributions`, MCP `zgx_contributions`) says what each does now: its script, target, place, how many elements it applies at (0: its target matches nothing showing) and its latest error, then each command's shortcut dropped because the root script's command (or an earlier script's) holds it (place `shortcut`; typed: `host.dropped_shortcuts()`). `host.elements(&ui, &handle)` (`zgx inspect elements`, MCP `zgx_elements`) lists the app's ids, classes and hooks grouped by the elements that provide context, with a selector that reaches each group and the names it provides and inherits: where a script can put something, and what it can read there.
 
-With the app above, a plugin adds a button before its Save; nothing reaches the password field:
+With the app above, a script adds a button before its Save:
 
 ```lua
--- file: plugins/preview.luau
+-- file: scripts/preview.luau
 ui.contribute { target = "#save", before = ui.button { label = "Preview" } }
 ```
 
-`ui.filter { target, text | label | hidden | disabled | tooltip | items | order = fn }` passes an element's prop through a function of the plugin's, which takes the value as it is and returns it changed. It runs in the plugin's script, again whenever what it reads changes (the app's state the value follows, the plugin's own), never per frame. It needs `Capability::Override`, as replacing does.
+`ui.filter { target, text | label | hidden | disabled | tooltip | items | order = fn }` passes an element's prop through a function of the script's, which takes the value as it is and returns it changed. It runs in that script's VM, again whenever what it reads changes (the app's state the value follows, the script's own), never per frame.
 
 - `text` is the element's text, or a button's or item's (its first child's); `label` its accessible name.
 - `hidden` and `disabled` take and return a boolean.
 - `tooltip` is a written tooltip's text, passed through as the element is built.
 - `items` is what a `ui.each` or a `ui.list` with `data` shows: a list in, a list out.
 - `order` is the element's children's order: it gets their ids (a position from 1 for one without) and returns those it puts first; the rest follow as they were. A changed order rebuilds the element's children; an unchanged one keeps them.
-- Nothing else is filtered: its handlers, styles and state stay the app's. A filter that fails is reported as the plugin's error, and the value shows as it was.
+- Nothing else is filtered: its handlers, styles and state stay the app's. A filter that fails is reported as the script's error, and the value shows as it was.
 
 ```luau
--- file: plugins/shout.luau (granted Capability::OverrideElement("#title"))
+-- file: scripts/shout.luau
 ui.filter { target = "#title", text = function(text) return string.upper(text) end }
 ui.filter {
 	target = "#tasks",
@@ -752,17 +750,17 @@ ui.filter {
 }
 ```
 
-A plugin targeting an `id` that is not a declared `hook` reaches the app's internals: the app's next version may move or drop it ([design](../design/plugin-hooks.md)).
+A script targeting an `id` that is not a declared `hook` reaches the app's internals: the app's next version may move or drop it ([design](../design/plugin-hooks.md)).
 
 
 ### Module overrides
 
-`ui.override { module = "@app/<path>", with = "<plugin path>" }`, from a plugin, replaces one of the app's modules: wherever the app requires `@app/<path>`, it gets the plugin's module instead.
+`ui.override { module = "@app/<path>", with = "<path>" }`, from any script, replaces one of the app's modules: wherever the app requires `@app/<path>`, it gets the script's module instead.
 
-- `module` is one of the app's `@app/…` modules (`@app` is the app's directory; a relative require is never replaced). `with` is one of the plugin's own files, a directory as its `init.luau`.
-- It needs `Capability::OverrideModule(module)` or `Capability::OverrideModule("*")`, **a trust grant**: the replacement runs in the app's VM as the app's own code, with all its access. Of several plugins, the last one's wins.
-- The replacement may `require("@app-original/<path>")` for the module it replaces (to wrap it); nothing else may. Its own relative requires reach its plugin's directory.
-- A plugin requires none of the app's modules; a `.luaurc` defining an `app` or `app-original` alias is an error.
+- `module` is one of the app's `@app/…` modules (`@app` is the root script's directory; a relative require is never replaced). `with` is one of the script's own files, a directory as its `init.luau`.
+- The replacement runs in the app's VM as the app's own code. Of several scripts, the last one's wins.
+- The replacement may `require("@app-original/<path>")` for the module it replaces (to wrap it). Its own relative requires reach its script's directory.
+- A `.luaurc` defining an `app` or `app-original` alias is an error: they are zgx's own.
 
 ```lua
 -- file: components/card.luau
@@ -770,10 +768,10 @@ return function(props: { title: string })
     return ui.column { p = 8, ui.text { props.title, literal = true } }
 end
 
--- file: plugins/badges/init.luau (granted Capability::OverrideModule("@app/components/card"))
+-- file: scripts/badges/init.luau
 ui.override { module = "@app/components/card", with = "./card" }
 
--- file: plugins/badges/card.luau
+-- file: scripts/badges/card.luau
 local card = require("@app-original/components/card")
 return function(props)
     return ui.row { card(props), ui.text { "New" } }
@@ -785,6 +783,6 @@ end
 - Reading state while the script builds the tree (`ui.text { count:get() }`) uses the value once: the text never changes. Pass the state, a template (`"{count}"`) or a function instead.
 - `ui.use_state` outside a component (or a row or presence content) is an error; use `ui.state`. `ui.on_mount` outside one runs once the app's interface mounts (and again after a reload).
 - An error raised with `error("message")` carries where it was raised (`"api.luau:12: message"`); `error("message", 0)` raises the message alone, as a person should read it. Luau types what `pcall` returns on failure as the function's result: show it with `tostring(err)`.
-- A plugin's `ui.state` is its own; the application's is not visible to plugins.
+- Each script's `ui.state` is its own: a script beside the root sees the root's through `ui.shared` or what it provides, not by key.
 - `ui.persist` reads its file only the first time a run asks for the key; a hot reload keeps the live value. A file that is not JSON starts the key from `initial`, with a warning.
 - An effect reads with `get` what it should follow and with `peek` what it only uses: one that writes a state it also follows runs again after each write.

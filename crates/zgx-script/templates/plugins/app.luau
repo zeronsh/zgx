@@ -1,11 +1,10 @@
--- Tasks, made to be extended: plugins (in plugins/, listed in zgx.json)
--- add to it, filter it and call what it allows, without a slot for each.
--- What it offers them is in zgx.json's `expose`:
--- - `tasks`, shared state they read but don't write, and `focus`, theirs;
+-- Tasks, made to be extended: plugins (in plugins/, listed in zgx.json's
+-- `scripts`), each a script of its own, add to it, filter it and call its
+-- actions, without a slot for each. They reach all this script does:
+-- - `tasks` and `focus`, shared state;
 -- - `complete`, an action this script defines (`ui.actions`);
--- - `#tasks`, a list they may filter. Every `id` is a target to add
---   beside; `hook = "toolbar.add"` is one it promises to keep, and
---   `hook = false` keeps the Clear button out of every plugin's reach.
+-- - every element: each `id` is a target to add beside, replace or filter;
+--   `hook = "toolbar.add"` is one it promises to keep.
 local tokens = require("./theme")
 local TaskRow = require("@components/task_row")
 
@@ -64,7 +63,7 @@ return ui.column {
 		bg = tokens.card,
 		ui.text { id = "title", "Tasks", bold = true, text_size = "$font.size.lg", grow = 1 },
 		ui.button { id = "add", hook = "toolbar.add", "Add", on_click = add },
-		ui.button { id = "clear", hook = false, "Clear done", on_click = clear_done },
+		ui.button { id = "clear", "Clear done", on_click = clear_done },
 	},
 	ui.column {
 		p = "$space.4",

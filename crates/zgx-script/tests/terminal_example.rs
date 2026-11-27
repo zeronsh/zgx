@@ -939,11 +939,7 @@ fn with_notes(status: &'static str) -> App {
     App::with_host(Value::Nil, move |host| {
         host.shared("plugins", listed);
         if status == "enabled" {
-            host.set_plugins(vec![zgx_script::Plugin {
-                name: "notes".into(),
-                entry,
-                grants: vec![zgx_script::Capability::Clipboard],
-            }]);
+            host.set_scripts(vec![zgx_script::Script::file("notes", entry)]);
         }
     })
 }
@@ -1098,11 +1094,7 @@ fn a_saved_panel_pane_opens_again_without_a_shell() {
     let (listed, entry) = notes_plugin("enabled");
     let mut again = App::with_host(saved, move |host| {
         host.shared("plugins", listed);
-        host.set_plugins(vec![zgx_script::Plugin {
-            name: "notes".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![zgx_script::Script::file("notes", entry)]);
     });
     assert_eq!(again.panes().len(), 1, "one terminal, one panel");
     let panel = again
@@ -1125,17 +1117,16 @@ fn a_saved_panel_pane_opens_again_without_a_shell() {
     );
 }
 
-/// The example plugins zterm ships (examples/terminal-plugins), as the
-/// user would allow them.
-fn example_plugin(name: &str, grants: Vec<zgx_script::Capability>) -> zgx_script::Plugin {
-    zgx_script::Plugin {
-        name: name.into(),
-        entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+/// One of the example plugins zterm ships (examples/terminal-plugins), as
+/// terminal.rs loads it: a script beside the app's.
+fn example_plugin(name: &str) -> zgx_script::Script {
+    zgx_script::Script::file(
+        name,
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../zgx-desktop/examples/terminal-plugins")
             .join(name)
             .join("init.luau"),
-        grants,
-    }
+    )
 }
 fn listed(id: &str, panel: &str, title: &str) -> String {
     format!(
@@ -1177,7 +1168,6 @@ async fn hn_fetch(request: zgx_script::Request) -> Result<zgx_script::Response, 
 
 #[test]
 fn the_hacker_news_plugin_navigates_within_its_pane() {
-    use zgx_script::Capability;
     let mut app = App::with_host(Value::Nil, |host| {
         host.shared(
             "plugins",
@@ -1187,10 +1177,7 @@ fn the_hacker_news_plugin_navigates_within_its_pane() {
             ))
             .unwrap(),
         );
-        host.set_plugins(vec![example_plugin(
-            "hacker-news",
-            vec![Capability::Fetch, Capability::Web],
-        )]);
+        host.set_scripts(vec![example_plugin("hacker-news")]);
         host.fetcher(hn_fetch);
     });
     app.open_panel_in_tab("panel:hacker-news/front-page");
@@ -1250,7 +1237,6 @@ fn the_hacker_news_plugin_navigates_within_its_pane() {
 fn the_editor_plugin_opens_edits_and_saves_a_picked_file() {
     use zgx::input::{Key, Modifiers};
     use zgx::platform::{FilePicker, Pending, Platform, PlatformService};
-    use zgx_script::Capability;
     struct Fake(std::path::PathBuf);
     impl Platform for Fake {
         fn clipboard_text(&self) -> Option<String> {
@@ -1280,7 +1266,7 @@ fn the_editor_plugin_opens_edits_and_saves_a_picked_file() {
                 "plugins",
                 Value::from_json(&format!("[{}]", listed("editor", "editor", "Editor"))).unwrap(),
             );
-            host.set_plugins(vec![example_plugin("editor", vec![Capability::Files])]);
+            host.set_scripts(vec![example_plugin("editor")]);
         },
         move |view| zgx::compose::provide(PlatformService(fake), view),
     );
@@ -1337,26 +1323,19 @@ fn the_editor_plugin_opens_edits_and_saves_a_picked_file() {
 
 #[test]
 fn the_example_plugins_run_in_their_panels() {
-    use zgx_script::Capability;
-    let run = |grants: Vec<Capability>| {
-        App::with_host(Value::Nil, move |host| {
-            host.shared(
-                "plugins",
-                Value::from_json(&format!(
-                    "[{}, {}]",
-                    listed("notes", "notes", "Notes"),
-                    listed("hacker-news", "front-page", "Hacker News")
-                ))
-                .unwrap(),
-            );
-            host.set_plugins(vec![
-                example_plugin("notes", vec![]),
-                example_plugin("hacker-news", grants),
-            ]);
-            host.fetcher(hn_fetch);
-        })
-    };
-    let mut app = run(vec![Capability::Fetch, Capability::Web]);
+    let mut app = App::with_host(Value::Nil, |host| {
+        host.shared(
+            "plugins",
+            Value::from_json(&format!(
+                "[{}, {}]",
+                listed("notes", "notes", "Notes"),
+                listed("hacker-news", "front-page", "Hacker News")
+            ))
+            .unwrap(),
+        );
+        host.set_scripts(vec![example_plugin("notes"), example_plugin("hacker-news")]);
+        host.fetcher(hn_fetch);
+    });
     app.open_panel("panel:notes/notes");
     assert_eq!(app.h.host.error().get(), None);
     assert!(app.h.texts().iter().any(|t| t == "Notes for this pane"));
@@ -1367,22 +1346,10 @@ fn the_example_plugins_run_in_their_panels() {
         app.h.texts()
     );
     assert_eq!(app.h.host.error().get(), None);
-
-    // Not allowed the network, it cannot fetch.
-    let mut app = run(vec![Capability::Web]);
-    app.open_panel("panel:hacker-news/front-page");
-    app.settle();
-    let texts = app.h.texts();
-    assert!(
-        texts.iter().any(|t| t.starts_with("Could not load")),
-        "{texts:?}"
-    );
-    assert!(!texts.iter().any(|t| t.contains("Story")));
 }
 
 #[test]
 fn a_panel_is_where_it_was_left_after_another_tab_shows() {
-    use zgx_script::Capability;
     let fetches = std::rc::Rc::new(std::cell::Cell::new(0));
     let counted = fetches.clone();
     let mut app = App::with_host(Value::Nil, move |host| {
@@ -1394,10 +1361,7 @@ fn a_panel_is_where_it_was_left_after_another_tab_shows() {
             ))
             .unwrap(),
         );
-        host.set_plugins(vec![example_plugin(
-            "hacker-news",
-            vec![Capability::Fetch, Capability::Web],
-        )]);
+        host.set_scripts(vec![example_plugin("hacker-news")]);
         host.fetcher(move |request| {
             counted.set(counted.get() + 1);
             hn_fetch(request)
@@ -1433,7 +1397,6 @@ fn a_panel_is_where_it_was_left_after_another_tab_shows() {
 
 #[test]
 fn a_panels_bar_keeps_its_clicks_while_the_grip_shows() {
-    use zgx_script::Capability;
     let mut app = App::with_host(Value::Nil, |host| {
         host.shared(
             "plugins",
@@ -1443,10 +1406,7 @@ fn a_panels_bar_keeps_its_clicks_while_the_grip_shows() {
             ))
             .unwrap(),
         );
-        host.set_plugins(vec![example_plugin(
-            "hacker-news",
-            vec![Capability::Fetch, Capability::Web],
-        )]);
+        host.set_scripts(vec![example_plugin("hacker-news")]);
         host.fetcher(hn_fetch);
     });
     app.open_panel_in_tab("panel:hacker-news/front-page");

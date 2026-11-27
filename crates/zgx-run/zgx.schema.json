@@ -302,35 +302,8 @@
       "$ref": "#/$defs/decorations"
     },
     "expose": {
-      "additionalProperties": false,
-      "description": "What plugins reach of the app.",
-      "properties": {
-        "actions": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "hooks": {
-          "additionalProperties": {
-            "enum": [
-              "open",
-              "override"
-            ]
-          },
-          "type": "object"
-        },
-        "shared": {
-          "additionalProperties": {
-            "enum": [
-              "read",
-              "write"
-            ]
-          },
-          "type": "object"
-        }
-      },
-      "type": "object"
+      "deprecated": true,
+      "description": "Gone: every script reaches every shared state, action and element of the app's."
     },
     "first": {
       "description": "The window of named_windows that opens (zgx run --window opens another).",
@@ -393,29 +366,59 @@
       "type": "object"
     },
     "plugins": {
-      "additionalProperties": {
-        "additionalProperties": false,
-        "properties": {
-          "allow": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "path"
-        ],
-        "type": "object"
-      },
-      "description": "The app's plugins, by name, each with what it is allowed.",
-      "type": "object"
+      "deprecated": true,
+      "description": "Gone: `scripts` lists the scripts the app loads, and each reaches everything the app's does."
     },
     "resizable": {
       "$ref": "#/$defs/resizable"
+    },
+    "scripts": {
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "limits": {
+                "additionalProperties": false,
+                "properties": {
+                  "call_ms": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "count_state": {
+                    "type": "boolean"
+                  },
+                  "load_ms": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "memory_mb": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "voices": {
+                    "minimum": 0,
+                    "type": "number"
+                  }
+                },
+                "type": "object"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "description": "Scripts the app loads beside its own, by name, each in a VM of its own: a folder (its init.luau) or a file, or { path, limits }.",
+      "type": "object"
     },
     "shadow": {
       "$ref": "#/$defs/shadow"

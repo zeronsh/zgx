@@ -1,15 +1,14 @@
-//! Plugins passing an app's element's props through functions of their own
-//! (`ui.filter { target, text = fn, … }`): its text, name, whether it is
-//! hidden or disabled, its tooltip, a `ui.each`'s or `ui.list`'s items and
-//! the order of its children. A filter takes
-//! `Capability::Override`, as replacing does, and follows what it reads; one
-//! that fails shows the value as it was.
+//! Scripts passing the root script's element's props through functions of
+//! their own (`ui.filter { target, text = fn, … }`): its text, name, whether
+//! it is hidden or disabled, its tooltip, a `ui.each`'s or `ui.list`'s items
+//! and the order of its children. Any script filters any element; a filter
+//! follows what it reads, and one that fails shows the value as it was.
 mod common;
 use common::Harness;
 use std::path::PathBuf;
-use zgx_script::{Capability, Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
-fn plugin(name: &str, code: &str) -> PathBuf {
+fn script_file(name: &str, code: &str) -> PathBuf {
     // A directory of each call's own: tests run in parallel in one process,
     // and two writing one name's file would load each other's code.
     static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -20,21 +19,14 @@ fn plugin(name: &str, code: &str) -> PathBuf {
     std::fs::write(&entry, code).unwrap();
     entry
 }
-fn with(app: &'static str, name: &str, code: &str, grants: Vec<Capability>) -> Harness {
-    let entry = plugin(name, code);
+fn with(app: &'static str, name: &str, code: &str) -> Harness {
+    let entry = script_file(name, code);
     let name = name.to_string();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", app);
-        host.set_plugins(vec![Plugin {
-            name,
-            entry,
-            grants,
-        }]);
+        host.set_scripts(vec![Script::file(name, entry)]);
         host
     })
-}
-fn any() -> Vec<Capability> {
-    vec![Capability::Override("*".into())]
 }
 
 const APP: &str = r##"
@@ -55,22 +47,14 @@ return ui.column {
 "##;
 
 #[test]
-fn filtering_takes_the_override_capability() {
-    const UPPER: &str =
-        r##"ui.filter { target = "#title", text = function(t) return t:upper() end }"##;
-    let mut denied = with(APP, "shout", UPPER, vec![]);
-    let error = denied.error().unwrap_or_default();
-    assert!(error.contains("Override"), "{error}");
-    assert!(denied.texts().contains(&"Count: 0".to_string()));
-
-    let mut granted = with(
+fn any_script_filters_any_element() {
+    let mut h = with(
         APP,
         "shout",
-        UPPER,
-        vec![Capability::Override("#title".into())],
+        r##"ui.filter { target = "#title", text = function(t) return t:upper() end }"##,
     );
-    assert_eq!(granted.error(), None);
-    assert!(granted.texts().contains(&"COUNT: 0".to_string()));
+    assert_eq!(h.error(), None);
+    assert!(h.texts().contains(&"COUNT: 0".to_string()));
 }
 
 #[test]
@@ -79,7 +63,6 @@ fn a_filtered_text_follows_the_app_state_it_shows() {
         APP,
         "bang",
         r##"ui.filter { target = "#title", text = function(t) return t .. "!" end }"##,
-        any(),
     );
     assert!(
         h.texts().contains(&"Count: 0!".to_string()),
@@ -100,7 +83,6 @@ fn a_buttons_text_is_its_label_child() {
         APP,
         "plus",
         r##"ui.filter { target = "#add", text = function(t) return t .. " one" end }"##,
-        any(),
     );
     assert!(
         h.texts().contains(&"Add one".to_string()),
@@ -120,7 +102,6 @@ fn a_disabled_filter_stops_the_handler() {
         APP,
         "lock",
         r##"ui.filter { target = "#add", disabled = function(was) return true end }"##,
-        any(),
     );
     h.click("add");
     assert!(
@@ -136,7 +117,6 @@ fn a_hidden_filter_hides_the_element() {
         APP,
         "quiet",
         r##"ui.filter { target = "#note", hidden = function(was) return not was end }"##,
-        any(),
     );
     assert_eq!(h.error(), None);
     let note = h.find("note").expect("still there, hidden");
@@ -161,7 +141,6 @@ ui.filter {
     end,
 }
 "##,
-        any(),
     );
     assert_eq!(h.error(), None);
     let texts = h.texts();
@@ -194,7 +173,6 @@ ui.filter {
     end,
 }
 "##,
-        any(),
     );
     assert!(h.texts().contains(&"APPLE".to_string()), "{:?}", h.texts());
     h.click("more");
@@ -207,7 +185,6 @@ fn a_failing_filter_shows_the_value_as_it_was() {
         APP,
         "broken",
         r##"ui.filter { target = "#note", text = function(t) error("no") end }"##,
-        any(),
     );
     assert!(h.texts().contains(&"A note".to_string()), "{:?}", h.texts());
     let error = h.error().unwrap_or_default();
@@ -220,7 +197,6 @@ fn only_the_listed_props_are_filtered() {
         APP,
         "greedy",
         r##"ui.filter { target = "#add", on_click = function() end }"##,
-        any(),
     );
     let error = h.error().unwrap_or_default();
     assert!(
@@ -259,7 +235,6 @@ ui.filter {
     end,
 }
 "##,
-        any(),
     );
     h.frames(1);
     let texts = h.texts();
@@ -293,7 +268,6 @@ fn an_order_filter_moves_children() {
         TOOLBAR,
         "first",
         r##"ui.filter { target = "#toolbar", order = function(ids) return { 3, "b" } end }"##,
-        any(),
     );
     assert_eq!(h.error(), None);
     assert_eq!(
@@ -303,7 +277,7 @@ fn an_order_filter_moves_children() {
     );
 }
 
-/// An order filter holds its node in a box of its own, what a plugin's filter
+/// An order filter holds its node in a box of its own, what a script's filter
 /// has always laid out as: the node's `grow` stays inside it, unlike a node
 /// with no such filter.
 #[test]
@@ -324,7 +298,6 @@ return ui.column { w_full = true, h_full = true,
         GROWS,
         "same",
         r##"ui.filter { target = "#toolbar", order = function(ids) return ids end }"##,
-        any(),
     );
     assert_eq!(h.error(), None);
     h.frames(2);
@@ -347,16 +320,11 @@ ui.filter {
     end,
 }
 "##;
-    let entry = plugin("flipper", FLIPS);
+    let entry = script_file("flipper", FLIPS);
     let mut h = Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", TOOLBAR);
         host.shared("flip", false);
-        host.expose_shared("flip", None);
-        host.set_plugins(vec![Plugin {
-            name: "flipper".into(),
-            entry,
-            grants: any(),
-        }]);
+        host.set_scripts(vec![Script::file("flipper", entry)]);
         host
     });
     assert_eq!(h.error(), None);

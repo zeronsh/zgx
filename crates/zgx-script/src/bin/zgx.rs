@@ -107,11 +107,11 @@ fn types(args: Vec<String>) -> ExitCode {
             eprintln!("zgx types: {} is not an app's directory", dir.display());
             return ExitCode::from(2);
         }
-        match zgx_script::app_types::write_lent_aliases(&dir) {
+        match zgx_script::app_types::write_package_aliases(&dir) {
             Ok(added) if !added.is_empty() => {
                 let names: Vec<String> = added.iter().map(|n| format!("@{n}")).collect();
                 println!(
-                    "added {} to {} (lent to this plugin by the app's zgx.json)",
+                    "added {} to {} (the app's packages, from its zgx.json)",
                     names.join(", "),
                     dir.join(".luaurc").display()
                 );
@@ -794,8 +794,8 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   prefers reduced-motion on|off|system   what zgx reads as the system's (never its setting)
   scroll <target|x,y> <dy> [dx]  command <id>
   errors               lint
-  contributions        each plugin's targets: where, live matches, error (JSON)
-  elements             named elements by the context they read, for plugins (JSON)
+  contributions        each script's targets: where, live matches, error (JSON)
+  elements             named elements by the context they read, for scripts (JSON)
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
@@ -1329,13 +1329,13 @@ const TOOLS: &[Tool] = &[
         "zgx_elements",
         "elements",
         &[],
-        "Where a plugin can put something and what it can read there: the app's ids, classes and hooks grouped by each element that provides context (`provide`), outermost the root, each group with a selector that reaches it and the context names it provides and inherits. Repeated rows are one entry with a count; private elements list nothing inside; names the source declares that aren't showing are `mounted: false`. A summary, then the same as JSON.",
+        "Where a script can put something and what it can read there: the app's ids, classes and hooks grouped by each element that provides context (`provide`), outermost the root, each group with a selector that reaches it and the context names it provides and inherits. Repeated rows are one entry with a count; names the source declares that aren't showing are `mounted: false`. A summary, then the same as JSON.",
     ),
     (
         "zgx_contributions",
         "contributions",
         &[],
-        "Each plugin contribution at the app's elements (ui.contribute, ui.filter): plugin, target, place (before, after, replace, filter), how many elements it applies at now (0: its target matches nothing shown), and its latest error. A line each, then the same as JSON.",
+        "Each script's contribution at the app's elements (ui.contribute, ui.filter): script, target, place (before, after, replace, filter), how many elements it applies at now (0: its target matches nothing shown), and its latest error. A line each, then the same as JSON.",
     ),
     (
         "zgx_lint",
@@ -1361,7 +1361,7 @@ const TOOLS: &[Tool] = &[
         "zgx_reloads",
         "reloads",
         &[],
-        "Each hot reload since the app began watching its files: the files that changed, then `partial` (the app's VM kept: the modules that ran again, what changed and what requires it, and how many were kept) or `full` (everything loaded again) and why; a partial reload is taken only with ZGX_RELOAD=partial in the app's environment, else it's what the reload would have done (a plugin, a global set or a task started at a module's top level, a command or on_mount a kept module declares, a file that isn't a module, a template swapped whole, a failed reload). A line each, then the same as JSON.",
+        "Each hot reload since the app began watching its files: the files that changed, then `partial` (the app's VM kept: the modules that ran again, what changed and what requires it, and how many were kept) or `full` (everything loaded again) and why; a partial reload is taken only with ZGX_RELOAD=partial in the app's environment, else it's what the reload would have done (a script beside the root, a global set or a task started at a module's top level, a command or on_mount a kept module declares, a file that isn't a module, a template swapped whole, a failed reload). A line each, then the same as JSON.",
     ),
     (
         "zgx_mark",

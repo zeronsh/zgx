@@ -293,7 +293,7 @@ fn reading_a_message_costs_what_changed() {
     // 50 ms budget). A tighter budget than the default holds it.
     use zgx::input::Key;
     let limits = zgx_script::Limits {
-        call: std::time::Duration::from_millis(15),
+        call: Some(std::time::Duration::from_millis(15)),
         ..Default::default()
     };
     let mut h = Harness::new(|runtime| ScriptHost::new(runtime, APP).limits(limits));

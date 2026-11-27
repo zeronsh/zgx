@@ -497,7 +497,7 @@ fn unit(v: Vec3) -> [f32; 3] {
 ///   `flat = true`, draws each triangle flat on vertices of its own.
 ///
 /// What it holds lives outside the VM, so it's asked of what the script may
-/// hold (`Limits::memory`) and, for a plugin, counted with its VM's and its
+/// hold (`Limits::memory`) and, for a script, counted with its VM's and its
 /// states' (`meter`) for as long as anything holds the geometry.
 fn own_geometry(lua: &Lua, spec: &Table) -> mlua::Result<Geometry> {
     let Some(positions) = flat_numbers(spec, "positions")? else {
@@ -563,8 +563,8 @@ fn own_geometry(lua: &Lua, spec: &Table) -> mlua::Result<Geometry> {
         Some(meter) => meter.room(bytes).map_err(|_| {
             let mb = |bytes: usize| bytes as f64 / f64::from(1 << 20);
             wrong(format_args!(
-                "ui.mesh geometry needs {:.1} MB: a plugin's memory is {:.0} MB at most \
-                 (`Limits::plugin_memory`), with {:.1} MB of it held",
+                "ui.mesh geometry needs {:.1} MB: the script's memory is {:.0} MB at most \
+                 (`Limits::memory`), with {:.1} MB of it held",
                 mb(bytes),
                 mb(meter.limit()),
                 mb(meter.used()),
@@ -747,7 +747,6 @@ fn group(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
 
 /// `ui.model { src, fit, position, rotation, scale, on_click, on_hover }`.
 fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
-    crate::node::env(lua)?.may(crate::Capability::Scene3d, "ui.model")?;
     if !cfg!(feature = "gltf") {
         return Err(wrong(format_args!(
             "ui.model needs zgx-script's `gltf` feature (zgx-run has it)"
@@ -809,7 +808,6 @@ fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
 
 /// `ui.scene3d { camera, orbit, background, label, …objects, …box props }`.
 fn scene3d(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
-    crate::node::env(lua)?.may(crate::Capability::Scene3d, "ui.scene3d")?;
     let camera: Option<Table> = table.get("camera")?;
     let (fov, position, target) = match &camera {
         Some(camera) => (

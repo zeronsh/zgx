@@ -242,13 +242,11 @@ impl Folder {
     }
 }
 
-/// What a host lets scripts have of folders, and the grants it keeps past a
+/// What a host keeps of folders, and the grants it keeps past a
 /// run (`ui.open_folder { remember }`): the platform's, in its storage
 /// directory's `.folders`, which no script reads (scripts read only what
 /// was picked), or in memory without one.
 pub(crate) struct Access {
-    /// `ScriptHost::refuse_folders`: no folder at all.
-    pub(crate) refused: Cell<bool>,
     /// `ScriptHost::refuse_remembered_folders`: none kept past a run.
     pub(crate) forgetful: Cell<bool>,
     persist: Rc<crate::persist::Persist>,
@@ -257,7 +255,6 @@ pub(crate) struct Access {
 impl Access {
     pub(crate) fn new(persist: Rc<crate::persist::Persist>) -> Self {
         Self {
-            refused: Cell::new(false),
             forgetful: Cell::new(false),
             persist,
             memory: RefCell::default(),
@@ -334,11 +331,6 @@ fn kept_folder(
     .value()
 }
 
-/// Whether the script running is a plugin's.
-fn in_plugin(lua: &Lua) -> bool {
-    lua.app_data_ref::<crate::node::Env>()
-        .is_some_and(|env| matches!(*env.grants, crate::Grants::Only(_)))
-}
 /// A key to keep a folder under: some text.
 fn key_of(what: &str, key: String) -> mlua::Result<String> {
     if key.is_empty() {
@@ -452,7 +444,6 @@ impl UserData for FolderUd {
         // `folder:file(path)`: a file inside it as a `File`, which `ui.image`,
         // `ui.read_file` and `drag_export` take as they do a dialog's.
         methods.add_method("file", |lua, folder, path: String| {
-            crate::rules::guard(lua, crate::GuardKind::Folder, &path)?;
             let root = folder.0.root.clone();
             let picked = crate::node::env(lua)?.picked.clone();
             off_thread(
@@ -474,7 +465,6 @@ impl UserData for FolderUd {
             )
         });
         methods.add_method("read", |lua, folder, path: String| {
-            crate::rules::guard(lua, crate::GuardKind::Folder, &path)?;
             let root = folder.0.root.clone();
             off_thread(
                 lua,
@@ -489,7 +479,6 @@ impl UserData for FolderUd {
             )
         });
         methods.add_method("write", |lua, folder, (path, text): (String, String)| {
-            crate::rules::guard(lua, crate::GuardKind::Folder, &path)?;
             let root = folder.0.root.clone();
             off_thread(
                 lua,
@@ -501,14 +490,12 @@ impl UserData for FolderUd {
     }
 }
 
-/// Installs `ui.open_folder` and `ui.remembered_folder`. `allowed` is false
-/// for a plugin the host did not grant folders; `access` says what the host
-/// refuses and keeps.
+/// Installs `ui.open_folder` and `ui.remembered_folder`. `access` says what
+/// the host keeps.
 pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
     shared: crate::io::SharedPlatform,
-    allowed: bool,
     access: Rc<Access>,
 ) -> mlua::Result<()> {
     let (remembering, platforms) = (access.clone(), shared.clone());
@@ -516,19 +503,10 @@ pub(crate) fn install(
         "remembered_folder",
         lua.create_function(move |lua, key: String| {
             const WHAT: &str = "ui.remembered_folder";
-            if !allowed {
-                return Err(crate::io::denied(WHAT, "Folders"));
-            }
-            if in_plugin(lua) {
-                return Err(mlua::Error::runtime(format!(
-                    "{WHAT}: a plugin keeps no folders"
-                )));
-            }
-            crate::rules::guard(lua, crate::GuardKind::Folder, &key)?;
             let key = key_of(WHAT, key)?;
             let promise = pending(lua, "remembered_folder".into())?;
             let access = remembering.clone();
-            let kept = !access.refused.get() && !access.forgetful.get();
+            let kept = !access.forgetful.get();
             // The platform as the promise's work first runs: a script asking
             // as it loads has its window's by then.
             let platforms = platforms.clone();
@@ -545,31 +523,15 @@ pub(crate) fn install(
     ui.set(
         "open_folder",
         lua.create_function(move |lua, opts: Option<Table>| {
-            if !allowed {
-                return Err(crate::io::denied("ui.open_folder", "Folders"));
-            }
-            crate::rules::guard(lua, crate::GuardKind::Dialog, "open_folder")?;
             let remember = match &opts {
                 Some(opts) => opts.raw_get::<Option<String>>("remember")?,
                 None => None,
             };
-            if remember.is_some() && in_plugin(lua) {
-                return Err(mlua::Error::runtime(
-                    "ui.open_folder: a plugin keeps no folders (`remember`)",
-                ));
-            }
             let remember = remember
                 .map(|key| key_of("ui.open_folder", key))
                 .transpose()?
                 .filter(|_| !access.forgetful.get());
             let promise = pending(lua, "open_folder".into())?;
-            if access.refused.get() {
-                let message = "ui.open_folder: this app's host refuses folder access".to_owned();
-                settle_failing(lua, &promise, async move {
-                    Err(Failure::new(Kind::Denied, message))
-                })?;
-                return Ok(PromiseUd(promise));
-            }
             let picker = crate::io::picker(opts, "Open Folder")?;
             let (access, shared) = (access.clone(), shared.clone());
             settle_failing(lua, &promise, async move {

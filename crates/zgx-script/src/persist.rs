@@ -155,18 +155,6 @@ impl Persist {
         })
     }
 
-    /// What is kept for `script`'s `key` now, without holding it: the value
-    /// a run holds, else what its file says.
-    pub fn saved(&self, script: &str, key: &str) -> Option<Value> {
-        if let Some(held) = self.get(script, key) {
-            return Some(held.with_untracked(Clone::clone));
-        }
-        let dir = self.dir.borrow().clone()?;
-        let path = dir
-            .join(file_name(script))
-            .join(format!("{}.json", file_name(key)));
-        load(&path, key, &self.warnings)
-    }
     /// `script`'s saved state for `key`, if a run asked for it (templates
     /// such as `"{count}"` find it by name).
     /// Every value held, by key (scripts' keys, without their script), in
@@ -237,6 +225,22 @@ impl Persist {
         self.send(Job::Barrier(tx));
         let _ = rx.recv();
     }
+
+    /// `to`'s saved state, from `from`'s folder where `to` has none: what a
+    /// script saved under a name it was kept by before (`plugin:<name>`,
+    /// now `script:<name>`). The folder is moved, once; nothing is read.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn adopt(&self, from: &str, to: &str) {
+        let Some(dir) = self.dir.borrow().clone() else {
+            return;
+        };
+        let (old, new) = (dir.join(file_name(from)), dir.join(file_name(to)));
+        if old.is_dir() && !new.exists() {
+            let _ = std::fs::rename(old, new);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn adopt(&self, _from: &str, _to: &str) {}
 
     fn mark(&self, id: &str) {
         if !self.dirty.borrow_mut().insert(id.to_owned()) || self.scheduled.replace(true) {

@@ -1,9 +1,9 @@
-//! `ScriptHost::elements`: where a plugin can put something and what it can
+//! `ScriptHost::elements`: where a script can put something and what it can
 //! read there. The app's named elements (ids, classes, hooks) grouped by the
 //! elements that `provide` context, outermost the app's root, each group
 //! with a selector that reaches it and the names its subtree reads. Rows a
-//! list repeats are one entry with a count, a private element is listed
-//! with nothing inside, and names the source declares that aren't mounted
+//! list repeats are one entry with a count, and names the source declares
+//! that aren't mounted
 //! (a page not open) are listed `mounted: false`.
 use std::{collections::HashMap, collections::HashSet, rc::Rc};
 
@@ -15,7 +15,7 @@ use crate::{node::Node, value::Value};
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct ElementsReport {
-    /// Whether the mounted interface is in it: kept only while plugins are
+    /// Whether the mounted interface is in it: kept only while scripts are
     /// loaded (otherwise it costs the app nothing, and lists the source).
     pub live: bool,
     /// The app's root, the outermost group.
@@ -53,8 +53,6 @@ pub struct ListedElement {
     pub classes: Vec<String>,
     /// The hook it declares.
     pub hook: Option<String>,
-    /// Out of every plugin's reach: nothing inside it is listed.
-    pub private: bool,
     /// Whether it is mounted now; `false`: declared in the source, not
     /// showing (a closed page).
     pub mounted: bool,
@@ -88,20 +86,6 @@ pub(crate) fn report(
     let mut seen_classes = HashSet::new();
     let mut seen_hooks = HashSet::new();
     seen(&group, &mut seen_ids, &mut seen_classes, &mut seen_hooks);
-    // Nothing a private element holds is listed, from the source either.
-    let mut held = vec![root];
-    while let Some(node) = held.pop() {
-        if node.private {
-            hidden(node, &mut seen_ids, &mut seen_classes, &mut seen_hooks);
-            continue;
-        }
-        held.extend(node.children.iter().map(|c| &**c));
-    }
-    if let Some(mounted) = mounted {
-        for node in mounted.values().filter(|n| n.private) {
-            hidden(node, &mut seen_ids, &mut seen_classes, &mut seen_hooks);
-        }
-    }
     // What the source names that isn't showing, for a page not open.
     let files: Vec<_> = sources
         .iter()
@@ -117,7 +101,6 @@ pub(crate) fn report(
             id: id.cloned(),
             classes: class.into_iter().cloned().collect(),
             hook: hook.cloned(),
-            private: false,
             mounted: false,
             count: 1,
         };
@@ -154,13 +137,6 @@ fn walk(
             walk(scene, child, mounted, group, path);
             continue;
         };
-        if listed.private {
-            group.elements.push(ListedElement {
-                private: true,
-                ..element(listed)
-            });
-            continue;
-        }
         path.push(listed.clone());
         if listed.rare().provide.is_some() {
             let mut inherited = group.inherited.clone();
@@ -193,7 +169,6 @@ fn element(node: &Node) -> ListedElement {
         id: node.id.as_deref().map(str::to_owned),
         classes: node.classes.iter().map(|c| c.to_string()).collect(),
         hook: node.hook().map(str::to_owned),
-        private: node.private,
         mounted: true,
         count: 1,
     }
@@ -238,20 +213,6 @@ fn selector(path: &[Rc<Node>]) -> String {
     parts.join(" >> ")
 }
 
-/// What `node`, a private element, holds as written: never listed.
-fn hidden(
-    node: &Node,
-    ids: &mut HashSet<String>,
-    classes: &mut HashSet<String>,
-    hooks: &mut HashSet<String>,
-) {
-    ids.extend(node.id.as_deref().map(str::to_owned));
-    classes.extend(node.classes.iter().map(|c| c.to_string()));
-    hooks.extend(node.hook().map(str::to_owned));
-    for child in &node.children {
-        hidden(child, ids, classes, hooks);
-    }
-}
 fn seen(
     group: &ElementGroup,
     ids: &mut HashSet<String>,
@@ -314,7 +275,8 @@ impl ElementsReport {
         if !self.live {
             out.insert(
                 0,
-                "(no plugins loaded: the source's names only, nothing mounted is tracked)".into(),
+                "(no other scripts loaded: the source's names only, nothing mounted is tracked)"
+                    .into(),
             );
         }
         out.join("\n")
@@ -368,9 +330,6 @@ impl ElementGroup {
             if element.count > 1 {
                 notes.push(format!("×{}", element.count));
             }
-            if element.private {
-                notes.push("private".into());
-            }
             if !element.mounted {
                 notes.push("not mounted".into());
             }
@@ -410,7 +369,6 @@ impl ListedElement {
                     .as_deref()
                     .map_or(Value::Nil, |h| Value::Str(h.into())),
             ),
-            ("private", Value::Bool(self.private)),
             ("mounted", Value::Bool(self.mounted)),
             ("count", Value::Num(self.count as f64)),
         ])

@@ -189,7 +189,7 @@ return ui.text { "trial" }"#,
 fn a_load_stopped_for_its_time_is_told_from_one_that_fails() {
     let h = Harness::new(|runtime| {
         one(runtime).limits(Limits {
-            load: Duration::from_millis(20),
+            load: Some(Duration::from_millis(20)),
             ..Limits::default()
         })
     });

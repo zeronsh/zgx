@@ -1,53 +1,44 @@
 //! What an app's `zgx.json` gives its script host beyond the window: the
-//! packages it requires, what it lets plugins reach, and its plugins with
-//! what each may do. One reading for every host that runs a Luau app on its
-//! own (`zgx run`, `zgx test`'s `mount()`, `zgx audit`), so an app behaves
-//! the same under each.
+//! packages it requires, and the scripts it loads beside its own, each with
+//! its limits. One reading for every host that runs a Luau app on its own
+//! (`zgx run`, `zgx test`'s `mount()`, `zgx audit`), so an app behaves the
+//! same under each.
 //!
 //! ```json
 //! {
 //!   "packages": { "kit": "../shared/kit" },
-//!   "expose": {
-//!     "shared": { "tasks": "read", "focus": "write" },
-//!     "actions": ["complete"],
-//!     "hooks": { "#tasks": "override", "hook:toolbar.add": "open" }
-//!   },
-//!   "plugins": {
-//!     "focus": { "path": "plugins/focus", "allow": ["shared:focus", "override:#tasks"] }
+//!   "scripts": {
+//!     "focus": "scripts/focus",
+//!     "stamps": { "path": "scripts/stamps", "limits": { "memory_mb": 32, "call_ms": 50 } }
 //!   }
 //! }
 //! ```
 //!
-//! The app's side, `expose`, is its whole plugin surface: shared state read
-//! only or written, actions (a Rust host's, or the script's `ui.actions`),
-//! and targets a plugin may replace or filter (`"override"`; adding before
-//! and after is open, `"open"`). Each plugin's side, `allow`, is what it is
-//! granted, never more than `expose` offers: `shared:<key>`,
-//! `action:<name>`, `override:<target or @app/module>` (`override:*` is every
-//! element), `override-module:*` (every module: trusts it with the app), and the sandbox's
-//! `fetch`, `clipboard`, `files`, `folders`, `fonts`, `terminals`, `web` and `windows`, and
-//! with their features `audio` and `scene3d`. A grant
-//! beyond what is exposed is an error as the app loads, naming the plugin
-//! and the grant.
-use crate::{Capability, Plugin, ScriptHost};
+//! Each script is a folder with an `init.luau`, or a file. It runs in a VM of
+//! its own and reaches everything the app's script does. `limits` sets its
+//! `memory_mb`, `load_ms`, `call_ms`, `voices` and `count_state`; each left
+//! out has none.
+use crate::{Limits, Script, ScriptHost};
 use serde_json::{Map, Value};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 /// The keys this reads from `zgx.json`; a host reading the rest (the
-/// window's) accepts these.
-pub const KEYS: &[&str] = &["packages", "expose", "plugins", "modules", "version"];
+/// window's) accepts these. (`plugins` and `expose` are read to say what
+/// replaced them.)
+pub const KEYS: &[&str] = &[
+    "packages", "scripts", "modules", "version", "plugins", "expose",
+];
 
 /// What `zgx.json` says of an app's host (`read`), to give it (`apply`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AppHost {
     /// Module folders outside the app it may require, by name.
     pub packages: Vec<(String, PathBuf)>,
-    /// Shared state plugins reach, and whether they may write it.
-    shared: Vec<(String, bool)>,
-    /// Actions plugins may call.
-    actions: Vec<String>,
-    /// The plugins, each with its grants.
-    plugins: Vec<Plugin>,
+    /// The scripts it loads beside its own, in order.
+    scripts: Vec<Script>,
 }
 
 /// `dir`'s `zgx.json` (nothing if it has none), or what is wrong with it.
@@ -67,6 +58,20 @@ pub fn read(dir: &Path) -> Result<AppHost, String> {
 /// The app's host as `zgx.json`'s `object` (already read, from `dir`) says,
 /// its other keys left to the caller: for a host reading the rest.
 pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, String> {
+    if object.contains_key("plugins") {
+        return Err(
+            "`plugins` is now `scripts`: { \"name\": \"path\" }, or { \"path\", \
+                    \"limits\" }; a script reaches everything the app's does, with no `allow`"
+                .into(),
+        );
+    }
+    if object.contains_key("expose") {
+        return Err(
+            "`expose` is gone: every script reaches every shared state, action and \
+                    element of the app's; leave it out"
+                .into(),
+        );
+    }
     let mut app = AppHost::default();
     if let Some(listed) = object.get("packages") {
         let listed = listed
@@ -89,84 +94,37 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
             app.packages.push((name.clone(), folder));
         }
     }
-    // The app's side.
-    let mut overridable: Vec<String> = Vec::new();
-    if let Some(expose) = object.get("expose") {
-        let expose = expose
+    if let Some(scripts) = object.get("scripts") {
+        let scripts = scripts
             .as_object()
-            .ok_or("`expose` is not an object of shared, actions and hooks")?;
-        for key in expose.keys() {
-            if !["shared", "actions", "hooks"].contains(&key.as_str()) {
-                return Err(format!(
-                    "unknown key `expose.{key}` (shared, actions or hooks)"
-                ));
-            }
-        }
-        if let Some(shared) = expose.get("shared") {
-            let shared = shared
-                .as_object()
-                .ok_or("`expose.shared` is not an object of keys and \"read\" or \"write\"")?;
-            for (key, access) in shared {
-                let write = match access.as_str() {
-                    Some("read") => false,
-                    Some("write") => true,
-                    _ => {
-                        return Err(format!(
-                            "`expose.shared.{key}` is {access}: \"read\" or \"write\""
-                        ));
+            .ok_or("`scripts` is not an object of names and paths (or { path, limits })")?;
+        for (name, script) in scripts {
+            let (path, limits) = match script {
+                Value::String(path) => (path.as_str(), Limits::default()),
+                Value::Object(script) => {
+                    for key in script.keys() {
+                        if !["path", "limits"].contains(&key.as_str()) {
+                            return Err(format!(
+                                "unknown key `scripts.{name}.{key}` (path or limits)"
+                            ));
+                        }
                     }
-                };
-                app.shared.push((key.clone(), write));
-            }
-        }
-        if let Some(actions) = expose.get("actions") {
-            let actions = actions
-                .as_array()
-                .ok_or("`expose.actions` is not a list of names")?;
-            for action in actions {
-                let name = action
-                    .as_str()
-                    .ok_or("`expose.actions` is not a list of names")?;
-                app.actions.push(name.to_owned());
-            }
-        }
-        if let Some(hooks) = expose.get("hooks") {
-            let hooks = hooks
-                .as_object()
-                .ok_or("`expose.hooks` is not an object of targets and \"open\" or \"override\"")?;
-            for (target, how) in hooks {
-                match how.as_str() {
-                    Some("open") => {}
-                    Some("override") => overridable.push(target.clone()),
-                    _ => {
-                        return Err(format!(
-                            "`expose.hooks.{target}` is {how}: \"open\" or \"override\""
-                        ));
-                    }
+                    let path = script
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| format!("script `{name}` has no `path`"))?;
+                    let limits = match script.get("limits") {
+                        None => Limits::default(),
+                        Some(limits) => read_limits(name, limits)?,
+                    };
+                    (path, limits)
                 }
-            }
-        }
-    }
-    // Each plugin's side.
-    if let Some(plugins) = object.get("plugins") {
-        let plugins = plugins
-            .as_object()
-            .ok_or("`plugins` is not an object of names and { path, allow }")?;
-        for (name, plugin) in plugins {
-            let plugin = plugin
-                .as_object()
-                .ok_or_else(|| format!("plugin `{name}` is not {{ path, allow }}"))?;
-            for key in plugin.keys() {
-                if !["path", "allow"].contains(&key.as_str()) {
+                _ => {
                     return Err(format!(
-                        "unknown key `plugins.{name}.{key}` (path or allow)"
+                        "script `{name}` is not a path, nor {{ path, limits }}"
                     ));
                 }
-            }
-            let path = plugin
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("plugin `{name}` has no `path`"))?;
+            };
             let path = dir.join(path);
             let entry = if path.is_dir() {
                 path.join("init.luau")
@@ -175,110 +133,53 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
             };
             if !entry.is_file() {
                 return Err(format!(
-                    "plugin `{name}`: {} is neither a script nor a folder with an init.luau",
+                    "script `{name}`: {} is neither a script nor a folder with an init.luau",
                     path.display()
                 ));
             }
-            let mut grants = Vec::new();
-            let allow = match plugin.get("allow") {
-                None => Vec::new(),
-                Some(allow) => allow
-                    .as_array()
-                    .ok_or_else(|| format!("`plugins.{name}.allow` is not a list"))?
-                    .clone(),
-            };
-            for grant in allow {
-                let grant = grant
-                    .as_str()
-                    .ok_or_else(|| format!("`plugins.{name}.allow` is not a list of names"))?;
-                let beyond = |what: &str, add: &str| {
-                    Err(format!(
-                        "plugin `{name}` is allowed `{grant}`, which the app doesn't expose \
-                         (add {what} to {add})"
-                    ))
-                };
-                grants.push(match grant.split_once(':') {
-                    Some(("shared", key)) => {
-                        if !app.shared.iter().any(|(k, _)| k == key) {
-                            return beyond(&format!("\"{key}\""), "expose.shared");
-                        }
-                        shared_capability(key)
-                    }
-                    Some(("action", action)) => {
-                        if !app.actions.iter().any(|a| a == action) {
-                            return beyond(&format!("\"{action}\""), "expose.actions");
-                        }
-                        action_capability(action)
-                    }
-                    Some(("package", package)) => {
-                        if !app.packages.iter().any(|(p, _)| p == package) {
-                            return beyond(&format!("\"{package}\""), "packages");
-                        }
-                        Capability::Package(package.to_owned())
-                    }
-                    Some(("override", target)) => {
-                        if !overridable.iter().any(|t| t == target || t == "*") {
-                            return beyond(&format!("\"{target}\": \"override\""), "expose.hooks");
-                        }
-                        // `*` is every element: a module is always named,
-                        // here or by `override-module:*`.
-                        match target.starts_with("@app/") {
-                            true => Capability::OverrideModule(target.to_owned()),
-                            false => Capability::OverrideElement(target.to_owned()),
-                        }
-                    }
-                    Some(("override-module", target)) => {
-                        if !overridable.iter().any(|t| t == target || t == "*") {
-                            return beyond(&format!("\"{target}\": \"override\""), "expose.hooks");
-                        }
-                        Capability::OverrideModule(target.to_owned())
-                    }
-                    _ => match grant {
-                        "fetch" => Capability::Fetch,
-                        "clipboard" => Capability::Clipboard,
-                        "files" => Capability::Files,
-                        "folders" => Capability::Folders,
-                        "fonts" => Capability::Fonts,
-                        "terminals" => Capability::Terminals,
-                        "web" => Capability::Web,
-                        "windows" => Capability::Windows,
-                        #[cfg(feature = "audio")]
-                        "audio" => Capability::Audio,
-                        #[cfg(feature = "scene3d")]
-                        "scene3d" => Capability::Scene3d,
-                        _ => {
-                            return Err(format!(
-                                "plugin `{name}`: unknown grant `{grant}` (shared:<key>, \
-                                 action:<name>, override:<target>, override-module:<@app/module \
-                                 or *>, package:<name>, fetch, \
-                                 clipboard, files, fonts, terminals, web or windows)"
-                            ));
-                        }
-                    },
-                });
-            }
-            app.plugins.push(Plugin {
-                name: name.clone(),
-                entry,
-                grants,
-            });
+            app.scripts
+                .push(Script::file(name.clone(), entry).limits(limits));
         }
     }
     Ok(app)
 }
 
-/// What a plugin needs to reach exposed shared state `key`.
-fn shared_capability(key: &str) -> Capability {
-    Capability::Named(format!("shared:{key}"))
-}
-/// What a plugin needs to call exposed action `name`.
-fn action_capability(name: &str) -> Capability {
-    Capability::Named(format!("action:{name}"))
+/// `scripts.<name>.limits`: `memory_mb`, `load_ms`, `call_ms` and `voices`,
+/// each a number, and `count_state`, `true` or `false`.
+fn read_limits(name: &str, limits: &Value) -> Result<Limits, String> {
+    let limits = limits.as_object().ok_or_else(|| {
+        format!("`scripts.{name}.limits` is not an object of memory_mb, load_ms, call_ms, voices")
+    })?;
+    let mut out = Limits::default();
+    for (key, value) in limits {
+        if key == "count_state" {
+            out.count_state = value.as_bool().ok_or_else(|| {
+                format!("`scripts.{name}.limits.count_state` is not true or false")
+            })?;
+            continue;
+        }
+        let number = value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.)
+            .ok_or_else(|| format!("`scripts.{name}.limits.{key}` is not a number"))?;
+        match key.as_str() {
+            "memory_mb" => out.memory = Some((number * 1048576.) as usize),
+            "load_ms" => out.load = Some(Duration::from_secs_f64(number / 1000.)),
+            "call_ms" => out.call = Some(Duration::from_secs_f64(number / 1000.)),
+            "voices" => out.voices = Some(number as usize),
+            _ => {
+                return Err(format!(
+                    "unknown key `scripts.{name}.limits.{key}` (memory_mb, load_ms, call_ms, \
+                     voices or count_state)"
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The package aliases `file` may require, from the `zgx.json` nearest
-/// above it: a plugin's file, those lent to it (`package:<name>`); the
-/// app's, every package. For tooling (`zgx check`, `zgx types`) to resolve
+/// above it: every package. For tooling (`zgx check`, `zgx types`) to resolve
 /// `@name/…` as zgx does. Empty with no `zgx.json`, or one that doesn't
 /// read.
 pub fn aliases_for(file: &Path) -> Vec<(String, PathBuf)> {
@@ -292,23 +193,31 @@ pub fn aliases_for(file: &Path) -> Vec<(String, PathBuf)> {
     let Ok(app) = read(dir) else {
         return Vec::new();
     };
-    let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-    // A plugin's files: its folder's (an `init.luau`), or the file alone.
-    let owner = app.plugins.iter().find(|plugin| {
-        let entry = plugin
-            .entry
-            .canonicalize()
-            .unwrap_or_else(|_| plugin.entry.clone());
-        match entry.file_stem().is_some_and(|stem| stem == "init") {
-            true => entry.parent().is_some_and(|dir| file.starts_with(dir)),
-            false => entry == file,
-        }
-    });
-    app.packages
+    canonical(&app.packages)
+}
+
+/// The packages a script whose folder is `dir` (one with an `init.luau`)
+/// requires from, by the `zgx.json` nearest above it: none if `dir` is no
+/// script's folder there.
+pub fn packages_for_folder(dir: &Path) -> Option<Vec<(String, PathBuf)>> {
+    let dir = dir.canonicalize().ok()?;
+    let config = dir
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join("zgx.json").is_file())?;
+    let app = read(config).ok()?;
+    let entry = dir.join("init.luau");
+    app.scripts.iter().find(|script| match &script.source {
+        crate::Source::File(path) => path.canonicalize().is_ok_and(|e| e == entry),
+        crate::Source::Code(_) => false,
+    })?;
+    Some(canonical(&app.packages))
+}
+
+/// `packages` with their folders canonical.
+fn canonical(packages: &[(String, PathBuf)]) -> Vec<(String, PathBuf)> {
+    packages
         .iter()
-        .filter(|(name, _)| {
-            owner.is_none_or(|plugin| plugin.grants.contains(&Capability::Package(name.clone())))
-        })
         .map(|(name, folder)| {
             (
                 name.clone(),
@@ -318,58 +227,20 @@ pub fn aliases_for(file: &Path) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// The packages lent to the plugin whose folder is `dir` (one with an
-/// `init.luau`), by the `zgx.json` nearest above it: none if `dir` is no
-/// plugin's folder there.
-pub fn lent_to_folder(dir: &Path) -> Option<Vec<(String, PathBuf)>> {
-    let dir = dir.canonicalize().ok()?;
-    let config = dir
-        .ancestors()
-        .skip(1)
-        .find(|d| d.join("zgx.json").is_file())?;
-    let app = read(config).ok()?;
-    let entry = dir.join("init.luau");
-    let plugin = app
-        .plugins
-        .iter()
-        .find(|p| p.entry.canonicalize().is_ok_and(|e| e == entry))?;
-    Some(
-        app.packages
-            .iter()
-            .filter(|(name, _)| plugin.grants.contains(&Capability::Package(name.clone())))
-            .map(|(name, folder)| {
-                (
-                    name.clone(),
-                    folder.canonicalize().unwrap_or_else(|_| folder.clone()),
-                )
-            })
-            .collect(),
-    )
-}
-
 impl AppHost {
-    /// Whether it has plugins.
-    pub fn has_plugins(&self) -> bool {
-        !self.plugins.is_empty()
+    /// Whether it loads scripts beside the app's.
+    pub fn has_scripts(&self) -> bool {
+        !self.scripts.is_empty()
     }
-    /// `host` given its packages, what the app exposes and its plugins: call
-    /// it before the host first loads.
+    /// `host` given its packages and its scripts: call it before the host
+    /// first loads.
     pub fn apply(&self, host: ScriptHost) -> ScriptHost {
         let host = self
             .packages
             .iter()
             .fold(host, |host, (name, dir)| host.package(name.clone(), dir));
-        for (key, write) in &self.shared {
-            match write {
-                true => host.expose_shared(key, Some(shared_capability(key))),
-                false => host.expose_shared_read(key, Some(shared_capability(key))),
-            }
-        }
-        for action in &self.actions {
-            host.expose_action(action, Some(action_capability(action)));
-        }
-        if !self.plugins.is_empty() {
-            host.set_plugins(self.plugins.clone());
+        if !self.scripts.is_empty() {
+            host.set_scripts(self.scripts.clone());
         }
         host
     }
@@ -379,33 +250,31 @@ impl AppHost {
 mod tests {
     use super::*;
 
-    /// `zgx.json`'s grants, as each reads: `override:*` is every element, a
-    /// module is named or `override-module:*`.
+    /// A script is a path, or a path and its limits; `plugins` and `expose`
+    /// say what replaced them.
     #[test]
-    fn grants_override_elements_and_modules_apart() {
-        let dir = std::env::temp_dir().join(format!("zgx-config-grants-{}", std::process::id()));
+    fn scripts_read_with_their_limits() {
+        let dir = std::env::temp_dir().join(format!("zgx-config-scripts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("init.luau"), "").unwrap();
-        for (allow, grant) in [
-            ("override:*", Capability::OverrideElement("*".into())),
-            (
-                "override:#tasks",
-                Capability::OverrideElement("#tasks".into()),
-            ),
-            (
-                "override:@app/row",
-                Capability::OverrideModule("@app/row".into()),
-            ),
-            ("override-module:*", Capability::OverrideModule("*".into())),
-        ] {
-            let config = format!(
-                r#"{{ "expose": {{ "hooks": {{ "*": "override" }} }},
-                    "plugins": {{ "p": {{ "path": ".", "allow": ["{allow}"] }} }} }}"#
-            );
-            let object: Value = serde_json::from_str(&config).unwrap();
-            let app = from_object(&dir, object.as_object().unwrap()).unwrap();
-            assert_eq!(app.plugins[0].grants, [grant], "{allow}");
-        }
+        let read = |config: &str| {
+            let object: Value = serde_json::from_str(config).unwrap();
+            from_object(&dir, object.as_object().unwrap())
+        };
+        let app = read(
+            r#"{ "scripts": { "a": ".", "b": { "path": ".", "limits": { "memory_mb": 2, "call_ms": 50, "voices": 3, "count_state": true } } } }"#,
+        )
+        .unwrap();
+        assert_eq!(app.scripts[0].limits, Limits::default());
+        let limits = app.scripts[1].limits;
+        assert_eq!(limits.memory, Some(2 << 20));
+        assert_eq!(limits.call, Some(Duration::from_millis(50)));
+        assert_eq!((limits.load, limits.voices), (None, Some(3)));
+        assert!(limits.count_state);
+        let error = read(r#"{ "plugins": {} }"#).unwrap_err();
+        assert!(error.contains("`plugins` is now `scripts`"), "{error}");
+        let error = read(r#"{ "expose": {} }"#).unwrap_err();
+        assert!(error.contains("`expose` is gone"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

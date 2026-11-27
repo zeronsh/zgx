@@ -455,7 +455,7 @@ impl Value {
         }
         convert(self).to_string()
     }
-    /// About what the value holds on the heap, in bytes, for a plugin's
+    /// About what the value holds on the heap, in bytes, for a script's
     /// memory limit (`meter`): a list or map its items and their slots, a
     /// string its text. A map's keys count as pointers alone: rows share
     /// them (one string for 100,000 rows' `id`).
@@ -3355,8 +3355,8 @@ impl State {
             None => self.0.set(value),
         };
     }
-    /// A plugin's state to hold what `bytes` makes of what it is counted
-    /// as holding (`meter`): an error if the plugin has no room for it.
+    /// A metered script's state to hold what `bytes` makes of what it is
+    /// counted as holding (`meter`): an error if the script has no room.
     /// `leaf` written at `path`, where `at` was: in place while nothing
     /// else holds the list (no script has read it since the last write), so
     /// a batch of row writes to a list of 100,000 copies it once, not once
@@ -3434,7 +3434,7 @@ impl State {
     fn change(&self, lua: &Lua, f: impl FnOnce(&Value) -> mlua::Result<Value>) -> mlua::Result<()> {
         self.change_by(lua, f, |next, _| next.weight())
     }
-    /// `change`, a plugin's state then holding what `bytes` makes of the
+    /// `change`, a metered script's state then holding what `bytes` makes of the
     /// next value and what it held.
     fn change_by(
         &self,
@@ -3612,14 +3612,13 @@ impl UserData for State {
         });
     }
 }
-/// A plugin's handle to shared state the host exposes read only
-/// (`ScriptHost::expose_shared_read`): it reads and follows the state as a
-/// `State` does, and writing it is an error naming the key. Its own type,
-/// so the app's states write without a check.
+/// A handle to state a script reads and follows, as a `State` does, but
+/// may not write (a window's `active`, a sound's `ready`): writing it is an
+/// error naming it. Its own type, so other states write without a check.
 #[derive(Clone)]
 pub(crate) struct ReadState(pub State, pub Rc<str>);
-/// The state a handle is (`ui.state`'s, a computed's, or a plugin's
-/// read-only one), to read as its `get` reads it ([`State::read`]); `None`
+/// The state a handle is (`ui.state`'s, a computed's, or a read-only
+/// one), to read as its `get` reads it ([`State::read`]); `None`
 /// for anything else.
 pub(crate) fn state_handle(value: &mlua::Value) -> Option<State> {
     let mlua::Value::UserData(ud) = value else {
@@ -3640,7 +3639,7 @@ impl UserData for ReadState {
         for name in WRITES {
             methods.add_method(name, move |_, s, _: mlua::MultiValue| -> mlua::Result<()> {
                 Err(mlua::Error::runtime(format!(
-                    "`{name}` on shared state `{}`: the app shares it with plugins read only",
+                    "`{name}` on `{}`: it is read only",
                     s.1
                 )))
             });
@@ -4000,8 +3999,8 @@ fn list_of<'a>(value: &'a Value, method: &str) -> mlua::Result<&'a [Value]> {
 pub struct Store {
     runtime: Runtime,
     signals: RefCell<HashMap<String, Signal<Value>>>,
-    /// Keys a plugin's default made (`shared`), which the app's own default
-    /// replaces.
+    /// Keys another script's default made (`shared`), which the root's own
+    /// default replaces.
     provisional: RefCell<std::collections::HashSet<String>>,
 }
 impl Store {
@@ -4013,21 +4012,22 @@ impl Store {
             provisional: RefCell::default(),
         }
     }
-    /// Shared state `key` (`ui.shared`), as [`Store::state`], except that a
-    /// plugin's default gives way to the app's: plugins load before the app,
-    /// so without a host's value (`ScriptHost::shared`) the app's own
-    /// default is what shows, as a Luau app run by `zgx run` declares it.
-    pub(crate) fn shared(&self, key: &str, initial: Value, plugin: bool) -> Signal<Value> {
+    /// Shared state `key` (`ui.shared`), as [`Store::state`], except that
+    /// another script's default gives way to the `root` script's: they load
+    /// before the root, so without a host's value (`ScriptHost::shared`) the
+    /// root's own default is what shows, as a Luau app run by `zgx run`
+    /// declares it.
+    pub(crate) fn shared(&self, key: &str, initial: Value, root: bool) -> Signal<Value> {
         let existing = self.signals.borrow().get(key).cloned();
         match existing {
             Some(signal) => {
-                if !plugin && self.provisional.borrow_mut().remove(key) {
+                if root && self.provisional.borrow_mut().remove(key) {
                     signal.set(initial);
                 }
                 signal
             }
             None => {
-                if plugin {
+                if !root {
                     self.provisional.borrow_mut().insert(key.to_owned());
                 }
                 self.state(key, initial)

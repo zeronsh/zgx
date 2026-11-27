@@ -11,9 +11,6 @@ use std::rc::Rc;
 use zgx_audio::effects::{Compressor, Delay, Duck, HighPass, LowPass, Peaking, Reverb, Slope};
 use zgx_audio::{EffectHandle, Ramp, Time};
 
-/// Effects a plugin keeps on its bus at once.
-pub(super) const PLUGIN_EFFECTS: usize = 4;
-
 /// A stock effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -176,8 +173,7 @@ pub(super) struct LiveEffect {
     kind: Kind,
     /// What follows state into each parameter, by index.
     follows: Vec<Option<Follow>>,
-    pub(super) plugin: Option<Rc<str>>,
-    /// Alive while it's on its bus: what a plugin's meter counts its
+    /// Alive while it's on its bus: what a script's meter counts its
     /// memory by.
     _held: Rc<()>,
 }
@@ -208,25 +204,12 @@ impl AudioHost {
     ) -> mlua::Result<EffectUd> {
         let audio = self.engine()?;
         let held = Rc::new(());
-        if let Some(plugin) = &bus.plugin {
-            let count = self
-                .effects
-                .borrow()
-                .values()
-                .filter(|e| e.plugin.as_deref() == Some(plugin))
-                .count();
-            if count >= PLUGIN_EFFECTS {
-                return Err(mlua::Error::runtime(format!(
-                    "{call}: a plugin keeps at most {PLUGIN_EFFECTS} effects on its bus"
-                )));
-            }
-            // Its buffers count against the plugin's memory while it's on.
-            if let Some(meter) = crate::node::env(lua)?.meter.clone() {
-                let bytes = bytes(spec, audio.rate());
-                meter.room(bytes)?;
-                let alive = Rc::downgrade(&held);
-                meter.hold_native(move || alive.strong_count() > 0, bytes);
-            }
+        // Its buffers count against a script's memory limit while it's on.
+        if let Some(meter) = crate::node::env(lua)?.meter.clone() {
+            let bytes = bytes(spec, audio.rate());
+            meter.room(bytes)?;
+            let alive = Rc::downgrade(&held);
+            meter.hold_native(move || alive.strong_count() > 0, bytes);
         }
         let now: Vec<f32> = spec.params.iter().map(Param::now).collect();
         let slope = if spec.steep { Slope::Db24 } else { Slope::Db12 };
@@ -279,7 +262,6 @@ impl AudioHost {
                 handle,
                 kind: spec.kind,
                 follows,
-                plugin: bus.plugin.clone(),
                 _held: held,
             },
         );
@@ -304,7 +286,7 @@ impl AudioHost {
         };
         for mut effect in gone {
             // It stops following now; it stays on the books (and counted
-            // against a plugin's memory) until a full queue takes its
+            // against a script's memory) until a full queue takes its
             // removal.
             effect.follows.clear();
             self.send_until(move || effect.handle.remove() != Err(zgx_audio::Error::QueueFull));
@@ -447,11 +429,6 @@ pub(super) fn bus_call(
     } else {
         let (side, opts): (mlua::AnyUserData, Option<Table>) =
             super::unpack(lua, args, "bus:", name)?;
-        if b.plugin.is_some() {
-            return Err(mlua::Error::runtime(
-                "bus:duck: a plugin's bus ducks under no other",
-            ));
-        }
         let side = side
             .borrow::<BusUd>()
             .map_err(|_| mlua::Error::runtime("bus:duck takes the bus to duck under"))?

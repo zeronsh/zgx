@@ -1,9 +1,9 @@
 //! `ScriptHost::elements`: the app's named elements by the context they
-//! read, for a plugin's author (or an agent) to see where it can put
+//! read, for a script's author (or an agent) to see where it can put
 //! something and what it can read there.
 mod common;
 use common::Harness;
-use zgx_script::{ListedElement, Plugin, ScriptHost};
+use zgx_script::{ListedElement, Script, ScriptHost};
 
 fn with(test: &str, app: &'static str, code: &str) -> Harness {
     let dir = common::temp_dir(&format!("elements-{test}"));
@@ -12,11 +12,7 @@ fn with(test: &str, app: &'static str, code: &str) -> Harness {
     std::fs::write(&entry, code).unwrap();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", app);
-        host.set_plugins(vec![Plugin {
-            name: "marks".into(),
-            entry,
-            grants: vec![],
-        }]);
+        host.set_scripts(vec![Script::file("marks", entry)]);
         host
     })
 }
@@ -38,7 +34,6 @@ return ui.row {
             }
         end),
     },
-    ui.column { id = "vault", private = true, ui.text { id = "secret", "x" } },
     ui.show(settings, ui.column { id = "settings", ui.text { class = "pref", "Prefs" } }),
 }
 "##;
@@ -70,21 +65,6 @@ fn elements_are_grouped_by_the_context_they_read() {
     assert!(
         root.elements
             .contains(&named(Some("sidebar"), &[], true, 1))
-    );
-    assert!(
-        root.elements.contains(&{
-            let mut vault = named(Some("vault"), &[], true, 1);
-            vault.private = true;
-            vault
-        }),
-        "private, and nothing inside it: {:?}",
-        root.elements
-    );
-    assert!(
-        !root
-            .elements
-            .iter()
-            .any(|e| e.id.as_deref() == Some("secret"))
     );
     assert!(
         root.elements
@@ -119,7 +99,7 @@ fn elements_are_grouped_by_the_context_they_read() {
 }
 
 #[test]
-fn without_plugins_the_source_is_listed() {
+fn without_other_scripts_the_source_is_listed() {
     let h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", APP));
     let report = h.host.elements(&h.ui, &h.handle);
     assert!(!report.live, "nothing mounted is tracked");

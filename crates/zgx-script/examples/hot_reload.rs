@@ -23,8 +23,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         })
         .run(move |cx| {
-            let host =
-                ScriptHost::new(&cx.ui.runtime, dir.join("app.luau")).plugins(dir.join("plugins"));
+            let host = ScriptHost::new(&cx.ui.runtime, dir.join("app.luau"))
+                .limits(zgx_script::Limits::app_budgets())
+                .scripts_in(dir.join("plugins"), zgx_script::Limits::app_budgets());
 
             // Rust owns the data; scripts bind to it by name.
             let size = host.shared("window", "");
@@ -35,10 +36,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             let window = cx.window.clone();
             host.action("quit", move |_| window.close());
-            // Plugins reach only what the app exposes to them.
-            host.expose_shared("window", None);
-            host.expose_shared("count", None);
-            host.expose_action("quit", None);
 
             // A failed first load shows its error; fixing the file recovers.
             let _ = host.reload();

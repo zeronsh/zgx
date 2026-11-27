@@ -154,7 +154,7 @@ fn hot_reload_keeps_state_and_a_failed_reload_keeps_the_interface() {
 fn runaway_scripts_hit_their_time_budget() {
     let runtime = Runtime::new();
     let limits = Limits {
-        load: Duration::from_millis(30),
+        load: Some(Duration::from_millis(30)),
         ..Limits::default()
     };
     // A bare loop, one in a coroutine, and one calling the host: each is
@@ -190,13 +190,21 @@ fn runaway_scripts_hit_their_time_budget() {
     }
 
     // A handler that spins is stopped too, and the interface keeps running.
-    let mut h = Harness::inline(
-        r#"local n = ui.state("n", 0)
-        return ui.column {
-            ui.button { id = "spin", w = 80, h = 30, on_click = function() n:set(1); while true do end end },
-            ui.text { "{n}", id = "n" },
-        }"#,
-    );
+    let mut h = Harness::new(|runtime| {
+        ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local n = ui.state("n", 0)
+            return ui.column {
+                ui.button { id = "spin", w = 80, h = 30, on_click = function() n:set(1); while true do end end },
+                ui.text { "{n}", id = "n" },
+            }"#,
+        )
+        .limits(Limits {
+            call: Some(Duration::from_millis(30)),
+            ..Limits::default()
+        })
+    });
     h.click("spin");
     let error = h.host.error().get().unwrap();
     assert!(error.contains("time budget"), "{error}");
@@ -216,7 +224,7 @@ fn a_script_short_of_its_budget_is_never_stopped() {
     let runtime = Runtime::new();
     let budget = Duration::from_millis(30);
     let limits = Limits {
-        load: budget,
+        load: Some(budget),
         ..Limits::default()
     };
     let mut overhead = Duration::ZERO;
@@ -260,7 +268,7 @@ fn what_a_selection_lays_out_again_is_not_the_scripts_to_pay_for() {
     // editor's work, as typing there would be, not the handler's (the code
     // editor's Replace All selected all of 100,000 lines and was stopped).
     let limits = Limits {
-        call: Duration::from_millis(20),
+        call: Some(Duration::from_millis(20)),
         ..Limits::default()
     };
     let mut h = Harness::new(|runtime| {
@@ -356,8 +364,8 @@ fn garbage_from_builtins_is_collected_before_the_memory_limit() {
     // the VM with garbage until the limit failed the script (40 KB a turn,
     // 10 MB here).
     let limits = Limits {
-        memory: 4 << 20,
-        load: Duration::from_secs(20),
+        memory: Some(4 << 20),
+        load: Some(Duration::from_secs(20)),
         ..Limits::default()
     };
     let runtime = Runtime::new();
@@ -398,8 +406,8 @@ fn copies_of_state_meet_the_memory_limit() {
     // memory error.
     let runtime = Runtime::new();
     let limits = Limits {
-        memory: 4 << 20,
-        load: Duration::from_secs(20),
+        memory: Some(4 << 20),
+        load: Some(Duration::from_secs(20)),
         ..Limits::default()
     };
     let host = ScriptHost::inline(
@@ -426,8 +434,8 @@ fn a_script_keeping_nodes_meets_the_memory_limit() {
     // fails at the limit, not past it.
     let runtime = Runtime::new();
     let limits = Limits {
-        memory: 4 << 20,
-        load: Duration::from_secs(20),
+        memory: Some(4 << 20),
+        load: Some(Duration::from_secs(20)),
         ..Limits::default()
     };
     let host = ScriptHost::inline(
@@ -506,20 +514,18 @@ fn springs_settle_on_their_target() {
 }
 
 #[test]
-fn plugins_contribute_to_slots_and_read_shared_state() {
+fn scripts_beside_the_root_contribute_to_slots_and_read_shared_state() {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(
             runtime,
             "app",
             r#"return ui.column { ui.text { "app", id = "app" }, ui.slot("toolbar", { id = "toolbar" }) }"#,
-        )
-        .plugin(
+        );
+        host.set_scripts(vec![zgx_script::Script::code(
             "greeter",
             r#"ui.contribute("toolbar", ui.text { "Hello, {user}", id = "greeting" })"#,
-        );
+        )]);
         host.shared("user", "Ada");
-        // Plugins reach the shared state the app exposes to them.
-        host.expose_shared("user", None);
         host
     });
     assert_eq!(h.text("greeting"), "Hello, Ada");
@@ -527,7 +533,7 @@ fn plugins_contribute_to_slots_and_read_shared_state() {
     assert_eq!(
         h.text("greeting"),
         "Hello, Grace",
-        "Rust writes reach plugin templates"
+        "Rust writes reach the other script's templates"
     );
 }
 
@@ -564,19 +570,16 @@ fn host_actions_and_lists() {
 fn the_hot_reload_example_loads() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/hot_reload");
     let mut h = Harness::new(|runtime| {
-        let host = ScriptHost::new(runtime, dir.join("app.luau")).plugins(dir.join("plugins"));
+        let host = ScriptHost::new(runtime, dir.join("app.luau"))
+            .scripts_in(dir.join("plugins"), Limits::default());
         host.shared("window", "820×560");
-        // What hot_reload.rs exposes to its plugins.
-        host.expose_shared("window", None);
-        host.expose_shared("count", None);
-        host.expose_action("quit", None);
         host
     });
     assert_eq!(h.host.error().get(), None);
     assert!(h.find("missing").is_none());
     assert!(
         h.ui.scene.borrow().len() > 40,
-        "the app and both plugins mounted"
+        "the app and both scripts beside it mounted"
     );
 }
 

@@ -302,8 +302,8 @@ impl AppConfig {
         Self::read(script).map(|(config, _, _)| config)
     }
     /// As [`for_script`](Self::for_script), with what it gives the script's
-    /// host (`zgx_script::app_config`: its packages, what it exposes to
-    /// plugins, and its plugins), and what it says of the window besides.
+    /// host (`zgx_script::app_config`: its packages and the scripts it loads
+    /// beside its own), and what it says of the window besides.
     fn read(
         script: &Path,
     ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
@@ -901,7 +901,7 @@ pub fn run_hosting(
             });
     }
     app.run(move |cx| {
-        // Its packages, what it exposes to plugins, and its plugins.
+        // Its packages, and the scripts it loads beside its own.
         let host = match &checked {
             Some((files, entry)) => ScriptHost::from_files(
                 &cx.ui.runtime,
@@ -911,7 +911,7 @@ pub fn run_hosting(
             ),
             None => ScriptHost::new(&cx.ui.runtime, script.clone()),
         };
-        let host = app_host.apply(host);
+        let host = app_host.apply(host.limits(zgx_script::Limits::app_budgets()));
         let host = host.app_id(&config.app_id).args(args.clone());
         // The launch's files, and what the system opened meanwhile:
         // they wait for the script's `ui.on_open`.

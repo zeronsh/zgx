@@ -1,28 +1,21 @@
-//! What plugins add beside the root of a branch: a `ui.show`'s or
+//! What scripts add beside the root of a branch: a `ui.show`'s or
 //! `ui.switch`'s, or a component's root. The additions are siblings in the
 //! parent's flow, come and go with the branch, and read what the root
 //! provides, live. Beside a presence's content they enter and leave with
-//! it, and so does a replacement of it, at any depth. Where a root can't have siblings (the app's, a window's), the
-//! contribution reports an error.
+//! it, and so does a replacement of it, at any depth. Where a root can't
+//! have siblings (the app's, a window's), the contribution reports an error.
 mod common;
 use common::Harness;
-use zgx_script::{Capability, Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 fn with(test: &str, app: &'static str, code: &str) -> Harness {
-    with_grants(test, app, code, vec![])
-}
-fn with_grants(test: &str, app: &'static str, code: &str, grants: Vec<Capability>) -> Harness {
     let dir = common::temp_dir(&format!("branches-{test}"));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", app);
-        host.set_plugins(vec![Plugin {
-            name: "marks".into(),
-            entry,
-            grants,
-        }]);
+        host.set_scripts(vec![Script::file("marks", entry)]);
         host
     })
 }
@@ -219,11 +212,10 @@ fn beside_a_presences_content_it_enters_and_leaves_with_it() {
 fn a_presences_content_replaced_enters_and_leaves_replaced() {
     // Replaced where the branch builds it: each branch's root anew, the
     // replacement in the row's flow.
-    let mut h = with_grants(
+    let mut h = with(
         "presence-replace",
         PAGES,
         r##"ui.contribute { target = "#header", replace = ui.text { "swapped" } }"##,
-        vec![Capability::Override("*".into())],
     );
     h.frames(1);
     assert_eq!(h.error(), None);
@@ -245,7 +237,7 @@ fn a_presences_content_replaced_enters_and_leaves_replaced() {
 
 #[test]
 fn a_root_two_presences_deep_is_replaced() {
-    let mut h = with_grants(
+    let mut h = with(
         "nested-replace",
         r##"
 local outer = ui.state("outer", "a")
@@ -256,18 +248,17 @@ return ui.column {
     end),
 }
 "##,
-        r##"ui.contribute { target = "#slot", replace = ui.text { "the plugin's" } }"##,
-        vec![Capability::Override("*".into())],
+        r##"ui.contribute { target = "#slot", replace = ui.text { "the script's" } }"##,
     );
     h.frames(1);
     assert_eq!(h.error(), None);
-    assert_eq!(h.texts(), ["the plugin's"]);
+    assert_eq!(h.texts(), ["the script's"]);
 }
 
-/// Without plugins, what leaves stays exactly where it was on every frame
-/// of its exit, and what enters takes its place in the flow.
+/// Without other scripts, what leaves stays exactly where it was on every
+/// frame of its exit, and what enters takes its place in the flow.
 #[test]
-fn without_plugins_a_presences_exit_keeps_its_place_every_frame() {
+fn without_other_scripts_a_presences_exit_keeps_its_place_every_frame() {
     let mut h = Harness::inline(PAGES);
     h.frames(1);
     let before = placed(&mut h);

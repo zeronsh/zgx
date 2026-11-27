@@ -413,7 +413,7 @@ fn judge(
         );
     };
     if plugins {
-        return Verdict::Full("plugins are loaded: they load again in full".into());
+        return Verdict::Full("scripts beside the root are loaded: they load again in full".into());
     }
     if let Some(file) = changed.iter().find(|c| !modules.contains_key(*c)) {
         return Verdict::Full(format!(
@@ -552,7 +552,10 @@ mod tests {
         };
         assert!(full(judge(Some(&modules), false, Some(app), &["net".into()])).contains("ui.task"));
         assert!(full(judge(None, false, Some(app), &["net".into()])).contains("no record"));
-        assert!(full(judge(Some(&modules), true, Some(app), &["app".into()])).contains("plugins"));
+        assert!(
+            full(judge(Some(&modules), true, Some(app), &["app".into()]))
+                .contains("scripts beside the root")
+        );
         assert!(
             full(judge(
                 Some(&modules),

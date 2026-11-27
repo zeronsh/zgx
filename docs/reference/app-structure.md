@@ -37,7 +37,7 @@ zgx resolves `require` as Luau does, from this `.luaurc` (beside the script) and
 | `ui.use_state` in a component | one instance's own state: hover, an edit in progress |
 | `ui.state` in a module | that module's own state |
 | `ui.persist` | state the next launch starts from (in the state module, usually) |
-| `ui.shared` | state Rust and plugins see: what the host publishes, what it observes |
+| `ui.shared` | state Rust and every script see: what the host publishes, what it observes |
 
 A module's `ui.state` and `ui.persist` keys are its own: `ui.state("open", false)` in `components/sidebar.luau` is the state `components/sidebar.luau::open`, and another module's `ui.state("open")` is another state. So state shared between modules is made once, in one module, and every module that needs it requires that module and gets the same States. Text templates follow the same keys: `"{count}"` in a module shows that module's `count` (then the script's, a persisted one, a shared one).
 

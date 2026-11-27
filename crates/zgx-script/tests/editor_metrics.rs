@@ -1,6 +1,6 @@
 mod common;
 use common::Harness;
-use zgx_script::Value;
+use zgx_script::{Limits, ScriptHost, Value};
 
 fn metric(h: &Harness) -> Value {
     h.host
@@ -91,8 +91,7 @@ fn a_loop_of_widths_is_stopped_by_the_script_budget() {
     // Each new width lays out every line: on the clock, a loop of them ends
     // as any runaway loop does. Off it, the loop's own instructions are all
     // that count, and its 2,000 layouts (seconds) finish unchecked.
-    let h = Harness::inline(
-        r#"
+    let code = r#"
         local ref = ui.ref()
         local go = ui.state("go", false)
         local text = string.rep("a line of words that wraps at some width\n", 2000)
@@ -104,8 +103,11 @@ fn a_loop_of_widths_is_stopped_by_the_script_budget() {
             end
         end)
         return ui.textarea { ref = ref, value = text, w = 300, h = 100 }
-    "#,
-    );
+    "#;
+    // The budget an app runs with (`zgx run`'s).
+    let h = Harness::new(|runtime| {
+        ScriptHost::inline(runtime, "app", code).limits(Limits::app_budgets())
+    });
     h.frames(3);
     h.host.set_state("go", Value::Bool(true)).unwrap();
     h.frames(1);

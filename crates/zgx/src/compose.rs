@@ -3590,30 +3590,6 @@ pub fn hoist(
 pub fn confined(child: View) -> View {
     View::new(Kind::Confined(Box::new(child)))
 }
-/// Whether popups opened in a subtree stay in the window for now, under its
-/// top layer, rather than in windows of their own (`Ui::set_popup_screens`),
-/// which nothing in the window can be above. A service: `provide` it around
-/// what may not cover the window's top layer.
-pub struct PopupsInWindow(pub Signal<bool>);
-/// The screens popups opened under `held` may reach: none while it holds.
-#[cold]
-#[inline(never)]
-fn held_screens(
-    ui: &mut Ui,
-    owner: NodeId,
-    held: Rc<PopupsInWindow>,
-) -> Signal<Vec<crate::scene::Rect>> {
-    let all = ui.popup_screens();
-    let screens = ui.signal(Vec::new());
-    let out = screens.clone();
-    ui.bind(owner, move || {
-        out.set(match held.0.get() {
-            true => Vec::new(),
-            false => all.get(),
-        });
-    });
-    screens
-}
 /// A signal-controlled modal portal. Children and fluent styles describe its panel.
 pub fn modal(label: impl Into<String>, open: Signal<bool>) -> View {
     View::new(Kind::Modal {
@@ -5429,10 +5405,7 @@ fn mount_portal_panel(
         .filter(|_| !top)
         .map(|(_, visible)| visible.clone());
     let portal = crate::compose_modal::create(ui, owner, portal_parent);
-    let screens = match environment.services.get::<PopupsInWindow>() {
-        Some(held) if anchored => held_screens(ui, owner, held),
-        _ => ui.popup_screens(),
-    };
+    let screens = ui.popup_screens();
     let hoist = (view.rare.as_mut())
         .and_then(|r| r.portal.as_mut())
         .and_then(|p| p.hoist.take());

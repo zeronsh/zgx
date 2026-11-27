@@ -65,7 +65,7 @@ fn main() {
     let only = std::env::var("ONLY").ok();
     let wanted = |name: &str| only.as_deref().is_none_or(|only| only == name);
     let limits = Limits {
-        load: Duration::from_secs(5),
+        load: Some(Duration::from_secs(5)),
         ..Limits::default()
     };
     if wanted("dashboard") {

@@ -3,13 +3,13 @@
 //! block is a script: it loads headless with no error, runs a few frames,
 //! and passes `zgx check` in strict mode when luau-lsp is installed.
 //! Blocks that start with `-- file: <path>` (and ```json file=.luaurc
-//! blocks) are one project per page, its entry `app.luau` (with `plugins/`
-//! loaded as plugins).
+//! blocks) are one project per page, its entry `app.luau` (with each file
+//! or folder in `scripts/` loaded beside it).
 mod common;
 
 use common::Harness;
 use std::path::{Path, PathBuf};
-use zgx_script::{Capability, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 const DOCS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/reference");
 
@@ -28,37 +28,6 @@ struct Example {
     /// `page.md:line`, for messages.
     at: String,
     files: Vec<(String, String)>,
-    /// What its plugins are granted: `-- file: plugins/shout.luau (granted
-    /// Capability::OverrideElement("#title"))`, each plugin by its name.
-    grants: Vec<(String, Capability)>,
-}
-
-/// A file line's path, and the grant it declares for its plugin: the
-/// `(granted Capability::…("…"))` after the path is no part of its name.
-fn file_line(line: &str) -> (String, Option<(String, Capability)>) {
-    let Some((path, grant)) = line.split_once(" (granted ") else {
-        return (line.trim().to_owned(), None);
-    };
-    let path = path.trim().to_owned();
-    let grant = grant.trim().strip_suffix(')').unwrap_or(grant);
-    let (kind, value) = grant
-        .strip_prefix("Capability::")
-        .and_then(|grant| grant.split_once("(\""))
-        .and_then(|(kind, rest)| Some((kind, rest.strip_suffix("\")")?)))
-        .unwrap_or_else(|| panic!("a grant this test can't read: {grant}"));
-    let capability = match kind {
-        "OverrideElement" => Capability::OverrideElement(value.into()),
-        "OverrideModule" => Capability::OverrideModule(value.into()),
-        "Override" => Capability::Override(value.into()),
-        "Package" => Capability::Package(value.into()),
-        other => panic!("a grant this test can't read: {other}"),
-    };
-    // A plugin is its file below `plugins/`, or the directory it is in.
-    let plugin = path
-        .strip_prefix("plugins/")
-        .map(|rest| rest.split('/').next().unwrap_or(rest).to_owned())
-        .unwrap_or_else(|| panic!("a grant on {path}, which is no plugin's"));
-    (path, Some((plugin, capability)))
 }
 
 fn examples() -> Vec<Example> {
@@ -109,7 +78,6 @@ fn examples() -> Vec<Example> {
                     .get_or_insert_with(|| Example {
                         at: at.clone(),
                         files: Vec::new(),
-                        grants: Vec::new(),
                     })
                     .files
                     .push((path, code));
@@ -120,21 +88,19 @@ fn examples() -> Vec<Example> {
                     let example = project.get_or_insert_with(|| Example {
                         at: at.clone(),
                         files: Vec::new(),
-                        grants: Vec::new(),
                     });
                     // A block may hold several files, each from its own
                     // `-- file:` line.
                     for file in rest.split("\n-- file: ") {
-                        let (line, body) = file.split_once('\n').unwrap_or((file, ""));
-                        let (path, grant) = file_line(line);
-                        example.files.push((path, body.to_owned()));
-                        example.grants.extend(grant);
+                        let (path, body) = file.split_once('\n').unwrap_or((file, ""));
+                        example
+                            .files
+                            .push((path.trim().to_owned(), body.to_owned()));
                     }
                 }
                 None => out.push(Example {
                     at,
                     files: vec![("app.luau".into(), code)],
-                    grants: Vec::new(),
                 }),
             }
         }
@@ -155,6 +121,27 @@ fn write(example: &Example, root: &Path) -> PathBuf {
     dir
 }
 
+/// The scripts in `dir`, a page's `scripts/`: each `.luau` file, and each
+/// folder by its `init.luau`, named by its file's stem or the folder's name.
+fn scripts(dir: &Path) -> Vec<Script> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries.map(|e| e.unwrap().path()).collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_string_lossy().into_owned();
+            if path.is_dir() {
+                let entry = path.join("init.luau");
+                return entry.is_file().then(|| Script::file(name, entry));
+            }
+            (path.extension()? == "luau").then(|| Script::file(name, path))
+        })
+        .collect()
+}
+
 #[test]
 fn reference_examples_run_and_type_check() {
     let examples = examples();
@@ -169,33 +156,18 @@ fn reference_examples_run_and_type_check() {
     for example in &examples {
         eprintln!("{}: {} file(s)", example.at, example.files.len());
         let dir = write(example, &root);
-        let (app, plugins) = (dir.join("app.luau"), dir.join("plugins"));
+        let app = dir.join("app.luau");
         assert!(app.is_file(), "{}: no app.luau", example.at);
-        // Each granted plugin is one the host loads (a file or directory
-        // below `plugins/`): one that fails to load is the host's error.
-        for (plugin, _) in &example.grants {
-            assert!(
-                plugins.join(plugin).exists(),
-                "{}: no plugin {plugin}",
-                example.at
-            );
-        }
-        let grants = example.grants.clone();
+        // Each file or folder (its `init.luau`) in `scripts/` loads beside
+        // the app, by its name: one that fails to load is the host's error.
+        let scripts = scripts(&dir.join("scripts"));
         let h = Harness::new(move |runtime| {
-            let mut host = ScriptHost::new(runtime, app);
-            // What its plugins are granted, as the page says.
-            for (plugin, capability) in grants {
-                host = host.grant(plugin, capability);
-            }
+            let host = ScriptHost::new(runtime, app);
             // What the examples ask of their host.
             host.action("save", |_| {});
             host.shared("user", "Ada");
-            host.expose_shared("user", None);
-            if plugins.is_dir() {
-                host.plugins(plugins)
-            } else {
-                host
-            }
+            host.set_scripts(scripts);
+            host
         });
         for _ in 0..10 {
             h.frame();

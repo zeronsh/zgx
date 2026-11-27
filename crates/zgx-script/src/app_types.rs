@@ -362,7 +362,7 @@ pub fn definitions_with(sources: &[(PathBuf, String)], manifests: &[String]) -> 
     let (text, _) = crate::module_types::typed(text, manifests);
     format!(
         "-- zgx's definitions with this app's own theme tokens (`ui.theme.tokens`)\n\
-         -- and the ids and hooks its plugins may target, its message keys and routes.\n\
+         -- and the ids and hooks scripts may target, its message keys and routes.\n\
          -- Written by `zgx types` (and `zgx check`, and the debug host after a\n\
          -- reload that changes the names): don't edit it, and leave it out of\n\
          -- version control. Editors list it in place of zgx.d.luau.\n{text}"
@@ -411,14 +411,14 @@ pub fn write_types_of(dir: &Path, sources: &[(PathBuf, String)]) -> Result<bool,
     Ok(true)
 }
 
-/// For a plugin's folder (`app_config::lent_to_folder`), the aliases of
-/// the packages lent to it added to its `.luaurc` (made if it has none),
-/// each naming the folder the app's `zgx.json` gives, from the `.luaurc`:
-/// an editor's luau-lsp then resolves and completes `@name/…` as zgx does.
-/// An alias already there is left as it is, and so is a `.luaurc` that
-/// isn't JSON. The names added; none for a folder that isn't a plugin's.
-pub fn write_lent_aliases(dir: &Path) -> Result<Vec<String>, CheckError> {
-    let Some(lent) = crate::app_config::lent_to_folder(dir) else {
+/// For a script's folder (`app_config::packages_for_folder`), the aliases
+/// of the app's packages added to its `.luaurc` (made if it has none), each
+/// naming the folder the app's `zgx.json` gives, from the `.luaurc`: an
+/// editor's luau-lsp then resolves and completes `@name/…` as zgx does. An
+/// alias already there is left as it is, and so is a `.luaurc` that isn't
+/// JSON. The names added; none for a folder that isn't a script's.
+pub fn write_package_aliases(dir: &Path) -> Result<Vec<String>, CheckError> {
+    let Some(lent) = crate::app_config::packages_for_folder(dir) else {
         return Ok(Vec::new());
     };
     let path = dir.join(".luaurc");
@@ -474,67 +474,67 @@ mod tests {
         definitions(&[(PathBuf::from("app.luau"), source.into())])
     }
 
-    /// An app lending `@ds` (not `@kit`) to its plugin `p`.
-    fn lending_app(name: &str) -> PathBuf {
-        let root = crate::test_dir(&format!("zgx-lent-types-{}-{name}", std::process::id()));
-        for dir in ["app/plugins/p", "shared/ds", "shared/kit"] {
+    /// An app with the packages `@ds` and `@kit` and a script `p` beside its own.
+    fn app_with_a_script(name: &str) -> PathBuf {
+        let root = crate::test_dir(&format!("zgx-package-types-{}-{name}", std::process::id()));
+        for dir in ["app/scripts/p", "shared/ds", "shared/kit"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         std::fs::write(root.join("app/app.luau"), "return ui.text { \"x\" }").unwrap();
-        std::fs::write(root.join("app/plugins/p/init.luau"), "local x = 1").unwrap();
+        std::fs::write(root.join("app/scripts/p/init.luau"), "local x = 1").unwrap();
         std::fs::write(
             root.join("app/zgx.json"),
             r#"{ "packages": { "ds": "../shared/ds", "kit": "../shared/kit" },
-                 "plugins": { "p": { "path": "plugins/p", "allow": ["package:ds"] } } }"#,
+                 "scripts": { "p": "scripts/p" } }"#,
         )
         .unwrap();
         root
     }
 
     #[test]
-    fn a_plugins_lent_packages_are_added_to_its_luaurc_once() {
-        let root = lending_app("luaurc");
-        let plugin = root.join("app/plugins/p");
-        assert_eq!(write_lent_aliases(&plugin).unwrap(), ["ds"]);
+    fn a_scripts_folder_gets_every_package_in_its_luaurc_once() {
+        let root = app_with_a_script("luaurc");
+        let script = root.join("app/scripts/p");
+        assert_eq!(write_package_aliases(&script).unwrap(), ["ds", "kit"]);
         let luaurc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(plugin.join(".luaurc")).unwrap())
+            serde_json::from_str(&std::fs::read_to_string(script.join(".luaurc")).unwrap())
                 .unwrap();
-        // From the .luaurc's folder to the one zgx.json names; kit isn't lent.
+        // From the .luaurc's folder to the one zgx.json names.
         assert_eq!(
             luaurc["aliases"],
-            serde_json::json!({ "ds": "../../../shared/ds" })
+            serde_json::json!({ "ds": "../../../shared/ds", "kit": "../../../shared/kit" })
         );
         assert!(
-            write_lent_aliases(&plugin).unwrap().is_empty(),
+            write_package_aliases(&script).unwrap().is_empty(),
             "added once"
         );
         // One already there is the author's.
         std::fs::write(
-            plugin.join(".luaurc"),
+            script.join(".luaurc"),
             r#"{ "aliases": { "ds": "./mine" } }"#,
         )
         .unwrap();
-        assert!(write_lent_aliases(&plugin).unwrap().is_empty());
+        assert_eq!(write_package_aliases(&script).unwrap(), ["kit"]);
         assert!(
-            std::fs::read_to_string(plugin.join(".luaurc"))
+            std::fs::read_to_string(script.join(".luaurc"))
                 .unwrap()
                 .contains("./mine")
         );
-        // The app's folder is no plugin's: nothing written.
-        assert!(write_lent_aliases(&root.join("app")).unwrap().is_empty());
+        // The app's folder is no script's: nothing written.
+        assert!(write_package_aliases(&root.join("app")).unwrap().is_empty());
         assert!(!root.join("app/.luaurc").exists());
     }
 
     #[test]
-    fn checking_gives_a_plugin_its_lent_packages_and_the_app_all() {
-        let root = lending_app("check");
+    fn checking_gives_every_file_every_package() {
+        let root = app_with_a_script("check");
         let names = |file: &str| -> Vec<String> {
             crate::app_config::aliases_for(&root.join(file))
                 .into_iter()
                 .map(|(name, _)| name)
                 .collect()
         };
-        assert_eq!(names("app/plugins/p/init.luau"), ["ds"]);
+        assert_eq!(names("app/scripts/p/init.luau"), ["ds", "kit"]);
         assert_eq!(names("app/app.luau"), ["ds", "kit"]);
     }
 
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn an_apps_ids_and_hooks_are_the_targets_plugins_may_name() {
+    fn an_apps_ids_and_hooks_are_the_targets_scripts_may_name() {
         let types = app(
             r#"return ui.row { id = "toolbar", ui.button { id = "save", hook = "toolbar.save", label = "Save" } }"#,
         );

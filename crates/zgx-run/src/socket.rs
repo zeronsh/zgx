@@ -19,7 +19,7 @@ use std::{
 use tungstenite::{
     Error as WsError, Message as WsMessage, WebSocket, client::IntoClientRequest, http::HeaderValue,
 };
-use zgx_script::{FetchPolicy, Message, ScriptHost, Socket, SocketRequest, Url};
+use zgx_script::{Message, ScriptHost, Socket, SocketRequest};
 
 /// Give `host` the default connector, as `run` does before a host's own
 /// setup (which may replace it).
@@ -66,13 +66,10 @@ impl Connection {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let poller = Arc::new(Poller::new().expect("a poller for the connection"));
         let (heard, woken) = (shared.clone(), poller.clone());
-        let caller = socket.caller().map(str::to_owned);
-        let policy = socket.fetch_policy();
         std::thread::Builder::new()
             .name("zgx-run socket".into())
             .spawn(move || {
-                let guard = (caller.as_deref(), policy.as_deref());
-                let ended = run(&request, guard, &heard, &woken);
+                let ended = run(&request, &heard, &woken);
                 tell(&heard, Heard::Ended(ended));
             })
             .expect("a thread for the connection");
@@ -226,13 +223,8 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 }
 
 /// Connect, then carry messages each way until either side ends it.
-fn run(
-    request: &SocketRequest,
-    guard: Guard<'_>,
-    shared: &Mutex<Shared>,
-    poller: &Poller,
-) -> Result<(), String> {
-    let mut ws = connect(request, guard)?;
+fn run(request: &SocketRequest, shared: &Mutex<Shared>, poller: &Poller) -> Result<(), String> {
+    let mut ws = connect(request)?;
     if shared.lock().unwrap().closed {
         let _ = ws.close(None);
         return Ok(());
@@ -250,19 +242,10 @@ fn run(
     ended
 }
 
-/// Who is asking (the plugin, `None` for the app) and what the app allows.
-type Guard<'a> = (Option<&'a str>, Option<&'a dyn FetchPolicy>);
-
 /// Open `request`'s connection: TCP to its host (ten seconds at most per
-/// address), TLS for `wss://`, then the WebSocket handshake. The app's
-/// policy is asked of its URL, and of every address before any is connected
-/// to: an IP literal too, and a name answering with one address allowed and
-/// one refused is refused (DNS rebinding). No proxy, and the handshake
-/// follows no redirect.
-fn connect(
-    request: &SocketRequest,
-    (caller, policy): Guard<'_>,
-) -> Result<WebSocket<Stream>, String> {
+/// address), TLS for `wss://`, then the WebSocket handshake. No proxy, and
+/// the handshake follows no redirect.
+fn connect(request: &SocketRequest) -> Result<WebSocket<Stream>, String> {
     let mut http = request
         .url
         .as_str()
@@ -283,24 +266,10 @@ fn connect(
     let host = uri.host().ok_or("the URL has no host")?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
-    if let Some(policy) = policy {
-        let url = Url::new(
-            uri.to_string(),
-            uri.scheme_str().unwrap_or_default(),
-            host,
-            uri.port_u16(),
-        );
-        policy.url(caller, &url)?;
-    }
     let addresses: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| e.to_string())?
         .collect();
-    if let Some(policy) = policy {
-        addresses
-            .iter()
-            .try_for_each(|address| policy.address(caller, host, address.ip()))?;
-    }
     let mut last = None;
     let mut tcp = None;
     for address in addresses {

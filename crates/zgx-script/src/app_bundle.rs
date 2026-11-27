@@ -13,7 +13,7 @@
 //!
 //! Luau checks no bytecode it loads, so a bundle is trusted as native code
 //! is: only one a person or an app's install names is run, never one a
-//! script, a plugin or a download names. It is checked against its
+//! script, a script or a download names. It is checked against its
 //! manifest: each module's library by its SHA-256 as it is opened (it is
 //! native code, loaded then), and each file of `ui/` by its own SHA-256 as
 //! it is read, the bytes checked being the bytes run. So a launch hashes

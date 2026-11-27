@@ -14,8 +14,14 @@ fn dashboard() -> Harness {
     // A debug build runs zgx-script unoptimized: sorting 100,000 rows
     // takes it past even the debug budgets on a slow runner.
     let limits = zgx_script::Limits {
-        load: std::time::Duration::from_secs(if cfg!(debug_assertions) { 10 } else { 1 }),
-        call: std::time::Duration::from_millis(if cfg!(debug_assertions) { 2000 } else { 50 }),
+        load: Some(std::time::Duration::from_secs(if cfg!(debug_assertions) {
+            10
+        } else {
+            1
+        })),
+        call: Some(std::time::Duration::from_millis(
+            if cfg!(debug_assertions) { 2000 } else { 50 },
+        )),
         ..Default::default()
     };
     let h = Harness::new(|runtime| ScriptHost::new(runtime, APP).limits(limits));

@@ -1,10 +1,11 @@
-//! What a plugin's state holds in Rust, counted with what its VM holds in
-//! Lua against its memory limit (`Limits::plugin_memory`). A state's value
-//! lives outside the VM, where Lua's limit does not see it: without this, a
-//! plugin making state after state held as much as it liked.
+//! What a script's state holds in Rust, counted with what its VM holds in
+//! Lua against its memory limit (`Limits::memory`), where its host asks for
+//! it (`Limits::count_state`).
+//! A state's value lives outside the VM, where Lua's limit does not see it:
+//! without this, a script making state after state held as much as it liked.
 //!
 //! Each write weighs what it changes (a whole value, or the leaf a
-//! `set_key` writes), so a write costs what it converts. What a plugin's
+//! `set_key` writes), so a write costs what it converts. What a script's
 //! states hold is taken off what its VM may allocate; a write that would
 //! take the two past the limit is an error, and writes nothing.
 use crate::value::Value;
@@ -18,7 +19,7 @@ use zgx::reactive::{Signal, WeakSignal};
 /// Something held in Rust: whether it's still alive, and what it holds.
 type Native = (Box<dyn Fn() -> bool>, usize);
 
-/// A plugin VM's meter.
+/// A script VM's meter.
 pub(crate) struct Meter {
     lua: mlua::WeakLua,
     /// What the VM's interrupt collects by.
@@ -53,7 +54,7 @@ impl Meter {
             .get(&signal.addr())
             .map_or(0, |(_, bytes)| *bytes)
     }
-    /// Whether the plugin has room for its states to hold `more` bytes
+    /// Whether the script has room for its states to hold `more` bytes
     /// beyond what they do, freeing what dropped states were counted for
     /// first if it has not.
     pub fn room(&self, more: usize) -> mlua::Result<()> {
@@ -69,7 +70,8 @@ impl Meter {
             return Ok(());
         }
         Err(mlua::Error::runtime(format!(
-            "a plugin's memory is {} MB at most; its state would hold {} MB more than it has room for",
+            "the script's memory is {} MB at most (`Limits::memory`); its state would hold {} MB \
+             more than it has room for",
             self.limit >> 20,
             (more + self.used())
                 .saturating_sub(self.limit)

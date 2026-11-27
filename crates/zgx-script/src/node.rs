@@ -58,9 +58,6 @@ pub(crate) struct Node {
     /// `window_drag = true` (`WINDOW_DRAG`) and `focus_on_press = false`
     /// (`KEEPS_FOCUS`): rare, tested together where the node is styled.
     pub press_flags: u8,
-    /// `hook = false` or `private = true`: no plugin may target it
-    /// (`ui.contribute { target }`), whatever matches it.
-    pub private: bool,
     /// `selectable = true`: the pointer selects the text in it (`false`
     /// keeps a part of a selectable node out).
     pub selectable: Option<bool>,
@@ -160,8 +157,6 @@ pub(crate) struct ImageEvents {
 pub(crate) struct WebSpec {
     /// Shared with `ui.web()` when given, so the page outlives this node.
     pub web: zgx::web_view::WebView,
-    /// The id it was made under (`ui.web(id)`), what `web_guard` is told.
-    pub id: Option<String>,
     pub src: Option<Source>,
     pub html: Option<(String, Option<String>)>,
     pub on_navigate: Option<Function>,
@@ -190,38 +185,18 @@ pub(crate) struct Webs(RefCell<std::collections::HashMap<String, zgx::web_view::
 
 /// Installs `ui.web`: `ui.web(opts)` makes a page for this run;
 /// `ui.web(id, opts)` returns the host's page for `id`, making it (with
-/// `opts`) the first time. A plugin's pages are its own: its ids and its
-/// stores (cookies, storage) are apart from the app's and other plugins',
-/// so `web` lets it show pages, not reach the user's.
-/// A web view made by a script. The app VM's asks the host's guard of each
-/// navigation the platform starts (a plugin's goes by its grants).
-fn guarded_web(
+/// `opts`) the first time.
+/// A web view made by a script.
+fn made_web(
     lua: &Lua,
     options: zgx::web_view::WebViewOptions,
-    id: Option<&str>,
 ) -> mlua::Result<zgx::web_view::WebView> {
-    let env = env(lua)?;
-    let web = zgx::web_view::WebView::new(&env.runtime, options);
-    if matches!(*env.grants, crate::Grants::All) {
-        let (vm, id) = (env.vm.clone(), id.map(str::to_owned));
-        web.set_navigation_policy(move |request| {
-            crate::rules::navigation_allowed(&vm, id.as_deref(), request)
-        });
-    }
-    Ok(web)
+    Ok(zgx::web_view::WebView::new(&env(lua)?.runtime, options))
 }
 pub(crate) fn install_web(lua: &Lua, ui: &Table, webs: Rc<Webs>) -> mlua::Result<()> {
     ui.set(
         "web",
         lua.create_function(move |lua, (first, opts): (mlua::Value, Option<Table>)| {
-            let plugin = {
-                let env = env(lua)?;
-                env.may(crate::Capability::Web, "ui.web")?;
-                match &*env.grants {
-                    crate::Grants::All => None,
-                    crate::Grants::Only(_) => Some(env.owner.clone()),
-                }
-            };
             let (id, opts) = match first {
                 mlua::Value::String(id) => (Some(id.to_str()?.to_owned()), opts),
                 mlua::Value::Table(opts) => (None, Some(opts)),
@@ -233,35 +208,21 @@ pub(crate) fn install_web(lua: &Lua, ui: &Table, webs: Rc<Webs>) -> mlua::Result
                     )));
                 }
             };
-            let id = match (&plugin, id) {
-                (Some(plugin), Some(id)) => Some(format!("plugin:{plugin}/{id}")),
-                (_, id) => id,
-            };
-            let make = |lua: &Lua, id: Option<&str>| -> mlua::Result<zgx::web_view::WebView> {
-                let mut options: zgx::web_view::WebViewOptions = match &opts {
+            let make = |lua: &Lua| -> mlua::Result<zgx::web_view::WebView> {
+                let options: zgx::web_view::WebViewOptions = match &opts {
                     Some(t) => web_options(t)?,
                     None => Default::default(),
                 };
-                if let Some(plugin) = &plugin {
-                    use zgx::web_view::WebProfile;
-                    options.profile = match options.profile {
-                        WebProfile::Default => WebProfile::Named(format!("plugin:{plugin}")),
-                        WebProfile::Named(name) => {
-                            WebProfile::Named(format!("plugin:{plugin}/{name}"))
-                        }
-                        WebProfile::Ephemeral => WebProfile::Ephemeral,
-                    };
-                }
-                guarded_web(lua, options, id)
+                made_web(lua, options)
             };
             let Some(id) = id else {
-                return Ok(WebUd(make(lua, None)?, None));
+                return Ok(WebUd(make(lua)?, None));
             };
             let existing = webs.0.borrow().get(&id).cloned();
             let web = match existing {
                 Some(web) => web,
                 None => {
-                    let web = make(lua, Some(&id))?;
+                    let web = make(lua)?;
                     webs.0.borrow_mut().insert(id.clone(), web.clone());
                     web
                 }
@@ -275,12 +236,6 @@ pub(crate) fn install_web(lua: &Lua, ui: &Table, webs: Rc<Webs>) -> mlua::Result
             ))
         })?,
     )
-}
-impl WebUd {
-    /// The id it was made under (`ui.web(id)`), none for an anonymous one.
-    fn id(&self) -> Option<&str> {
-        self.1.as_ref().map(|key| key.id.as_str())
-    }
 }
 impl UserData for WebUd {
     fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
@@ -317,14 +272,11 @@ impl UserData for WebUd {
         });
     }
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("load", |lua, w, url: String| {
-            crate::rules::guard_web(lua, w.id(), &url)?;
+        methods.add_method("load", |_, w, url: String| {
             w.0.load_url(url);
             Ok(())
         });
-        methods.add_method("html", |lua, w, (html, base): (String, Option<String>)| {
-            let name = base.as_deref().unwrap_or("about:blank");
-            crate::rules::guard_web(lua, w.id(), name)?;
+        methods.add_method("html", |_, w, (html, base): (String, Option<String>)| {
             w.0.load_html(html, base.as_deref());
             Ok(())
         });
@@ -845,7 +797,6 @@ impl Node {
             focusable: None,
             shaders: None,
             press_flags: 0,
-            private: false,
             selectable: None,
             source: None,
             rare: None,
@@ -980,24 +931,8 @@ impl Node {
             Kind::Component { .. } => "component",
             Kind::Presence { .. } => "presence",
             Kind::Slot { .. } => "slot",
-            Kind::Decision(ref decision) => match decision.sealed {
-                true => "sealed",
-                false => "decision",
-            },
-            Kind::PluginPage(_) => "plugin_page",
         }
     }
-}
-
-/// A `ui.decision`: boxed, as few elements are one and every `Kind` is as
-/// large as the largest.
-#[derive(Clone)]
-pub struct Decision {
-    pub key: Rc<str>,
-    pub label: String,
-    pub content: Vec<Rc<Node>>,
-    /// `ui.sealed`: a region, where `ui.plugin_page` shows a plugin's.
-    pub sealed: bool,
 }
 
 /// Script handlers for input and lifecycle events.
@@ -1534,19 +1469,12 @@ pub(crate) enum Kind {
         /// `initial = true`: the first content enters too.
         initial: bool,
     },
-    /// `ui.decision`: controls no plugin reaches or covers, drawn and hit
-    /// over all it opens (`zgx::compose::hoist`), with what holds them in
-    /// flow. Its children are here: a plugin's hooks walk `Node::children`.
-    Decision(Box<Decision>),
-    /// `ui.plugin_page`: what that plugin (its name) gave `ui.contribute(
-    /// "plugin_page", …)`, in a `ui.sealed` region, confined to this box.
-    PluginPage(Rc<str>),
-    /// A plugin extension point; `context` reaches what is contributed to it
+    /// An extension point; `context` reaches what is contributed to it
     /// (`props.slot` of a contributed component).
     Slot {
         name: String,
         context: Option<Value>,
-        /// Only what this script (a plugin's name) contributes.
+        /// Only what this script (by its name) contributes.
         from: Option<String>,
     },
     /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view. Last: one in
@@ -1575,7 +1503,6 @@ impl Kind {
                 | Kind::Menu { .. }
                 | Kind::Submenu { .. }
                 | Kind::MenuItem(..)
-                | Kind::Decision(_)
         ) || self.library_takes_children()
     }
     /// A component of the library holding children (a disclosure's content,
@@ -2407,22 +2334,16 @@ pub(crate) struct Env {
     pub warnings: crate::SharedWarnings,
     /// Where `ui.every` and `ui.after` run.
     pub timers: Rc<crate::timers::Timers>,
-    /// What the script may do beyond its sandbox.
-    pub grants: Rc<crate::Grants>,
-    /// Host actions and shared keys plugins reach.
-    pub exposed_actions: crate::Exposed,
-    pub exposed_shared: crate::Exposed,
-    /// Of those, the keys plugins only read (`expose_shared_read`).
-    pub read_only_shared: crate::ReadOnly,
-    /// Targets whose before/after need a capability (`expose_hook`).
-    pub exposed_hooks: crate::Exposed,
-    /// The script's name (a plugin's): what it contributes is its own.
+    /// Whether it is the root script, whose view mounts (its `ui.shared`
+    /// defaults come first).
+    pub root: bool,
+    /// The script's name: what it contributes is its own.
     pub owner: Rc<str>,
     /// Whose `ui.persist` state it reads: the script's name, or for a
-    /// plugin the app loads (`set_plugins`) one no script of the app's can
-    /// have (a plugin named `app.luau` does not read the app's).
+    /// script the host names (`set_scripts`) one no file script can have
+    /// (a script named `app.luau` does not read the root's).
     pub persist_as: Rc<str>,
-    /// A plugin's: what its states hold, counted against its memory limit.
+    /// With a memory limit: what its states hold, counted against it.
     pub meter: Option<Rc<crate::meter::Meter>>,
     /// The images the host sets (`host:` sources): pictures scripts take.
     pub assets: Rc<crate::lower::Assets>,
@@ -2432,7 +2353,7 @@ pub(crate) struct Env {
 /// What a script adds to a slot: the slot, who added it (`ui.slot`'s
 /// `from`) and the node.
 pub(crate) type Contribution = (String, Rc<str>, Rc<Node>);
-/// Where a plugin's node goes against the element it targets.
+/// Where a script's node goes against the element it targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Place {
     Before,
@@ -2504,7 +2425,7 @@ impl HookContribution {
         }
     }
 }
-/// What a plugin's `ui.filter` may pass through a function of its own: the
+/// What a script's `ui.filter` may pass through a function of its own: the
 /// element's text and name, whether it is hidden or disabled, its tooltip's
 /// text, the items a `ui.each` or a `ui.list` (`data`) shows and the order
 /// of its children. Nothing else of the element's: its
@@ -2540,40 +2461,6 @@ impl Env {
         self.assets.set_hosted(name, Some(image), &self.runtime);
         format!("host:{name}")
     }
-    /// Whether the script may reach `key` of what the app `exposed`
-    /// (`what` says which, for the error): the app's scripts always.
-    pub(crate) fn permits(
-        &self,
-        exposed: &crate::Exposed,
-        key: &str,
-        what: &str,
-    ) -> mlua::Result<()> {
-        if matches!(*self.grants, crate::Grants::All) {
-            return Ok(());
-        }
-        match exposed.borrow().get(key) {
-            None => Err(mlua::Error::runtime(format!(
-                "{what} `{key}`: the app does not expose it to plugins"
-            ))),
-            Some(Some(capability)) if !self.grants.allows(capability) => {
-                Err(mlua::Error::runtime(format!(
-                    "{what} `{key}`: a plugin reaches it only if the host grants it ({capability:?})"
-                )))
-            }
-            Some(_) => Ok(()),
-        }
-    }
-    /// Whether the script may use `capability` (`what` says how, for the
-    /// error).
-    pub(crate) fn may(&self, capability: crate::Capability, what: &str) -> mlua::Result<()> {
-        if self.grants.allows(&capability) {
-            Ok(())
-        } else {
-            Err(mlua::Error::runtime(format!(
-                "{what}: a plugin does this only if the host grants it (`Capability::{capability:?}`)"
-            )))
-        }
-    }
 }
 
 /// What a component instance owns while it is mounted.
@@ -2587,8 +2474,8 @@ pub(crate) struct Scope {
 /// A value a node provides its subtree, by its name.
 pub(crate) type Given = (Rc<str>, (Weak<Vm>, mlua::Value));
 /// The values a subtree was provided, its own over its ancestors', each
-/// with the VM that gave it: a plugin's node reads them converted into its
-/// own (`ui.use_context`).
+/// with the VM that gave it: another script's node reads them converted
+/// into its own (`ui.use_context`).
 #[derive(Default)]
 pub(crate) struct Provided(pub std::collections::HashMap<Rc<str>, (Weak<Vm>, mlua::Value)>);
 
@@ -2847,10 +2734,10 @@ fn controlled(
     retain(&env, Box::new((showing, changing)));
     Ok(shown)
 }
-/// What another VM provided (the app, to a plugin's node), in `lua`'s
-/// terms: a state as the same state, read only as a plugin's shared state
-/// is, so what reads it follows it; anything else as a plain value. A
-/// function or handle can't cross: an error naming it.
+/// What another VM provided (the root script, to another script's node), in
+/// `lua`'s terms: a state as the same state, which it reads, follows and
+/// writes; anything else as a plain value. A function or handle can't
+/// cross: an error naming it.
 #[cold]
 #[inline(never)]
 fn crossed(
@@ -2860,22 +2747,22 @@ fn crossed(
     name: &str,
 ) -> mlua::Result<mlua::Value> {
     if let Some(signal) = state_of(value) {
-        let read = crate::value::ReadState(crate::value::State::new(signal), name.into());
-        return lua.create_userdata(read).map(mlua::Value::UserData);
+        let state = crate::value::State::new(signal);
+        return lua.create_userdata(state).map(mlua::Value::UserData);
     }
     let Some(owner) = owner.upgrade() else {
         return Ok(mlua::Value::Nil);
     };
     let plain: Value = owner.lua.unpack(value.clone()).map_err(|_| {
         mlua::Error::runtime(format!(
-            "ui.use_context(\"{name}\"): what the app provides there is a function or a \
-             handle, which can't reach a plugin; provide a value or a state"
+            "ui.use_context(\"{name}\"): what is provided there is a function or a handle of \
+             another script's, which can't cross into this one; provide a value or a state"
         ))
     })?;
     mlua::IntoLua::into_lua(plain, lua)
 }
 /// `provide = { name = value }`'s values, each with the VM that gives it:
-/// a plugin's node reads them converted (`ui.use_context`).
+/// another script's node reads them converted (`ui.use_context`).
 #[cold]
 #[inline(never)]
 fn provided(lua: &Lua, value: mlua::Value) -> mlua::Result<Rc<[Given]>> {
@@ -2892,8 +2779,7 @@ fn provided(lua: &Lua, value: mlua::Value) -> mlua::Result<Rc<[Given]>> {
     }
     Ok(provided.into())
 }
-/// The state `value` holds, to read and follow: a plugin's read-only
-/// shared state too.
+/// The state `value` holds, to read and follow: a read-only one too.
 pub(crate) fn state_of(value: &mlua::Value) -> Option<Signal<Value>> {
     match value {
         mlua::Value::UserData(ud) => match ud.borrow::<State>() {
@@ -2910,7 +2796,7 @@ fn read_state_of(ud: &mlua::AnyUserData) -> Option<Signal<Value>> {
         .map(|s| s.0.0.clone())
 }
 /// The state `value` holds, to write as well (a two-way binding, an
-/// action's target): never a plugin's read-only shared state.
+/// action's target): never a read-only one.
 pub(crate) fn writable_state_of(value: &mlua::Value) -> Option<Signal<Value>> {
     match value {
         mlua::Value::UserData(ud) => ud.borrow::<State>().ok().map(|s| s.0.clone()),
@@ -2919,14 +2805,12 @@ pub(crate) fn writable_state_of(value: &mlua::Value) -> Option<Signal<Value>> {
 }
 pub(crate) fn expect_state(value: &mlua::Value, what: &str) -> mlua::Result<Signal<Value>> {
     writable_state_of(value).ok_or_else(|| match read_only_key(value) {
-        Some(key) => mlua::Error::runtime(format!(
-            "{what} is written, and shared state `{key}` is read only to plugins"
-        )),
+        Some(key) => mlua::Error::runtime(format!("{what} is written, and `{key}` is read only")),
         None => mlua::Error::runtime(format!("{what} must be a ui.state")),
     })
 }
 /// A state that is only read (what a list shows, an animation's source):
-/// a plugin's read-only shared state too.
+/// a read-only one too.
 pub(crate) fn expect_readable(value: &mlua::Value, what: &str) -> mlua::Result<Signal<Value>> {
     state_of(value).ok_or_else(|| mlua::Error::runtime(format!("{what} must be a ui.state")))
 }
@@ -2940,9 +2824,9 @@ fn read_only_key(value: &mlua::Value) -> Option<Rc<str>> {
         _ => None,
     }
 }
-/// A plugin's module in place of one of the app's (`ui.override`): its file,
-/// the plugin's directory (what its own requires reach) and the plugin's
-/// name. It runs in the app's VM, as the app's own code.
+/// A script's module in place of one of the root script's (`ui.override`):
+/// its file, the script's directory (what its own requires reach) and the
+/// script's name. It runs in the root's VM, in place of the module.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ModuleOverride {
     pub with: std::path::PathBuf,
@@ -2960,41 +2844,28 @@ pub(crate) fn module_name(path: &str) -> String {
     path.to_owned()
 }
 
-/// `ui.override { module = "@app/…", with = "./mine" }` from a plugin: the
-/// app's module replaced by the plugin's, which runs as the app's own code
-/// and may require the original as `@app-original/…`. Takes
-/// `Capability::OverrideModule` of the module as written, or of `"*"`: a trust
-/// grant, not a permission over the interface. The older
-/// `Capability::Override` of the module as written takes it too; its `"*"`
-/// is for elements alone.
+/// `ui.override { module = "@app/…", with = "./mine" }` from a script: the
+/// root script's module replaced by the script's, which runs in place of it
+/// and may require the original as `@app-original/…`.
 #[cold]
 fn module_override(env: &Env, table: &Table) -> mlua::Result<(String, ModuleOverride)> {
     let module: String = table.get::<Option<String>>("module")?.ok_or_else(|| {
-        mlua::Error::runtime("ui.override: `module` names the app's module (\"@app/…\")")
+        mlua::Error::runtime("ui.override: `module` names the root script's module (\"@app/…\")")
     })?;
     let Some(rest) = module.strip_prefix("@app/") else {
         return Err(mlua::Error::runtime(format!(
-            "ui.override {{ module = \"{module}\" }}: only the app's `@app/…` modules are overridden"
+            "ui.override {{ module = \"{module}\" }}: only the root script's `@app/…` modules are \
+             overridden"
         )));
     };
-    let own = crate::Capability::OverrideModule(module.clone());
-    let any = crate::Capability::OverrideModule("*".into());
-    let older = crate::Capability::Override(module.clone());
-    if !env.grants.allows(&own) && !env.grants.allows(&any) && !env.grants.allows(&older) {
-        return Err(mlua::Error::runtime(format!(
-            "ui.override {{ module = \"{module}\" }}: {} needs {own:?}, a trust grant: the \
-             module would run as the app's own code",
-            env.owner
-        )));
-    }
     let with: String = table
         .get::<Option<String>>("with")?
-        .ok_or_else(|| mlua::Error::runtime("ui.override: `with` names the plugin's module"))?;
+        .ok_or_else(|| mlua::Error::runtime("ui.override: `with` names the script's module"))?;
     let base = env
         .vm
         .upgrade()
         .and_then(|vm| vm.base.clone())
-        .ok_or_else(|| mlua::Error::runtime("ui.override needs a plugin loaded from a file"))?;
+        .ok_or_else(|| mlua::Error::runtime("ui.override needs a script loaded from a file"))?;
     let dir = base.canonicalize().unwrap_or(base);
     let mut path = crate::normalize(&dir.join(&with));
     if path.is_dir() {
@@ -3004,7 +2875,7 @@ fn module_override(env: &Env, table: &Table) -> mlua::Result<(String, ModuleOver
     }
     if !crate::within(&dir, &path) {
         return Err(mlua::Error::runtime(format!(
-            "ui.override {{ with = \"{with}\" }}: the replacement is one of the plugin's own files"
+            "ui.override {{ with = \"{with}\" }}: the replacement is one of the script's own files"
         )));
     }
     Ok((
@@ -3018,10 +2889,7 @@ fn module_override(env: &Env, table: &Table) -> mlua::Result<(String, ModuleOver
 }
 
 /// `ui.contribute { target, before | after | replace }`: the target read,
-/// one place, and what the script may do there. Adding before or after an
-/// element is open, unless the host asks a capability for that target
-/// (`expose_hook`); replacing one takes `Capability::OverrideElement` of the
-/// target as written, or of `"*"`.
+/// and one place.
 fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookContribution> {
     let written: String = table
         .get::<Option<String>>("target")?
@@ -3043,15 +2911,6 @@ fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<H
             "ui.contribute {{ target = \"{written}\" }}: one of `before`, `after` or `replace`"
         ))
     })?;
-    let needs = match place {
-        Place::Replace => overrides(env, &written),
-        Place::Before | Place::After => contribution_needs(env, &written),
-    };
-    if let Some(needed) = needs {
-        return Err(mlua::Error::runtime(format!(
-            "ui.contribute {{ target = \"{written}\" }}: {owner} needs {needed:?}"
-        )));
-    }
     Ok(HookContribution {
         target,
         adds: Adds::Node(place, node),
@@ -3062,37 +2921,8 @@ fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<H
         site: None,
     })
 }
-/// The capability adding at `exposed` (a target as written, or `slot:name`)
-/// takes, if the script lacks it: what the host asked of it (`expose_hook`),
-/// else of every contribution (`require_contribution_capability`, kept as
-/// `"*"`), else none.
-fn contribution_needs(env: &Env, exposed: &str) -> Option<crate::Capability> {
-    let hooks = env.exposed_hooks.borrow();
-    let asked = match hooks.get(exposed) {
-        Some(asked) => asked.clone(),
-        None => hooks.get("*").cloned().flatten(),
-    };
-    asked.filter(|needed| !env.grants.allows(needed))
-}
-/// The capability replacing or filtering `written` takes, if the script
-/// lacks it: `OverrideElement` of the target as written, or of `"*"` (or the
-/// older `Override` of either).
-fn overrides(env: &Env, written: &str) -> Option<crate::Capability> {
-    use crate::Capability::{Override, OverrideElement};
-    let own = OverrideElement(written.into());
-    let granted = [
-        &own,
-        &OverrideElement("*".into()),
-        &Override(written.into()),
-        &Override("*".into()),
-    ]
-    .into_iter()
-    .any(|capability| env.grants.allows(capability));
-    (!granted).then_some(own)
-}
-/// `ui.filter { target, text = fn, … }`: the target read, the props it
-/// passes through functions (`Filtered`), and the capability it takes,
-/// `Override`'s as replacing does.
+/// `ui.filter { target, text = fn, … }`: the target read, and the props it
+/// passes through functions (`Filtered`).
 fn hook_filter(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookContribution> {
     let written: String = table
         .get::<Option<String>>("target")?
@@ -3124,11 +2954,6 @@ fn hook_filter(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookCon
     if filters.is_empty() {
         return Err(mlua::Error::runtime(format!(
             "ui.filter {{ target = \"{written}\" }}: name what it filters (text = function(text) … end)"
-        )));
-    }
-    if let Some(needed) = overrides(env, &written) {
-        return Err(mlua::Error::runtime(format!(
-            "ui.filter {{ target = \"{written}\" }}: {owner} needs {needed:?}"
         )));
     }
     Ok(HookContribution {
@@ -3601,12 +3426,6 @@ fn template(lua: &Lua, text: &str) -> mlua::Result<Text> {
     }
     let env = env(lua)?;
     let prefix = module_prefix(lua, &env);
-    let script = || {
-        env.vm
-            .upgrade()
-            .map(|vm| vm.name.clone())
-            .unwrap_or_default()
-    };
     let mut segments = Vec::new();
     let mut literal = String::new();
     let mut rest = text;
@@ -3645,43 +3464,32 @@ fn template(lua: &Lua, text: &str) -> mlua::Result<Text> {
                 let own = format!("{prefix}{name}");
                 env.store
                     .get(&own)
-                    .or_else(|| env.persist.get(&script(), &own))
+                    .or_else(|| env.persist.get(&env.persist_as, &own))
             })
             .or_else(|| env.store.get(name))
-            .or_else(|| env.persist.get(&script(), name));
-        // Shared state, as `ui.shared` reaches it: a plugin, only what the
-        // app exposes.
+            .or_else(|| env.persist.get(&env.persist_as, name));
+        // Shared state, as `ui.shared` reaches it.
         let state = match state {
             Some(state) => state,
-            None => {
-                let shared = env.shared.get(name).ok_or_else(|| {
-                    let hint = if path.is_empty() {
-                        String::new()
-                    } else {
-                        // `"{state.status}"`, a Luau path, for `{status}`.
-                        format!(
-                            " (a template names a state by its key, and a field of it after a dot: \
+            None => env.shared.get(name).ok_or_else(|| {
+                let hint = if path.is_empty() {
+                    String::new()
+                } else {
+                    // `"{state.status}"`, a Luau path, for `{status}`.
+                    format!(
+                        " (a template names a state by its key, and a field of it after a dot: \
                              `{{{}}}` is state `{}`'s field `{}`)",
-                            [name]
-                                .into_iter()
-                                .chain(path.iter().map(|p| &**p))
-                                .collect::<Vec<_>>()
-                                .join("."),
-                            name,
-                            path.join(".")
-                        )
-                    };
-                    mlua::Error::runtime(format!(
-                        "text `{text}` names unknown state `{name}`{hint}"
-                    ))
-                })?;
-                env.permits(
-                    &env.exposed_shared,
-                    name,
-                    &format!("text `{text}` names shared state"),
-                )?;
-                shared
-            }
+                        [name]
+                            .into_iter()
+                            .chain(path.iter().map(|p| &**p))
+                            .collect::<Vec<_>>()
+                            .join("."),
+                        name,
+                        path.join(".")
+                    )
+                };
+                mlua::Error::runtime(format!("text `{text}` names unknown state `{name}`{hint}"))
+            })?,
         };
         if !literal.is_empty() {
             segments.push(Segment::Literal(std::mem::take(&mut literal)));
@@ -3879,7 +3687,7 @@ pub(crate) struct A11y {
     /// What is wrong with its value (`aria-invalid`), followed: nil while
     /// it is fine.
     pub error: Option<Source>,
-    /// `hook = "toolbar.save"`: a point the app declares for plugins, as
+    /// `hook = "toolbar.save"`: a point the app declares for scripts, as
     /// they target it (`hook:toolbar.save`). Here, with what else names the
     /// element to its readers, as few elements have one.
     pub hook: Option<Rc<str>>,
@@ -4231,7 +4039,6 @@ const LATE_FIELDS: &[&str] = &[
     "caret_color",
     "caret_width",
     "hook",
-    "private",
     "reorder",
     "item_label",
     "on_end",
@@ -4298,8 +4105,8 @@ fn atom_field(
 }
 /// A key no style property names, taken where it lies once the walk finds
 /// it, so no style key compares against it: an input's caret (few set it,
-/// read only from those that do), whether plugins may target the node
-/// (`hook`, `private`), an input's `on_paste`, `active_descendant`, `read_only`,
+/// read only from those that do), the node's declared point (`hook`), an
+/// input's `on_paste`, `active_descendant`, `read_only`,
 /// `autocorrect`, `smart_punctuation` and `drop_caret`, a
 /// popover's `at_caret`; `inputmode` is read by `ui.input` itself, `on_end` and
 /// `end_distance` by `ui.list`. Any other key is unknown.
@@ -4531,15 +4338,17 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 *at_caret = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
             }
         }
-        "private" => node.private = lua.unpack(value)?,
+        "private" => return Err(mlua::Error::runtime(crate::lint::GONE_PRIVATE)),
         "hook" => match value {
             mlua::Value::String(name) => {
                 node.a11y.get_or_insert_default().hook = Some(name.to_str()?.as_ref().into())
             }
-            mlua::Value::Boolean(false) => node.private = true,
+            mlua::Value::Boolean(false) => {
+                return Err(mlua::Error::runtime(crate::lint::GONE_HOOK_FALSE));
+            }
             other => {
                 return Err(mlua::Error::runtime(format!(
-                    "`hook` takes a name (a hook plugins target) or false (none may), not {}",
+                    "`hook` takes a name (a point scripts target as `hook:name`), not {}",
                     other.type_name()
                 )));
             }
@@ -5749,84 +5558,7 @@ fn span_icon(lua: &Lua, given: mlua::Value, span: &mut Span) -> mlua::Result<()>
     Ok(())
 }
 
-/// Installs the read-only `ui` global.
-/// `ui.override`, `ui.contribute` and `ui.filter`: what plugins (and an
-/// app's own extensions) hand the app, made once a script names one.
-/// An error unless the script running is the application's: `what` no
-/// plugin makes.
-fn app_alone(lua: &Lua, what: &str) -> mlua::Result<()> {
-    if matches!(&*env(lua)?.grants, crate::Grants::Only(_)) {
-        return Err(mlua::Error::runtime(format!(
-            "{what}: only the app's own script makes this"
-        )));
-    }
-    Ok(())
-}
-/// `ui.decision`, or `ui.sealed` for a region (its key optional).
-fn decision_node(lua: &Lua, table: Table, sealed: bool) -> mlua::Result<mlua::AnyUserData> {
-    app_alone(lua, if sealed { "ui.sealed" } else { "ui.decision" })?;
-    let key: Option<String> = table.get("key")?;
-    if key.is_none() && !sealed {
-        return Err(mlua::Error::runtime("ui.decision needs a `key`"));
-    }
-    let label = table
-        .get::<Option<String>>("label")?
-        .unwrap_or_else(|| if sealed { "Sealed" } else { "Decision" }.to_owned());
-    let mut node = fill(
-        lua,
-        Node::new(
-            owner(lua)?,
-            Kind::Decision(Box::new(Decision {
-                key: key.unwrap_or_default().into(),
-                label,
-                content: Vec::new(),
-                sealed,
-            })),
-        ),
-        Some(&table),
-    )?;
-    node.private = true;
-    let content = std::mem::take(&mut node.children);
-    if let Kind::Decision(decision) = &mut node.kind {
-        decision.content = content;
-    }
-    node_ud(lua, node)
-}
-/// `ui.decision`, `ui.sealed` and `ui.plugin_page`, set the first time one is
-/// read: a script that never asks makes no function for them.
-pub(crate) fn install_decisions(lua: &Lua, ui: &Table) -> mlua::Result<()> {
-    ui.raw_set(
-        "decision",
-        lua.create_function(|lua, table: Table| decision_node(lua, table, false))?,
-    )?;
-    ui.raw_set(
-        "sealed",
-        lua.create_function(|lua, table: Table| decision_node(lua, table, true))?,
-    )?;
-    ui.raw_set(
-        "plugin_page",
-        lua.create_function(|lua, table: Table| {
-            app_alone(lua, "ui.plugin_page")?;
-            let plugin: Rc<str> = table
-                .get::<Option<String>>("plugin")?
-                .ok_or_else(|| mlua::Error::runtime("ui.plugin_page needs a `plugin`"))?
-                .into();
-            table.raw_set("plugin", mlua::Value::Nil)?;
-            let mut node = fill(
-                lua,
-                Node::new(owner(lua)?, Kind::PluginPage(plugin)),
-                Some(&table),
-            )?;
-            // Where it is, which its errors (found as it lowers) name: few
-            // nodes are one.
-            if node.source.is_none() {
-                node.source = crate::call_site(lua).map(Rc::from);
-            }
-            node_ud(lua, node)
-        })?,
-    )
-}
-pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+pub(crate) fn install_composition(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
         "override",
         lua.create_function(|lua, table: Table| {
@@ -5847,11 +5579,6 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 (mlua::Value::String(slot), Some(node)) => {
                     let node = expect_node(node, "a contribution")?;
                     let slot = slot.to_str()?.to_string();
-                    if let Some(needed) = contribution_needs(&env, &format!("slot:{slot}")) {
-                        return Err(mlua::Error::runtime(format!(
-                            "ui.contribute(\"{slot}\", …): {owner} needs {needed:?}"
-                        )));
-                    }
                     env.contributions.borrow_mut().push((slot, owner, node));
                     drop(env);
                     crate::reloads::per_load(lua, "ui.contribute");
@@ -6246,8 +5973,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     v => InputValue::State {
                         value: writable_state_of(&v).ok_or_else(|| match read_only_key(&v) {
                             Some(key) => mlua::Error::runtime(format!(
-                                "`value` is written as it is typed, and shared state `{key}` is \
-                                 read only to plugins: give a function with on_change instead"
+                                "`value` is written as it is typed, and `{key}` is read only: \
+                                 give a function with on_change instead"
                             )),
                             None => mlua::Error::runtime(
                                 "`value` must be a ui.state (two-way), or a function with \
@@ -7141,13 +6868,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "webview",
         lua.create_function(|lua, table: Table| {
-            env(lua)?.may(crate::Capability::Web, "ui.webview")?;
-            let (web, id) = match table.get::<mlua::Value>("web")? {
-                mlua::Value::Nil => (guarded_web(lua, web_options(&table)?, None)?, None),
-                mlua::Value::UserData(ud) => {
-                    let web = ud.borrow::<WebUd>()?;
-                    (web.0.clone(), web.id().map(str::to_owned))
-                }
+            let web = match table.get::<mlua::Value>("web")? {
+                mlua::Value::Nil => made_web(lua, web_options(&table)?)?,
+                mlua::Value::UserData(ud) => ud.borrow::<WebUd>()?.0.clone(),
                 other => {
                     return Err(mlua::Error::runtime(format!(
                         "`web` takes a ui.web(), not {}",
@@ -7168,7 +6891,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let handler = |key: &str| table.get::<Option<Function>>(key);
             let spec = WebSpec {
                 web,
-                id,
                 src,
                 html,
                 on_navigate: handler("on_navigate")?,
@@ -7217,15 +6939,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "invoke",
         lua.create_function(|lua, (name, arg): (String, Option<Value>)| {
-            let action = {
+            let (action, who) = {
                 let env = env(lua)?;
-                env.permits(&env.exposed_actions, &name, "ui.invoke")?;
-                env.actions.borrow().get(&name).cloned()
+                (env.actions.borrow().get(&name).cloned(), env.owner.clone())
             };
-            crate::rules::guard(lua, crate::GuardKind::Action, &name)?;
             match action {
                 Some(action) => {
-                    action(arg.unwrap_or(Value::Nil));
+                    crate::calling(Some(who), || action(arg.unwrap_or(Value::Nil)));
                     crate::modules::failure().map_or(Ok(()), Err)
                 }
                 None => Err(mlua::Error::runtime(format!(
@@ -7238,15 +6958,16 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "call_sync",
         lua.create_function(|lua, (name, arg): (String, Option<Value>)| {
-            let function = {
+            let (function, who) = {
                 let env = env(lua)?;
-                env.permits(&env.exposed_actions, &name, "ui.call_sync")?;
-                env.functions.borrow().get(&name).cloned()
+                (
+                    env.functions.borrow().get(&name).cloned(),
+                    env.owner.clone(),
+                )
             };
-            crate::rules::guard(lua, crate::GuardKind::Function, &name)?;
             match function {
                 Some(function) => {
-                    let value = function(arg.unwrap_or(Value::Nil));
+                    let value = crate::calling(Some(who), || function(arg.unwrap_or(Value::Nil)));
                     // (A module's function says so when it can't answer.)
                     match crate::modules::failure() {
                         None => Ok(value),
@@ -7407,7 +7128,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             crate::work::run(move || {
                 tell.send(decode_image(&encoded));
             });
-            // A plugin's picture is held in Rust, counted against its
+            // A metered script's picture is held in Rust, counted against its
             // memory as its states are, for as long as it is kept.
             let meter = env(lua)?.meter.clone();
             crate::calls::settle_with(lua, &promise, crate::errors::Kind::Io, async move {
@@ -7429,12 +7150,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "slot",
         lua.create_function(|lua, (name, table): (String, Option<Table>)| {
-            {
-                let env = env(lua)?;
-                if !matches!(*env.grants, crate::Grants::All) {
-                    crate::rules::plugin_offers(lua, &env.owner, &name)?;
-                }
-            }
             let (context, from) = match &table {
                 Some(table) => {
                     let context: Option<Value> = table.get("context")?;
@@ -7490,9 +7205,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (key, initial): (String, Value)| {
             let env = env(lua)?;
             let key = module_key(lua, &env, key);
-            if let Some(held) = crate::rules::held_persist(lua, &env, &key, &initial) {
-                return Ok(State::new(held));
-            }
             if let Some(meter) = &env.meter
                 && env.persist.get(&env.persist_as, &key).is_none()
             {
@@ -7514,16 +7226,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "shared",
         lua.create_function(|lua, (key, initial): (String, Value)| {
             let env = env(lua)?;
-            env.permits(&env.exposed_shared, &key, "ui.shared")?;
-            let plugin = matches!(*env.grants, crate::Grants::Only(_));
             let made = env.journal.active() && env.shared.get(&key).is_none();
-            let state = State::new(env.shared.shared(&key, initial, plugin));
+            let state = State::new(env.shared.shared(&key, initial, env.root));
             if made {
                 env.journal.made_state(&env.shared, &key);
-            }
-            if plugin && env.read_only_shared.borrow().contains(&key) {
-                let read = crate::value::ReadState(state, key.as_str().into());
-                return lua.create_userdata(read);
             }
             lua.create_userdata(state)
         })?,
@@ -7778,10 +7484,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "action",
         lua.create_function(move |lua, (name, arg): (String, Value)| {
-            {
-                let env = env(lua)?;
-                env.permits(&env.exposed_actions, &name, "ui.action")?;
-            }
             action(lua, Action::Host(name.into(), arg))
         })?,
     )?;

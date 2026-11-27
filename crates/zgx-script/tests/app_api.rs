@@ -126,7 +126,7 @@ fn a_shortcut_following_a_state_is_rebound_without_a_reload() {
         (
             dropped[0].command.as_str(),
             dropped[0].holder.as_str(),
-            dropped[0].plugin.as_str()
+            dropped[0].script.as_str()
         ),
         ("copy", "run", "")
     );

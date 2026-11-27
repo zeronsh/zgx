@@ -1,8 +1,8 @@
-//! A Luau app's plugins from its `zgx.json` alone (`app_config`): the app
-//! exposes shared state, an action it defines (`ui.actions`) and a target
-//! to filter; a plugin is allowed them; `zgx test` mounts it as `zgx run`
-//! would. A grant beyond what is exposed, or one that doesn't exist, is an
-//! error as it loads, naming the plugin and the grant.
+//! A Luau app's scripts from its `zgx.json` alone (`app_config`): a script
+//! beside the app's reaches its shared state, an action it defines
+//! (`ui.actions`) and a target to filter, with nothing granted; `zgx test`
+//! mounts it as `zgx run` would. A script that isn't there is an error as
+//! it loads, naming it.
 mod common;
 
 use std::{path::PathBuf, process::Command};
@@ -67,14 +67,7 @@ end)
 "##;
 
 const CONFIG: &str = r##"{
-    "expose": {
-        "shared": { "tasks": "read" },
-        "actions": ["complete"],
-        "hooks": { "#tasks": "override" }
-    },
-    "plugins": {
-        "focus": { "path": "plugins/focus", "allow": ["shared:tasks", "action:complete", "override:#tasks"] }
-    }
+    "scripts": { "focus": "plugins/focus" }
 }"##;
 
 fn app(name: &str, config: &str) -> PathBuf {
@@ -89,8 +82,8 @@ fn app(name: &str, config: &str) -> PathBuf {
 }
 
 #[test]
-fn a_luau_apps_plugins_come_from_its_zgx_json() {
-    let dir = app("granted", CONFIG);
+fn a_luau_apps_scripts_come_from_its_zgx_json() {
+    let dir = app("scripts", CONFIG);
     let out = Command::new(env!("CARGO_BIN_EXE_zgx"))
         .arg("test")
         .arg(&dir)
@@ -105,87 +98,56 @@ fn a_luau_apps_plugins_come_from_its_zgx_json() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A script whose path is neither a file nor a folder with an `init.luau`
+/// is an error as the app loads, naming the script.
 #[test]
-fn a_grant_beyond_what_the_app_exposes_is_an_error_naming_it() {
-    for (config, said) in [
-        (
-            CONFIG.replace(r#""actions": ["complete"],"#, ""),
-            "plugin `focus` is allowed `action:complete`, which the app doesn't expose \
-             (add \"complete\" to expose.actions)",
-        ),
-        (
-            CONFIG.replace(r##""hooks": { "#tasks": "override" }"##, r#""hooks": {}"#),
-            "plugin `focus` is allowed `override:#tasks`, which the app doesn't expose",
-        ),
-        (
-            CONFIG.replace("\"shared:tasks\"", "\"shared:tasks\", \"camera\""),
-            "plugin `focus`: unknown grant `camera`",
-        ),
-        (
-            CONFIG.replace("\"shared:tasks\"", "\"shared:tasks\", \"package:ds\""),
-            "plugin `focus` is allowed `package:ds`, which the app doesn't expose \
-             (add \"ds\" to packages)",
-        ),
-        (
-            CONFIG.replace("plugins/focus", "plugins/missing"),
-            "plugin `focus`:",
-        ),
-        (
-            CONFIG.replace(r#""tasks": "read""#, r#""tasks": "all""#),
-            "`expose.shared.tasks` is \"all\": \"read\" or \"write\"",
-        ),
-    ] {
-        let dir = app("refused", &config);
-        let error = zgx_script::app_config::read(&dir).unwrap_err();
-        assert!(error.contains(said), "{error}\n(wanted: {said})");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
+fn a_script_that_isnt_there_is_an_error_naming_it() {
+    let dir = app(
+        "missing",
+        &CONFIG.replace("plugins/focus", "plugins/missing"),
+    );
+    let error = zgx_script::app_config::read(&dir).unwrap_err();
+    assert!(error.contains("script `focus`:"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A plugin not allowed an exposed action can't call it.
+/// A script beside the app's defines actions too, and the app calls them.
 #[test]
-fn an_action_not_granted_is_refused() {
-    let config = CONFIG.replace("\"action:complete\", ", "");
-    let dir = app("ungranted", &config);
+fn a_script_beside_the_apps_defines_actions() {
+    let dir = app("script-defines", CONFIG);
+    std::fs::write(
+        dir.join("plugins/focus/init.luau"),
+        r#"
+local pinged = ui.shared("pinged", false)
+ui.actions { ping = function() pinged:set(true) end }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.luau"),
+        r#"
+local pinged = ui.shared("pinged", false)
+return ui.button { id = "ping", w = 60, h = 24, "Ping", on_click = function()
+    ui.invoke("ping")
+end }
+"#,
+    )
+    .unwrap();
     let mut app = zgx_script::testing::TestApp::new(|runtime| {
         zgx_script::app_config::read(&dir)
             .unwrap()
             .apply(zgx_script::ScriptHost::new(runtime, dir.join("app.luau")))
     });
-    app.click("finish");
+    assert_eq!(app.error(), None);
+    app.click("ping");
     app.frames(1);
-    let error = app.error().unwrap_or_default();
-    assert!(error.contains("complete"), "{error:?}");
-    let tasks = app.host.states();
-    let done = tasks
+    assert_eq!(app.error(), None);
+    let pinged = app
+        .host
+        .states()
         .iter()
-        .find(|(name, _)| name == "tasks")
+        .find(|(name, _)| name == "pinged")
         .map(|(_, value)| value.to_json());
-    assert!(
-        done.is_some_and(|json| json.contains("\"done\":false")),
-        "the app's action didn't run"
-    );
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-/// The app's own script defines actions; a plugin can't.
-#[test]
-fn only_the_app_defines_actions() {
-    let dir = app("plugin-defines", CONFIG);
-    std::fs::write(
-        dir.join("plugins/focus/init.luau"),
-        "ui.actions { complete = function() end }\n",
-    )
-    .unwrap();
-    let app = zgx_script::testing::TestApp::new(|runtime| {
-        zgx_script::app_config::read(&dir)
-            .unwrap()
-            .apply(zgx_script::ScriptHost::new(runtime, dir.join("app.luau")))
-    });
-    let error = app.error().unwrap_or_default();
-    assert!(
-        error.contains("only the app's script defines actions"),
-        "{error:?}"
-    );
+    assert_eq!(pinged.as_deref(), Some("true"), "the script's action ran");
     std::fs::remove_dir_all(dir).unwrap();
 }

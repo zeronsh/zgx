@@ -334,7 +334,7 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// A load in a load (a plugin's, as the app loads) keeps what is kept
+    /// A load in a load (a script's, as the app loads) keeps what is kept
     /// until the outer ends.
     #[test]
     fn a_load_in_a_load_ends_with_the_outer() {

@@ -856,13 +856,13 @@ fn a_mesh_of_its_own_triangles_is_checked() {
     assert_eq!(made("{ positions = { 0,0,0, 1,0,0, 0,1,0 } }"), "no error");
 }
 
-/// A plugin's scene, of its own triangles, with or without the grant.
-fn plugin_scene(name: &str, grants: Vec<zgx_script::Capability>) -> Harness {
-    use zgx_script::{Plugin, ScriptHost};
+/// The scene of a script beside the root, of its own triangles.
+fn beside_scene(name: &str) -> Harness {
+    use zgx_script::{Script, ScriptHost};
     let dir = common::temp_dir(name);
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
-    let plugin = OWN
+    let code = OWN
         .replace("FACES", "face_colors = { 1, 0, 0,  0, 0, 1 }")
         .replace(
             "return ui.column {",
@@ -871,46 +871,29 @@ fn plugin_scene(name: &str, grants: Vec<zgx_script::Capability>) -> Harness {
         .trim_end()
         .to_owned()
         + " }\n";
-    std::fs::write(&entry, plugin).unwrap();
+    std::fs::write(&entry, code).unwrap();
     let h = Harness::new(move |runtime| {
         let host = ScriptHost::inline(
             runtime,
             "app",
             r#"return ui.column { ui.text { id = "slot", "app" } }"#,
         );
-        host.set_plugins(vec![Plugin {
-            name: "cad".into(),
-            entry,
-            grants,
-        }]);
+        host.set_scripts(vec![Script::file("cad", entry)]);
         host
     });
     h.frames(2);
     h
 }
 
-/// A plugin granted `scene3d` shows a scene of its own triangles, and hears
+/// A script beside the root shows a scene of its own triangles, and hears
 /// clicks on them.
 #[test]
-fn a_plugin_granted_scene3d_shows_and_picks_its_own_mesh() {
-    let mut h = plugin_scene("scene3d-plugin", vec![zgx_script::Capability::Scene3d]);
+fn a_script_beside_the_root_shows_and_picks_its_own_mesh() {
+    let mut h = beside_scene("scene3d-beside");
     assert_eq!(h.error(), None);
     assert!(frame_id(&mut h, "scene").is_some(), "{}", h.tree());
     press(&mut h, "scene", (100., 100.), 0.);
     assert_eq!(h.text("clicked"), "0.50");
-}
-
-/// Without the grant, a plugin's `ui.scene3d` is an error saying so, and
-/// nothing of it is drawn.
-#[test]
-fn a_plugin_not_granted_scene3d_is_refused() {
-    let mut h = plugin_scene("scene3d-refused", vec![]);
-    let error = h.error().unwrap_or_default();
-    assert!(
-        error.contains("ui.scene3d: a plugin does this only if the host grants it"),
-        "{error:?}"
-    );
-    assert!(frame_id(&mut h, "scene").is_none(), "{}", h.tree());
 }
 
 /// A mesh with no triangles (a boolean of two solids that don't meet) is a
@@ -929,11 +912,11 @@ fn a_mesh_of_no_triangles_shows_nothing() {
     assert_eq!(h.text("clicked"), "none");
 }
 
-/// What a plugin's meshes hold counts against its memory, though it lives
+/// What a script's meshes hold counts against its memory, though it lives
 /// outside its VM; what it lets go of is room again.
 #[test]
-fn a_plugin_meshes_count_against_its_memory() {
-    use zgx_script::{Limits, Plugin, ScriptHost};
+fn a_scripts_meshes_count_against_its_memory() {
+    use zgx_script::{Limits, Script, ScriptHost};
     let dir = common::temp_dir("scene3d-budget");
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
@@ -959,7 +942,7 @@ for i = 1, 200 do
     kept[i] = made
     held = i
 end
-local short = string.find(why, "needs 0.1 MB: a plugin's memory is 4 MB", 1, true) ~= nil
+local short = string.find(why, "needs 0.1 MB: the script's memory is 4 MB", 1, true) ~= nil
 kept = {}
 local again = pcall(mesh)
 result:set(`{thrown} {held} {short} {again}`)
@@ -971,16 +954,12 @@ result:set(`{thrown} {held} {short} {again}`)
             runtime,
             "app",
             r#"return ui.column { ui.text { id = "slot", "app" } }"#,
-        )
-        .limits(Limits {
-            plugin_memory: 4 << 20,
+        );
+        host.set_scripts(vec![Script::file("cad", entry).limits(Limits {
+            memory: Some(4 << 20),
+            count_state: true,
             ..Default::default()
-        });
-        host.set_plugins(vec![Plugin {
-            name: "cad".into(),
-            entry,
-            grants: vec![],
-        }]);
+        })]);
         host
     });
     h.frames(2);

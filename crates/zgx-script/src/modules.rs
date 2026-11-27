@@ -16,7 +16,7 @@
 //! and the module.
 //!
 //! Only an app loads modules, by a path it names in Rust: nothing a script
-//! or a plugin can say loads one.
+//! can say loads one.
 
 use std::{
     cell::{Cell, RefCell},
@@ -1495,17 +1495,16 @@ macro_rules! member_function {
     }};
     (@value $arg:ident) => { Value };
 }
-/// A member's call: guarded as `ui.call_sync` of its name is, its
-/// arguments lent (or the first given), its failure raised.
+/// A member's call: its arguments lent (or the first given), its failure
+/// raised.
 #[inline(always)]
 fn called<const N: usize>(
-    lua: &Lua,
+    _lua: &Lua,
     call: Call,
     user: *mut c_void,
     registered: &Registered,
     args: [Value; N],
 ) -> mlua::Result<Value> {
-    crate::rules::guard(lua, crate::GuardKind::Function, &registered.name)?;
     // (Called with none, a module is still lent a value to read.)
     let none = Value::Nil;
     let mut out = MaybeUninit::<Raw>::uninit();
@@ -1540,8 +1539,7 @@ fn called<const N: usize>(
 fn member_of_many(lua: &Lua, member: &Member) -> mlua::Result<mlua::Function> {
     let (call, registered) = (member.call, member.registered.clone());
     let user = registered.user.ptr;
-    lua.create_function(move |lua, args: mlua::Variadic<Value>| {
-        crate::rules::guard(lua, crate::GuardKind::Function, &registered.name)?;
+    lua.create_function(move |_, args: mlua::Variadic<Value>| {
         let mut args = args.into_iter().collect::<Vec<Value>>();
         let len = args.len();
         if args.is_empty() {
@@ -1572,9 +1570,7 @@ fn member_of_many(lua: &Lua, member: &Member) -> mlua::Result<mlua::Function> {
 }
 
 /// `ui.module(name)`: a loaded module's functions as a table, each called
-/// with its arguments as its manifest lists them. The app's own scripts
-/// only: a plugin reaches what the app exposes to it, by name
-/// (`ui.call_sync`).
+/// with its arguments as its manifest lists them.
 pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     // (`ui.call` read as a table with an async action is made, not here:
     // reading it makes the names made with it.)
@@ -1584,11 +1580,6 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
         lua.create_function(move |lua, name: String| {
             let functions = {
                 let env = crate::node::env(lua)?;
-                if !matches!(*env.grants, crate::Grants::All) {
-                    return Err(mlua::Error::runtime(format!(
-                        "ui.module `{name}`: a module is the app's own; a plugin calls what the app exposes with ui.call_sync"
-                    )));
-                }
                 env.functions.clone()
             };
             let module = loaded(&functions, &name).map_err(|names| {
@@ -1692,9 +1683,7 @@ impl ScriptHost {
     /// Loads a native module (a library built with the `zgx-module` crate)
     /// and lets it register its functions and actions with this host, as
     /// `function` and `action` would: scripts call them the same way, and
-    /// plugins reach them only if exposed (`expose_action`). The app's own
-    /// scripts also get them as a table, by the module's name
-    /// (`ui.module`).
+    /// also get them as a table, by the module's name (`ui.module`).
     ///
     /// A module's manifest is read from its file, which is how its name is
     /// known, and again from the library loaded: they must be one, and the
@@ -1706,8 +1695,7 @@ impl ScriptHost {
     ///
     /// # Safety
     /// Loading a library runs its code: `path` must be a module the app
-    /// itself built or shipped, never one a script, a plugin or a person
-    /// named.
+    /// itself built or shipped, never one a script or a person named.
     #[doc(hidden)]
     pub unsafe fn load_module(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();

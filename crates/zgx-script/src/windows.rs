@@ -164,9 +164,6 @@ pub(crate) struct Windows {
     /// The published windows' content, by id.
     pub content: RefCell<HashMap<String, Content>>,
     pub list: Signal<Vec<Window>>,
-    /// What says a plugin's windows are open: each window's `open`, each
-    /// group's list. The load's.
-    plugin_opens: RefCell<Vec<Signal<Value>>>,
     /// Each window's own state (`win`), by id: the same across loads, as
     /// the host bound it when the window opened.
     states: RefCell<HashMap<String, WindowState>>,
@@ -181,7 +178,6 @@ impl Windows {
             first_errors: RefCell::default(),
             content: RefCell::default(),
             list: runtime.signal(Vec::new()),
-            plugin_opens: RefCell::default(),
             states: RefCell::default(),
         }
     }
@@ -199,18 +195,8 @@ impl Windows {
             .borrow_mut()
             .retain(|id, _| list.iter().any(|w| &w.id == id));
     }
-    /// Whether a plugin has a window open, followed where read reactively.
-    pub fn plugin_window_open(&self) -> bool {
-        self.plugin_opens.borrow().iter().any(|open| {
-            open.with(|value| match value {
-                Value::List(items) => !items.is_empty(),
-                other => other.truthy(),
-            })
-        })
-    }
     /// A load begins: what it declares replaces what is published.
     pub fn begin(&self) {
-        self.plugin_opens.borrow_mut().clear();
         self.pending.borrow_mut().clear();
         self.pending_groups.borrow_mut().clear();
     }
@@ -688,11 +674,8 @@ pub(crate) fn install(
         })?,
     )?;
     let window = lua.create_table()?;
-    // The app's own window's title bar: the app's, not a plugin's to read
-    // or to move.
-    let plugin =
-        crate::node::env(lua).is_ok_and(|env| matches!(*env.grants, crate::Grants::Only(_)));
-    if !plugin {
+    // The window's title bar.
+    {
         window.set(
             "titlebar_area",
             State::new(shared.state(TITLEBAR_AREA, Value::Nil)),
@@ -732,9 +715,7 @@ pub(crate) fn install(
     }
     let meta = lua.create_table()?;
     // `zoom` and `zoomable` made as a script first reads them: a script that
-    // never does makes neither. A plugin reads the size of the window it
-    // draws in (a picture fitted to it), and nothing else here: the rest
-    // is the app's.
+    // never does makes neither.
     let shared = shared.clone();
     meta.set(
         "__index",
@@ -742,7 +723,6 @@ pub(crate) fn install(
             let name = key.as_string().map(|key| key.to_string_lossy());
             let state = match name.as_deref() {
                 Some("size") => None,
-                _ if plugin => return Ok(mlua::Value::Nil),
                 Some("zoom") => Some(shared.state(ZOOM, Value::Num(1.))),
                 Some("zoomable") => Some(shared.state(ZOOMABLE, Value::Bool(true))),
                 Some("visible") => Some(shared.state(VISIBLE, Value::Bool(true))),
@@ -778,18 +758,13 @@ pub(crate) fn install(
     meta.set(
         "__call",
         lua.create_function(move |lua, (_, table): (Table, Table)| {
-            crate::node::env(lua)?.may(crate::Capability::Windows, "ui.window")?;
             crate::reloads::per_load(lua, "ui.window");
             let id: String = table
                 .get::<Option<String>>("id")?
                 .ok_or_else(|| mlua::Error::runtime("ui.window needs an `id`"))?;
-            crate::rules::guard(lua, crate::GuardKind::Window, &id)?;
             let what = |field: &str| format!("ui.window `{id}`'s `{field}`");
             let open = expect_state(&table.get::<mlua::Value>("open")?, &what("open"))?;
             let runtime = crate::node::env(lua)?.runtime.clone();
-            if matches!(&*crate::node::env(lua)?.grants, crate::Grants::Only(_)) {
-                windows.plugin_opens.borrow_mut().push(open.clone());
-            }
             let (window, node) =
                 window_of(&table, id, open, true, Some((lua, &windows)), &runtime)?;
             let mut pending = windows.pending.borrow_mut();
@@ -812,7 +787,6 @@ pub(crate) fn install(
         lua.create_function(
             move |lua, (list, build, options): (mlua::Value, Function, Option<Table>)| {
                 let env = crate::node::env(lua)?;
-                env.may(crate::Capability::Windows, "ui.windows")?;
                 let list = crate::node::state_of(&list).ok_or_else(|| {
                     mlua::Error::runtime("ui.windows' list must be a ui.state of items")
                 })?;
@@ -820,9 +794,6 @@ pub(crate) fn install(
                     Some(options) => (options.get("key")?, options.get("on_close")?),
                     None => (None, None),
                 };
-                if matches!(&*env.grants, crate::Grants::Only(_)) {
-                    groups.plugin_opens.borrow_mut().push(list.clone());
-                }
                 groups.pending_groups.borrow_mut().push(Group {
                     list,
                     build,

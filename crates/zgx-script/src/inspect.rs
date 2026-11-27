@@ -824,7 +824,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
                                                  pacing (repeat: runs and their spread; every: ms apart)
   command id                                     run a ui.command
   errors                                         script error, type errors, lint, layout warnings
-  contributions                                  each plugin's targets: where, live matches, error
+  contributions                                  each script's targets: where, live matches, error
   elements                                       named elements by the context they read (provide)
   lint                                           zgx lint over the app's scripts, file:line
   frames  [n=10] [runs=5] [all] [since] [until] [summary] [keep]
@@ -1494,7 +1494,7 @@ impl Session {
                                 .map_or(String::new(), |e| format!("  error: {e}"));
                             format!(
                                 "{} {} {}: {} matching{error}",
-                                r.plugin, r.place, r.target, r.matches
+                                r.script, r.place, r.target, r.matches
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1505,7 +1505,7 @@ impl Session {
                         .into_iter()
                         .map(|r| {
                             Value::record([
-                                ("plugin", Value::Str(r.plugin.into())),
+                                ("script", Value::Str(r.script.into())),
                                 ("target", Value::Str(r.target.into())),
                                 ("place", Value::Str(r.place.into())),
                                 ("matches", Value::Num(r.matches as f64)),

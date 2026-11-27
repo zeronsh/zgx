@@ -1,9 +1,10 @@
-//! Plugin targets by class and inside other elements (`.class`, `a >> b`),
-//! matched as the interface is built: a target matching several elements
-//! contributes at each, and a chain only inside its ancestors.
+//! Targets of scripts beside the root by class and inside other elements
+//! (`.class`, `a >> b`), matched as the interface is built: a target
+//! matching several elements contributes at each, and a chain only inside
+//! its ancestors.
 mod common;
 use common::Harness;
-use zgx_script::{Capability, Plugin, ScriptHost};
+use zgx_script::{Script, ScriptHost};
 
 fn with(test: &str, app: &'static str, code: &str) -> Harness {
     let dir = common::temp_dir(&format!("targets-{test}"));
@@ -12,11 +13,7 @@ fn with(test: &str, app: &'static str, code: &str) -> Harness {
     std::fs::write(&entry, code).unwrap();
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", app);
-        host.set_plugins(vec![Plugin {
-            name: "marks".into(),
-            entry,
-            grants: vec![Capability::Override("*".into())],
-        }]);
+        host.set_scripts(vec![Script::file("marks", entry)]);
         host
     })
 }

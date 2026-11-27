@@ -1,8 +1,8 @@
-//! What plugins can target in an app (`ui.contribute { target = … }`): the
+//! What scripts can target in an app (`ui.contribute { target = … }`): the
 //! `id`s and `hook` names its scripts declare, read from their tokens as
 //! the rest of the lint reads them.
 //!
-//! `zgx types` names them (`HookName`, `HookTarget`) so a plugin's checker
+//! `zgx types` names them (`HookName`, `HookTarget`) so a script's checker
 //! completes a target and reports a typo, and the `unknown-target` lint
 //! reports a `#id` or `hook:name` target nothing declares: for an app past
 //! luau-lsp's union limit, and for scripts nobody type-checks. Only literal
@@ -22,7 +22,7 @@ pub(crate) struct Targets {
     pub(crate) classes: BTreeSet<String>,
 }
 impl Targets {
-    /// As a plugin writes them: `#id` and `hook:name`, sorted.
+    /// As a script writes them: `#id` and `hook:name`, sorted.
     pub(crate) fn written(&self) -> Vec<String> {
         let ids = self.ids.iter().map(|id| format!("#{id}"));
         let hooks = self.hooks.iter().map(|hook| format!("hook:{hook}"));

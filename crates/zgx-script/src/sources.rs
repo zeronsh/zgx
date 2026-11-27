@@ -10,7 +10,7 @@
 //! whose contents changed (every module still runs again), and a watcher
 //! woken for files whose bytes are what is loaded (an editor saving the same
 //! text, a checkout touching times) reloads nothing. Another user (a package
-//! lent to each plugin's VM) calls [`compiled`] for each of its files and keeps
+//! lent to each script's VM) calls [`compiled`] for each of its files and keeps
 //! what it returns while it loads them.
 //!
 //! The bytecode is what loading the text makes, compiled here from the text,

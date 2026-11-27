@@ -1,16 +1,15 @@
 //! A Luau app's `ui.fetch` through the page's `fetch` (`install_fetcher`),
 //! in a headless browser and with no server: `data:` and `blob:` URLs for
-//! bytes, a policy that refuses with the URL it was asked for to show how
-//! a relative URL resolved, a name that doesn't resolve for a network
+//! bytes, a page `fetch` that refuses with the URL it was asked for to show
+//! how a relative URL resolved, a name that doesn't resolve for a network
 //! failure, and a cancel that aborts the request and leaves no error on
 //! the page.
 #![cfg(target_arch = "wasm32")]
 
-use std::sync::{Arc, Mutex};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 use zgx::reactive::Runtime;
-use zgx_script::{FetchPolicy, ScriptHost, Url};
+use zgx_script::ScriptHost;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -105,13 +104,17 @@ async fn a_blob_url_comes_back_whole() {
     assert_eq!(settled(&app).await, "200 bytes");
 }
 
-/// Refuses every URL, saying which: how a relative one resolved.
-struct Says(Arc<Mutex<Vec<String>>>);
-impl FetchPolicy for Says {
-    fn url(&self, _caller: Option<&str>, url: &Url) -> Result<(), String> {
-        self.0.lock().unwrap().push(url.as_str().to_owned());
-        Err(format!("asked for {}", url.as_str()))
-    }
+/// The page's `fetch` swapped for one that refuses every URL, saying which:
+/// how a relative one resolved. Returns what puts the page's back.
+fn refusing_fetch() -> js_sys::Function {
+    js_sys::Function::new_no_args(
+        "const real = globalThis.fetch;
+         globalThis.fetch = (url) => Promise.reject(new Error('asked for ' + url));
+         return () => { globalThis.fetch = real; };",
+    )
+    .call0(&wasm_bindgen::JsValue::NULL)
+    .unwrap()
+    .unchecked_into()
 }
 
 /// Takes the test's `<base>` away: the page's base is its own URL again.
@@ -138,27 +141,15 @@ fn base(href: &str) {
 
 #[wasm_bindgen_test]
 async fn a_relative_url_resolves_against_the_base_it_was_installed_with() {
+    let restore = refusing_fetch();
     base("https://first.invalid/app/");
-    let asked = Arc::new(Mutex::new(Vec::new()));
     let runtime = Runtime::new();
     let script = ScriptHost::inline(&runtime, "app.luau", app_source("sounds/click.wav"));
-    script.fetch_policy(Says(asked.clone()));
     zgx_dom::install_fetcher(&script);
     // The page's base moves after (back to the page's own URL), before
     // anything mounts: the app's doesn't.
     no_base();
     let app = mount(&runtime, script);
-    for _ in 0..400 {
-        if !asked.lock().unwrap().is_empty() {
-            break;
-        }
-        tick().await;
-    }
-    assert_eq!(
-        asked.lock().unwrap().first().map(String::as_str),
-        Some("https://first.invalid/app/sounds/click.wav"),
-        "what the policy was asked"
-    );
     let said = settled(&app).await;
     assert!(
         said.contains("asked for https://first.invalid/app/sounds/click.wav"),
@@ -167,7 +158,6 @@ async fn a_relative_url_resolves_against_the_base_it_was_installed_with() {
     // A base the host gives wins over the page's.
     let runtime = Runtime::new();
     let script = ScriptHost::inline(&runtime, "app.luau", app_source("../up.wav"));
-    script.fetch_policy(Says(asked.clone()));
     zgx_dom::install_fetcher_at(&script, "https://host.invalid/a/b/");
     let app = mount(&runtime, script);
     let said = settled(&app).await;
@@ -175,6 +165,7 @@ async fn a_relative_url_resolves_against_the_base_it_was_installed_with() {
         said.contains("asked for https://host.invalid/a/up.wav"),
         "{said}"
     );
+    restore.call0(&wasm_bindgen::JsValue::NULL).unwrap();
 }
 
 #[wasm_bindgen_test]

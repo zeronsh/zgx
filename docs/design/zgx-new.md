@@ -104,9 +104,9 @@ end)
     `ui.debounced` search, and `ui.each` reorder.
   - **form** (from settings): `ui.form` with validation, dirty tracking,
     submit, revert and a toast, saved to `ui.persist`.
-  - **plugins** (from plugins): `zgx.json`'s `expose` and the plugin's
-    `allow`, a hook target, `plugins/focus` adding beside it, filtering the
-    list and calling the app's `ui.actions` action.
+  - **plugins** (from plugins): `zgx.json`'s `scripts`, a hook target,
+    `plugins/focus` adding beside it, filtering the list and calling the
+    app's `ui.actions` action.
 - **`--i18n`** writes `locales/` and swaps every literal string for
   `ui.t`. Every template has a source variant written that way, since a
   rewrite at scaffold time would be fragile.

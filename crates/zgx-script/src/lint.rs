@@ -71,10 +71,14 @@
 //!   (`lint_app`): one may declare what another uses.
 //! - `unknown-target`: a `ui.contribute` or `ui.filter` target `"#id"` or `"hook:name"`
 //!   that no script declares with a literal `id` or `hook` (`"#sav"`: did
-//!   you mean `#save`?). Read across the app's and its plugins' scripts as
+//!   you mean `#save`?). Read across all the app's scripts as
 //!   `unknown-token` is; for an app past luau-lsp's union limit (where
-//!   `zgx types` leaves `target` a string) and for plugins nobody
+//!   `zgx types` leaves `target` a string) and for scripts nobody
 //!   type-checks. A selector (`ui.selector(…)`) is not checked.
+//! - `removed-api`: `ui.decision`, `ui.sealed`, `ui.plugin_page`, and an
+//!   element's `private = …` or `hook = false`, which zgx removed: every script
+//!   reaches every element. The finding names what to use instead, if
+//!   anything.
 //! - `unknown-route`: a literal route name given to a router's `navigate`,
 //!   `replace` or `is`, or a case of its `view`, that no literal
 //!   `ui.router { routes = … }` declares (`"thraed"`: did you mean
@@ -235,6 +239,10 @@ pub const RULES: &[(&str, &str)] = &[
         "unknown-route",
         "a route name given to a router's navigate, replace, is or view that no ui.router declares",
     ),
+    (
+        "removed-api",
+        "an API zgx removed: ui.decision, ui.sealed, ui.plugin_page, `private`, `hook = false`",
+    ),
     #[cfg(feature = "audio")]
     (
         "audio-load-in-builder",
@@ -261,6 +269,30 @@ pub const RULES: &[(&str, &str)] = &[
         "bus:add_effect or bus:duck in a component or row adds one for every instance",
     ),
 ];
+
+/// What an element's `private` says now: zgx removed it.
+pub(crate) const GONE_PRIVATE: &str =
+    "`private` is gone, with no replacement: every script reaches every element; leave it out";
+/// What an element's `hook = false` says now: zgx removed it.
+pub(crate) const GONE_HOOK_FALSE: &str =
+    "`hook = false` is gone, with no replacement: every script reaches every element; leave it out";
+/// What `ui.<name>` says, if zgx removed it.
+fn gone_api(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "decision" => {
+            "`ui.decision` is gone: every script reaches every element. Use your own \
+             component; a host draws over every script with `top_layer`"
+        }
+        "sealed" => {
+            "`ui.sealed` is gone: every script reaches every element. Use your own component"
+        }
+        "plugin_page" => {
+            "`ui.plugin_page` is gone: give each script a slot of your own (`ui.slot(name)`), \
+             which it fills with `ui.contribute(name, node)`"
+        }
+        _ => return None,
+    })
+}
 
 /// `ui.*` calls that do not build interface (`ui.state`, `ui.set`,
 /// `ui.effect`, a file read in a handler…); the rest do, and values given to
@@ -1794,6 +1826,27 @@ impl Linter<'_> {
                 "window-option",
                 format!("`ui.window` has no option `{key}`: it takes `{known}`."),
             );
+        }
+        // `ui.decision`, `ui.sealed`, `ui.plugin_page`: gone.
+        if self.is(at, "ui")
+            && self.is(at + 1, ".")
+            && !self.is(at.wrapping_sub(1), ".")
+            && let Some(name) = self.name(at + 2)
+            && let Some(message) = gone_api(name)
+        {
+            self.report(at, "removed-api", message.to_owned());
+        }
+        // An element's `private = …` or `hook = false`: gone.
+        if let Some(frame) = stack.last()
+            && frame.open == Open::Brace
+            && self.is(at + 1, "=")
+            && !self.is(at.wrapping_sub(1), ".")
+        {
+            if self.is(at, "private") {
+                self.report(at, "removed-api", GONE_PRIVATE.to_owned());
+            } else if self.is(at, "hook") && self.is(at + 2, "false") {
+                self.report(at, "removed-api", GONE_HOOK_FALSE.to_owned());
+            }
         }
         // `ui.text { size = 14 }`: a box's size, on what has none to set.
         if let Some(frame) = stack.last()

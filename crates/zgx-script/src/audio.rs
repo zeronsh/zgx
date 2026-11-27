@@ -30,8 +30,6 @@ use zgx_audio::{Audio, Play, Ramp, Sound, Source, Time, Voice};
 /// How long a play asked before its sound is ready may wait for it: past
 /// it, a click would come long after its button, so it's dropped.
 const LATE: Duration = Duration::from_millis(250);
-/// Voices a plugin plays at once.
-const PLUGIN_VOICES: usize = 8;
 /// A followed value's glide to each new value: long enough not to click.
 const GLIDE: f64 = 0.010;
 /// Decoded bytes of sounds no script holds that the app's cache keeps
@@ -62,14 +60,17 @@ pub(crate) struct AudioHost {
     epoch: Cell<u64>,
     /// Voices playing, by id.
     voices: RefCell<HashMap<u64, Live>>,
+    /// How many voices each script may play at once, where its host set it
+    /// (`Limits::voices`).
+    caps: RefCell<HashMap<Rc<str>, usize>>,
     /// What follows state into a bus (its gain, mute or solo), by bus and
     /// what: the load that set it, and the follower.
     buses: RefCell<Vec<(BusParam, u64, Follow)>>,
     /// The app's sounds by path, with the file's time when read: kept
-    /// across reloads while a script holds them (`trim`). A plugin's are
+    /// across reloads while a script holds them (`trim`). A metered script's are
     /// its own, counted against its memory, and go with it.
     sounds: RefCell<HashMap<PathBuf, Rc<SoundSlot>>>,
-    /// Every sound made, the app's and plugins', for the plays waiting on
+    /// Every sound made, every script's, for the plays waiting on
     /// them a reload stops.
     slots: RefCell<Vec<Weak<SoundSlot>>>,
     /// The threads that decode sounds: made with the first, parked while
@@ -90,12 +91,7 @@ pub(crate) struct AudioHost {
     /// The host's transport and policy (the browser's, where there are no
     /// files to read).
     #[cfg(target_arch = "wasm32")]
-    fetch: RefCell<
-        Option<(
-            crate::calls::SharedFetcher,
-            crate::fetch_policy::SharedPolicy,
-        )>,
-    >,
+    fetch: RefCell<Option<crate::calls::SharedFetcher>>,
 }
 
 /// A bus's name and what of it is followed (`"gain"`, `"mute"`, `"solo"`).
@@ -108,8 +104,8 @@ struct Live {
     playing: Signal<Value>,
     /// Its gain's, pan's and pitch's followers.
     follows: [Option<Follow>; 3],
-    /// The plugin that played it.
-    plugin: Option<Rc<str>>,
+    /// The script that played it.
+    script: Option<Rc<str>>,
 }
 
 impl AudioHost {
@@ -125,6 +121,7 @@ impl AudioHost {
             uses: Cell::new(0),
             epoch: Cell::new(0),
             voices: RefCell::default(),
+            caps: RefCell::default(),
             buses: RefCell::default(),
             sounds: RefCell::default(),
             slots: RefCell::default(),
@@ -140,23 +137,15 @@ impl AudioHost {
         })
     }
 
-    /// The host's transport and policy, which a sound's file is fetched
-    /// through in the browser.
+    /// The host's transport, which a sound's file is fetched through in the
+    /// browser.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn set_fetch(
-        &self,
-        fetcher: crate::calls::SharedFetcher,
-        policy: crate::fetch_policy::SharedPolicy,
-    ) {
-        *self.fetch.borrow_mut() = Some((fetcher, policy));
+    pub(crate) fn set_fetch(&self, fetcher: crate::calls::SharedFetcher) {
+        *self.fetch.borrow_mut() = Some(fetcher);
     }
 
     /// `path`'s bytes, fetched (a relative path against the app's base, as
-    /// the host's transport resolves it) for `caller` (a plugin, or the app)
-    /// under the app's policy. A plugin's path was confined to its
-    /// directory before it got here, as a file read is on the desktop:
-    /// asking for audio needs no fetch grant to reach the plugin's own files,
-    /// and reaches nothing else.
+    /// the host's transport resolves it) for script `caller`.
     #[cfg(target_arch = "wasm32")]
     fn fetch_bytes(
         &self,
@@ -165,10 +154,10 @@ impl AudioHost {
     ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + 'static {
         let url = path.to_string_lossy().replace('\\', "/");
         let started = match &*self.fetch.borrow() {
-            Some((fetcher, policy)) => match fetcher.borrow().clone() {
+            Some(fetcher) => match fetcher.borrow().clone() {
                 Some(fetch) => {
                     let body = crate::calls::Body::kept();
-                    body.asked_as(caller, policy);
+                    body.asked_as(caller);
                     let request = crate::Request {
                         url: url.clone(),
                         method: "GET".into(),
@@ -390,22 +379,23 @@ impl AudioHost {
         self.sounds.borrow().len()
     }
 
-    fn plugin_voices(&self, plugin: &str) -> usize {
-        self.voices
-            .borrow()
-            .values()
-            .filter(|live| live.plugin.as_deref() == Some(plugin))
-            .count()
+    /// Script `script` plays at most `voices` at once (none: no cap).
+    fn set_voices(&self, script: &Rc<str>, voices: Option<usize>) {
+        let mut caps = self.caps.borrow_mut();
+        match voices {
+            Some(voices) => caps.insert(script.clone(), voices),
+            None => caps.remove(script),
+        };
     }
-
-    /// A bus by name, a plugin's own made the first time it plays.
-    fn plugin_bus(&self, audio: &Audio, plugin: &str) -> mlua::Result<zgx_audio::Bus> {
-        let name = format!("plugin:{plugin}");
-        if let Some(bus) = audio.bus(&name) {
-            return Ok(bus);
-        }
-        let ui = audio.bus("ui").expect("the ui bus is made with the engine");
-        audio.add_bus(&name, &ui).map_err(|e| fail("audio.play", e))
+    /// Whether `script` plays as many voices as it may.
+    fn full(&self, script: &str) -> bool {
+        let Some(&cap) = self.caps.borrow().get(script) else {
+            return false;
+        };
+        let playing = (self.voices.borrow().values())
+            .filter(|live| live.script.as_deref() == Some(script))
+            .count();
+        playing >= cap
     }
 
     /// Starts `sound` as `spec` says, into `cell`.
@@ -464,7 +454,7 @@ impl AudioHost {
                 voice,
                 playing: cell.playing.clone(),
                 follows,
-                plugin: spec.plugin,
+                script: spec.script,
             },
         );
     }
@@ -845,7 +835,8 @@ struct Spec {
     fade_in: Option<Ramp>,
     /// The load it belongs to.
     epoch: u64,
-    plugin: Option<Rc<str>>,
+    /// The script that plays it.
+    script: Option<Rc<str>>,
 }
 
 /// `audio.play`'s and `audio.music`'s options. `default_bus` names the bus
@@ -856,30 +847,24 @@ fn spec(
     audio: &Audio,
     opts: Option<&Table>,
     default_bus: &str,
-    plugin: Option<&Rc<str>>,
+    script: &Rc<str>,
     call: &str,
 ) -> mlua::Result<Spec> {
     let get = |key: &str| -> mlua::Result<mlua::Value> {
         opts.map_or(Ok(mlua::Value::Nil), |t| t.get(key))
     };
-    let bus = match (get("bus")?, plugin) {
-        (mlua::Value::Nil, Some(plugin)) => host.plugin_bus(audio, plugin)?,
-        (_, Some(_)) => {
-            return Err(mlua::Error::runtime(format!(
-                "{call}: a plugin plays into its own bus alone"
-            )));
-        }
-        (mlua::Value::Nil, None) => audio
+    let bus = match get("bus")? {
+        mlua::Value::Nil => audio
             .bus(default_bus)
             .expect("the engine makes its default buses"),
-        (mlua::Value::String(name), None) => {
+        mlua::Value::String(name) => {
             let name = name.to_string_lossy();
             audio
                 .bus(&name)
                 .ok_or_else(|| mlua::Error::runtime(format!("{call}: no bus named {name:?}")))?
         }
-        (mlua::Value::UserData(ud), None) if ud.is::<BusUd>() => ud.borrow::<BusUd>()?.bus.clone(),
-        (other, None) => {
+        mlua::Value::UserData(ud) if ud.is::<BusUd>() => ud.borrow::<BusUd>()?.bus.clone(),
+        other => {
             return Err(mlua::Error::runtime(format!(
                 "{call}: `bus` is a bus's name or a bus, not {}",
                 other.type_name()
@@ -907,7 +892,7 @@ fn spec(
             value => Some(fade(lua, value)?),
         },
         epoch: host.epoch.get(),
-        plugin: plugin.cloned(),
+        script: Some(script.clone()),
     })
 }
 
@@ -1018,13 +1003,14 @@ pub(crate) struct SoundSlot {
     loading: Cell<bool>,
     /// Plays asked for before it was ready.
     waiting: RefCell<Vec<Waiting>>,
-    /// A plugin's: what its decoded samples are counted against.
+    /// A script with a memory limit's: what its decoded samples are counted
+    /// against.
     meter: Option<Rc<crate::meter::Meter>>,
     /// When a script last asked for it, on the host's count: what `trim`
     /// keeps the most recent of.
     used: Cell<u64>,
-    /// The plugin that loaded it, if one did: who a fetch of its file is
-    /// for, in the browser.
+    /// The script that loaded it: who a fetch of its file is for, in the
+    /// browser.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     caller: Option<Rc<str>>,
 }
@@ -1092,7 +1078,7 @@ impl SoundSlot {
         let Some(host) = self.host.upgrade() else {
             return;
         };
-        // A plugin's samples count against its memory, for as long as it
+        // A metered script's samples count against its memory, for as long as it
         // holds the sound.
         let loaded = match (loaded, &self.meter) {
             (Ok(sound), Some(meter)) => {
@@ -1376,8 +1362,6 @@ pub(crate) struct BusUd {
     host: Rc<AudioHost>,
     bus: zgx_audio::Bus,
     name: String,
-    /// A plugin's own bus: its effects count against its limits.
-    plugin: Option<Rc<str>>,
 }
 impl BusUd {
     /// Follows `value` into the bus with `on`, replacing what followed it
@@ -1500,7 +1484,6 @@ impl BusUd {
                     host: self.host.clone(),
                     bus: self.bus.at(time(&audio, seconds)),
                     name: self.name.clone(),
-                    plugin: self.plugin.clone(),
                 });
             }
             #[cfg(feature = "audio-effects")]
@@ -1512,42 +1495,37 @@ impl BusUd {
     }
 }
 
-/// Makes the `audio` global: a plugin's (`plugin`, its name) plays into a
-/// bus of its own under `ui`, at most `PLUGIN_VOICES` at once, and reaches
-/// no other bus, the clock's `prewarm`, or the system setting.
+/// Makes script `script`'s `audio` global, its voices at most `voices` at
+/// once where its host set that.
 pub(crate) fn install(
     lua: &Lua,
     globals: &Table,
     host: Rc<AudioHost>,
-    plugin: Option<Rc<str>>,
+    script: Rc<str>,
+    voices: Option<usize>,
 ) -> mlua::Result<()> {
+    host.set_voices(&script, voices);
     let audio = lua.create_table()?;
     // One closure for every function, each a branch of `call`: mlua's glue
     // is made once, not once a function.
-    let names = match plugin {
-        None => NAMES,
-        Some(_) => PLUGIN_NAMES,
-    };
-    for &name in names {
-        let (host, plugin) = (host.clone(), plugin.clone());
+    for &name in NAMES {
+        let (host, script) = (host.clone(), script.clone());
         audio.set(
             name,
             lua.create_function(move |lua, args: MultiValue| {
-                call(lua, &host, &plugin, name, args)
+                call(lua, &host, &script, name, args)
             })?,
         )?;
     }
     #[cfg(feature = "audio-effects")]
     effects::install(lua, &audio)?;
-    if plugin.is_none() {
-        audio.set(
-            "ui_sounds_enabled",
-            ReadState(
-                State::new(host.ui_sounds.clone()),
-                "ui_sounds_enabled".into(),
-            ),
-        )?;
-    }
+    audio.set(
+        "ui_sounds_enabled",
+        ReadState(
+            State::new(host.ui_sounds.clone()),
+            "ui_sounds_enabled".into(),
+        ),
+    )?;
     audio.set_readonly(true);
     globals.raw_set("audio", audio)
 }
@@ -1565,8 +1543,7 @@ fn unpack<T: mlua::FromLuaMulti>(
         .map_err(|error| mlua::Error::runtime(format!("{kind}{name}: bad arguments ({error})")))
 }
 
-/// `audio`'s functions: `music` with `audio-streams`; a plugin's want the
-/// app's buses, the clock's prewarm and the system setting.
+/// `audio`'s functions: `music` with `audio-streams`.
 const NAMES: &[&str] = &[
     "sound",
     "play",
@@ -1579,30 +1556,15 @@ const NAMES: &[&str] = &[
     "add_bus",
     "prewarm",
 ];
-const PLUGIN_NAMES: &[&str] = &[
-    "sound",
-    "play",
-    "choose",
-    #[cfg(feature = "audio-streams")]
-    "music",
-    "now",
-    "stats",
-    "bus",
-];
 
 /// `audio.<name>(args)`.
 fn call(
     lua: &Lua,
     host: &Rc<AudioHost>,
-    plugin: &Option<Rc<str>>,
+    script: &Rc<str>,
     name: &str,
     args: MultiValue,
 ) -> mlua::Result<MultiValue> {
-    // A plugin plays sound only if its host grants it (`"audio"`); what it
-    // can't reach without `audio.*` (voices, its bus) follows from that.
-    if plugin.is_some() {
-        crate::node::env(lua)?.may(crate::Capability::Audio, &format!("audio.{name}"))?;
-    }
     match name {
         "choose" => {
             let choose: mlua::Function = unpack(lua, args, "audio.", name)?;
@@ -1611,15 +1573,17 @@ fn call(
         "sound" => {
             let (src, opts): (String, Option<Table>) = unpack(lua, args, "audio.", name)?;
             let engine = host.engine()?;
-            let path = resolve(lua, &src, plugin.is_some(), "audio.sound")?;
+            let path = resolve(lua, &src)?;
             // When its file was written, so a changed one loads again. No
             // files in the browser: fetched, it's kept as it came.
             #[cfg(not(target_arch = "wasm32"))]
             let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             #[cfg(target_arch = "wasm32")]
             let stamp: Option<SystemTime> = None;
-            // The app's are shared and kept; a plugin's are its own.
-            let cached = match plugin {
+            // Shared and kept, but a script with a memory limit's are its own,
+            // counted against it.
+            let meter = crate::node::env(lua)?.meter.clone();
+            let cached = match meter {
                 Some(_) => None,
                 None => host
                     .sounds
@@ -1632,10 +1596,6 @@ fn call(
             let slot = match cached {
                 Some(slot) => slot,
                 None => {
-                    let meter = match plugin {
-                        Some(_) => crate::node::env(lua)?.meter.clone(),
-                        None => None,
-                    };
                     let slot = Rc::new(SoundSlot {
                         host: Rc::downgrade(host),
                         path: path.clone(),
@@ -1645,12 +1605,12 @@ fn call(
                         error: host.runtime.signal(Value::Nil),
                         loading: Cell::new(false),
                         waiting: RefCell::default(),
-                        meter,
                         used: Cell::new(0),
-                        caller: plugin.clone(),
+                        caller: Some(script.clone()),
+                        meter,
                     });
                     host.slots.borrow_mut().push(Rc::downgrade(&slot));
-                    if plugin.is_none() {
+                    if slot.meter.is_none() {
                         host.sounds.borrow_mut().insert(path, slot.clone());
                         host.trim(UNHELD_BYTES);
                     }
@@ -1684,9 +1644,7 @@ fn call(
                         "audio.play takes a sound (audio.sound's)",
                     ));
                 }
-                (_, mlua::Value::String(src)) => {
-                    Err(resolve(lua, &src.to_str()?, plugin.is_some(), call)?)
-                }
+                (_, mlua::Value::String(src)) => Err(resolve(lua, &src.to_str()?)?),
                 (_, other) => {
                     return Err(mlua::Error::runtime(format!(
                         "audio.music takes a file's path, not {}",
@@ -1695,11 +1653,9 @@ fn call(
                 }
             };
             // A stream is a voice too (and a window, a ring and decoding):
-            // a plugin's count among its voices. Past them, a voice that
+            // a script's count among its voices. Past them, a voice that
             // never plays.
-            if let Some(plugin) = plugin
-                && host.plugin_voices(plugin) >= PLUGIN_VOICES
-            {
+            if host.full(script) {
                 return lua.pack_multi(VoiceUd {
                     cell: Rc::new(VoiceCell {
                         voice: RefCell::default(),
@@ -1711,15 +1667,7 @@ fn call(
                 });
             }
             let default_bus = if name == "play" { "world" } else { "music" };
-            let spec = spec(
-                lua,
-                host,
-                &audio,
-                opts.as_ref(),
-                default_bus,
-                plugin.as_ref(),
-                call,
-            )?;
+            let spec = spec(lua, host, &audio, opts.as_ref(), default_bus, script, call)?;
             let cell = match source {
                 Ok(slot) => slot.play(host, &audio, spec),
                 // `audio.music`: registered with `audio-streams` alone.
@@ -1759,7 +1707,7 @@ fn call(
                     // then, as a sound still loading is.
                     #[cfg(target_arch = "wasm32")]
                     {
-                        let fetched = host.fetch_bytes(&path, plugin.clone());
+                        let fetched = host.fetch_bytes(&path, Some(script.clone()));
                         let (owner, cell) = (host.clone(), cell.clone());
                         host.spawn(async move {
                             let streamed = match fetched.await {
@@ -1812,26 +1760,17 @@ fn call(
             t.raw_set("peak", stats.peak)?;
             lua.pack_multi(t)
         }
-        // `audio.bus(name)`; a plugin's `audio.bus()` is its own, and the
-        // only one it reaches.
+        // `audio.bus(name)`.
         "bus" => {
             let name: Option<String> = unpack(lua, args, "audio.", name)?;
             let audio = host.engine()?;
-            let bus = match (plugin, name) {
-                (Some(plugin), None) => Some(BusUd {
-                    host: host.clone(),
-                    bus: host.plugin_bus(&audio, plugin)?,
-                    name: format!("plugin:{plugin}"),
-                    plugin: Some(plugin.clone()),
-                }),
-                (Some(_), Some(_)) => None,
-                (None, Some(name)) => audio.bus(&name).map(|bus| BusUd {
+            let bus = match name {
+                Some(name) => audio.bus(&name).map(|bus| BusUd {
                     host: host.clone(),
                     bus,
                     name,
-                    plugin: None,
                 }),
-                (None, None) => {
+                None => {
                     return Err(mlua::Error::runtime(
                         "audio.bus names a bus: \"master\", \"ui\", \"music\", \"world\" or one \
                          added",
@@ -1862,7 +1801,6 @@ fn call(
                 host: host.clone(),
                 bus,
                 name,
-                plugin: None,
             })
         }
         _ => {
@@ -1872,32 +1810,15 @@ fn call(
     }
 }
 
-/// `src` as a path: relative to the script, as images are. A plugin's
-/// stays in its directory, as its images and modules do (`within`: by name
-/// and by where a link leads), or a file its host's grant let it pick; a
-/// refusal says nothing of what is there.
-fn resolve(lua: &Lua, src: &str, plugin: bool, call: &str) -> mlua::Result<PathBuf> {
+/// `src` as a path: relative to the script, as images are.
+fn resolve(lua: &Lua, src: &str) -> mlua::Result<PathBuf> {
     let env = crate::node::env(lua)?;
     let base = env.vm.upgrade().and_then(|vm| vm.base.clone());
     let path = PathBuf::from(src);
-    if !plugin {
-        return Ok(match base {
-            Some(base) if !path.is_absolute() => base.join(path),
-            _ => path,
-        });
-    }
-    if path.is_absolute() && env.picked.borrow().contains(&path) {
-        return Ok(path);
-    }
-    let root = base.map(|base| base.canonicalize().unwrap_or(base));
-    match root {
-        Some(root) if crate::within(&root, &crate::normalize(&root.join(&path))) => {
-            Ok(crate::normalize(&root.join(path)))
-        }
-        _ => Err(mlua::Error::runtime(format!(
-            "{call}: a plugin's sounds come from its directory or below"
-        ))),
-    }
+    Ok(match base {
+        Some(base) if !path.is_absolute() => base.join(path),
+        _ => path,
+    })
 }
 
 /// `sound =` on a control: what plays as it's activated.
@@ -1974,24 +1895,12 @@ pub(crate) fn activate(prop: &SoundProp, vm: &Vm) {
     let Ok(audio) = host.engine() else {
         return;
     };
-    // A plugin's control plays into the plugin's own bus, among its voices,
-    // as its `audio.play` does; the app's on `ui`.
-    let plugin = vm
-        .lua
-        .app_data_ref::<crate::node::Env>()
-        .filter(|env| matches!(*env.grants, crate::Grants::Only(_)))
-        .map(|env| env.owner.clone());
-    let bus = match &plugin {
-        Some(plugin) if host.plugin_voices(plugin) >= PLUGIN_VOICES => return,
-        Some(plugin) => match host.plugin_bus(&audio, plugin) {
-            Ok(bus) => bus,
-            Err(error) => {
-                vm.report(error);
-                return;
-            }
-        },
-        None => audio.bus("ui").expect("the ui bus is made with the engine"),
-    };
+    // A control plays on `ui`, among its script's voices.
+    let script = crate::script_of(&vm.lua);
+    if script.as_deref().is_some_and(|script| host.full(script)) {
+        return;
+    }
+    let bus = audio.bus("ui").expect("the ui bus is made with the engine");
     let spec = Spec {
         bus,
         gain: Param::Lit(gain),
@@ -2003,7 +1912,7 @@ pub(crate) fn activate(prop: &SoundProp, vm: &Vm) {
         priority: 0,
         fade_in: None,
         epoch: host.epoch.get(),
-        plugin,
+        script,
     };
     slot.play(&host, &audio, spec);
 }

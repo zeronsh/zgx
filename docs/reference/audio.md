@@ -166,9 +166,9 @@ No table or plain function: `sound` is a property every element has, and its typ
 
 `audio.stats()` returns `{ voices, stolen, dropped, late, dry, streams, underruns, running, starts, stops, peak }`: voices playing, voices stolen, plays that never started, plays and commands applied late (zgx-script's dropped late plays among them), times a stream ran dry, streams open, underruns the system reported, whether the output runs, its starts and stops, and the loudest sample sent.
 
-## Plugins
+## Limits
 
-A sandboxed plugin reaches `audio` only if its app grants it `"audio"` (`allow` in `zgx.json`, `Capability::Audio`); without it each `audio.*` call is an error saying so. Granted, its `audio` plays only into a bus of its own (`plugin:<name>`, under `ui`, so the user's setting silences it), `audio.bus()` with no name, with 8 voices at most, its streams (`audio.music`) among them: a ninth's voice never plays. It may put 4 effects on its bus (no `duck`), their buffers (a delay's line, a reverb's) counted against its memory. Its sounds and music come from its directory or below, as its images and modules do (a path out of it, by `..`, an absolute path or a link, is an error that says nothing of what's there), or a file its grants let it pick. A sound's decoded samples count against its memory (`Limits::plugin_memory`): one past it fails to load, with `sound.error` saying so, and its sounds go with it. `sound =` on its controls plays into that bus too, among its 8 voices. `audio.bus(name)` is nil to it; it has no `add_bus`, `prewarm` or `ui_sounds_enabled`, and naming a `bus` in its options is an error.
+Every script reaches all of `audio`, a script beside the root as the root does. A host caps how many sounds a script plays at once with `Limits::voices` (no cap by default), its streams (`audio.music`) among them: past it a play is a voice that never plays. A script whose host set its `Limits::memory` counts its sounds' decoded samples and its effects' buffers (a delay's line, a reverb's) against it.
 
 ## Lint
 

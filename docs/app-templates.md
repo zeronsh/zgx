@@ -21,7 +21,7 @@ The directory must be new or empty. `zgx run` finds the `zgx-run` beside `zgx` o
 | `router` | Notes | [Routes](reference/state.md#routing) and a modal route |
 | `list` | A long list of people | A list paged as it scrolls ([`ui.paged`](reference/state.md#pages-and-debouncing)), search as you type, reorderable favourites |
 | `form` | A profile | [Forms](reference/controls.md#forms) and their validation |
-| `plugins` | Tasks made to be extended | [Plugins from `zgx.json`](plugins.md#plugins-in-a-luau-app-zgxjson): shared state, an action from `ui.actions`, a filtered list, and `plugins/focus` using them |
+| `plugins` | Tasks made to be extended | [Scripts from `zgx.json`](plugins.md#scripts-in-a-luau-app-zgxjson): shared state, an action from `ui.actions`, a filtered list, and `plugins/focus` using them |
 
 ## What it writes
 
@@ -33,7 +33,7 @@ Each template has:
 | `components/` | A component of its own |
 | `theme.luau` | The app's own tokens, read as `ui.tokens.app.*` ([typed tokens](scripting.md#theming)) |
 | `tests/app.test.luau` | Its tests ([testing an app](scripting.md#testing-an-app)) |
-| `zgx.json` | The window's title and size, and in `plugins` what's exposed and allowed |
+| `zgx.json` | The window's title and size; in `plugins`, the scripts it loads beside its own (`scripts`) |
 | `.luaurc` | Strict mode, and an alias for `components/` |
 | `README.md` | How to run and check it |
 | `.github/workflows/` | A GitHub Actions job running `zgx check`, `zgx lint`, `zgx audit` and `zgx test` on pushes to `main` and on pull requests |

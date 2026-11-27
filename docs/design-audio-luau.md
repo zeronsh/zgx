@@ -152,7 +152,7 @@ With an offline engine (`Audio::offline(Config::default())`, its `Offline` held 
 - `voice.playing` turns false after the voice ends, with `take_ended` called by the host's render loop.
 - A play before its sound is ready plays when ready within 250 ms, and is dropped (and counted) after.
 - Hot reload stops the old script's voices and streams with their fades.
-- A plugin's sounds go only to its bus, and a ninth voice is refused.
+- A script's voice past its `Limits::voices` is refused.
 - Every lint rule, with an allow comment.
 
 Plus a probe on the desktop host: an app made with `audio` that plays nothing has the same wakeups over 60 s as one without the feature. zgx-audio's `device_probe idle` row says so for the engine (1 against 1).
@@ -173,7 +173,7 @@ Where the build departs from sections 1 to 7, and why:
 - **The interface-sound setting is read as the engine is made and each time the app comes forward** (macOS's global `com.apple.sound.uiaudio.enabled` through CFPreferences, absent meaning on). No notification is known to be posted when System Settings changes it, and the key's dots make it a key path to `NSUserDefaults`' KVO; the setting can only change while another app is in front. Linux and Windows don't read it yet (on).
 - **Suspend**: winit never suspends a desktop app, and zgx-audio has no pause; nothing is done (as section 2 says).
 - **`audio.add_bus` without a parent is under `master`**; made again with a name that exists (a reload), it returns that bus.
-- **Plugins**: their own bus `plugin:<name>` under `ui`, 8 voices with their streams among them (a ninth's voice never plays), no `bus`, `add_bus`, `prewarm` or `ui_sounds_enabled`, and no `bus` option. Their paths are confined to their directory with `within` (names and links), as images and modules are. A sound's decoded samples are held through the plugin's meter (`Meter::hold_native`) for as long as the plugin holds the sound; a plugin's sounds aren't in the host's cache.
+- **Scripts beside the root** (every script equal, since; this replaced a plugin's own bus and 8 voices) reach all of `audio`, on any bus. `Limits::voices` caps a script's voices, its streams among them (a voice past it never plays); none by default. A metered script's (one with `Limits::memory`) sounds' decoded samples are held through its meter (`Meter::hold_native`) for as long as it holds them, and aren't in the host's cache.
 - **Loading**: sounds decode on a `BackgroundPool` of two threads (parked while idle, 256 loads waiting at most). The app's cache lets go of sounds no script holds after a reload and after the host collects garbage, keeping the most recent 64 MB of them.
 - **Values that aren't finite** (`0 / 0`) are passed over by every follower and binding, which keep the last finite value: a NaN goal is never reached, and a binding would step every frame for good.
 - **`sound3d-no-max`** waits for `ui.sound3d` (A2).
@@ -187,7 +187,7 @@ The mixer's stock effects (zgx-audio's `effects`) on buses, built in `crates/zgx
 - `audio.low_pass`, `high_pass`, `peaking`, `delay`, `reverb` and `compressor` each take a table of parameters by name and answer an `EffectSpec`; `bus:add_effect(spec)` makes the engine's effect (`Bus::add_effect`) with the values each parameter has now, through the type's builders (no command per parameter), and answers an `AudioEffect`. `bus:duck(side, opts)` is `Bus::duck(&side, Duck)`.
 - A parameter given a state or function is followed as a voice's gain is (one `EffectHandle::set` a change, a 10 ms glide); a binding steps on the display's frames (one `set` a frame while it moves, over the frame's interval). Literals ride in the constructor. `effect:set(name, value)` replaces what followed; `effect:fade` takes over from it; `effect:remove` takes it off.
 - Effects are kept per load as voices are: a reload removes those the replaced script added (`EffectHandle::remove`), and the host's going removes all.
-- Plugins reach their own bus as `audio.bus()` (nil for any name), with `PLUGIN_EFFECTS` (4) effects at most and no `duck`. What an effect holds is charged to the plugin's meter (`hold_native`) while it's on: a delay its line (`longest` seconds of stereo), a reverb its eight lines at their largest and 250 ms of pre-delay.
+- What an effect holds is charged to a metered script's meter (`hold_native`) while it's on: a delay its line (`longest` seconds of stereo), a reverb its eight lines at their largest and 250 ms of pre-delay.
 - `voice:crossfade(to, seconds, gain?)`: this voice's `stop_after` and `to`'s `set_gain` along `Curve::EqualPower`, both over `seconds`, taking the gains over from what followed them.
 - Lint: `audio-effect-in-builder`.
 
@@ -203,5 +203,5 @@ A dist build of zgx-run measured by what each part links (unstripped, symbol siz
 - The world plays through the engine its sounds came from, on its `world` bus (`set_audio(&audio, &audio.bus("world"))`), set as the scene is built when any `ui.sound3d` is in it. A zone in a scene without one has no engine to play through and is skipped (said on stderr).
 - A zone's box is in the scene's coordinates, read once: its `position` is its centre, a group's transform isn't applied.
 - The scene's world going (a reload, the scene leaving) stops its sounds; zgx-audio's epoch bookkeeping doesn't track them.
-- Plugins can't use them: a plugin's sound plays on its own bus.
+- Every script may use them.
 - Lint: `sound3d-no-max`.
