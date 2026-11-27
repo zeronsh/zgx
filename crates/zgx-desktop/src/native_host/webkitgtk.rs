@@ -1936,7 +1936,8 @@ impl Page {
                     if let Some(request) = self.challenges.borrow_mut().remove(&challenge) {
                         match credentials {
                             Some((user, password)) => {
-                                // WEBKIT_CREDENTIAL_PERSISTENCE_NONE: for this challenge alone.
+                                // WEBKIT_CREDENTIAL_PERSISTENCE_NONE: stored nowhere
+                                // (libsoup still reuses it for the server this session).
                                 let credential = (api.webkit_credential_new)(
                                     c(&user).as_ptr(),
                                     c(&password).as_ptr(),

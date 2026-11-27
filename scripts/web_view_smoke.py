@@ -729,14 +729,17 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     if any("tls" in message for message, _, _ in session.messages()):
         raise AssertionError("a page loaded past a certificate the app couldn't proceed past")
     checks["certificate error"] = True
-    # Credentials: the app's answer loads the page; a responder dropped
-    # unanswered gets the server's refusal.
-    session.key("ctrl+b")
-    session.wait(lambda: any(m.get("auth") == "ok" for m, _, _ in session.messages()),
-                 "the app's credentials never loaded the page")
+    # Credentials: a responder dropped unanswered gets the server's refusal;
+    # the app's answer loads the page. Dropped first: once answered, WebKit
+    # sends the credentials to that server again for the session unasked.
     session.key("ctrl+n")
     session.wait(lambda: any(m.get("auth") == "refused" for m, _, _ in session.messages()),
                  "a dropped responder didn't leave the server's refusal")
+    if not session.lines("AUTH "):
+        raise AssertionError("the refusal came without the app's handler asked")
+    session.key("ctrl+b")
+    session.wait(lambda: any(m.get("auth") == "ok" for m, _, _ in session.messages()),
+                 "the app's credentials never loaded the page")
     if not any(line.startswith("zgx basic") for line in session.lines("AUTH ")):
         raise AssertionError(f"the challenges heard were {session.lines('AUTH ')!r}")
     checks["credentials"] = True

@@ -215,18 +215,20 @@ def trust_cases(proc, lines, heard):
     wait_for(lambda: any(line.startswith("MESSAGE ") and "refused" in line for line in lines),
              "the server's refusal with no credentials handler", 20)
     assert not heard("AUTH "), "a challenge reached a handler the app never set"
-    send("auth answer")
-    wait_for(lambda: heard("AUTHS answer"), "the answering handler")
-    send(f"load {auth}/answered")
-    wait_for(lambda: any(line.startswith("MESSAGE ") and '"ok"' in line for line in lines),
-             "the app's credentials to load the page", 20)
-    assert heard("AUTH zgx basic"), [line for line in lines if line.startswith("AUTH ")]
+    # Dropped before answered: once answered, an engine may send the
+    # credentials to that server again for the session unasked.
     refusals = sum(line.startswith("MESSAGE ") and "refused" in line for line in lines)
     send("auth drop")
     wait_for(lambda: heard("AUTHS drop"), "the dropping handler")
     send(f"load {auth}/dropped")
     wait_for(lambda: sum(line.startswith("MESSAGE ") and "refused" in line for line in lines) > refusals,
              "a dropped responder to leave the server's refusal", 20)
+    assert heard("AUTH zgx basic"), [line for line in lines if line.startswith("AUTH ")]
+    send("auth answer")
+    wait_for(lambda: heard("AUTHS answer"), "the answering handler")
+    send(f"load {auth}/answered")
+    wait_for(lambda: any(line.startswith("MESSAGE ") and '"ok"' in line for line in lines),
+             "the app's credentials to load the page", 20)
     print("ok: credentials: none without a handler or with a dropped responder; the app's answer loads the page")
 
 

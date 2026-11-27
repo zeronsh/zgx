@@ -325,7 +325,9 @@ impl AuthResponder {
     pub fn new(deliver: impl FnOnce(Option<(String, String)>) + 'static) -> Self {
         Self(Some(Box::new(deliver)))
     }
-    /// Answer with these, for this challenge alone (kept nowhere).
+    /// Answer with these. They're stored nowhere on disk, but the engine
+    /// may send them again to that server for the rest of the session
+    /// without asking (WebKitGTK does), as browsers do.
     pub fn credentials(mut self, user: impl Into<String>, password: impl Into<String>) {
         if let Some(deliver) = self.0.take() {
             deliver(Some((user.into(), password.into())));
@@ -1365,9 +1367,11 @@ impl WebView {
         }
     }
     /// Answer each server asking a page for credentials: `handler` gets the
-    /// challenge and a responder to give a user name and password (for
-    /// that challenge alone) or cancel. Without a handler, or with a
-    /// responder dropped, it's cancelled and the page gets the refusal.
+    /// challenge and a responder to give a user name and password, or to
+    /// cancel. Without a handler, or with a responder dropped, it's
+    /// cancelled and the page gets the refusal. Credentials the app gives
+    /// are stored nowhere, but the engine may reuse them for that server
+    /// for the session, so a later load from it may not be asked.
     #[doc(hidden)]
     pub fn set_auth_handler(&self, handler: impl Fn(&AuthChallenge, AuthResponder) + 'static) {
         *self.0.auth.borrow_mut() = Some(Rc::new(handler));
