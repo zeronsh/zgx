@@ -158,6 +158,8 @@ mod size_calc;
 mod size_tokens;
 #[path = "../small_element_nodes.rs"]
 mod small_element_nodes;
+#[path = "../span_color_live.rs"]
+mod span_color_live;
 #[path = "../stack.rs"]
 mod stack;
 #[path = "../sticky.rs"]

@@ -427,3 +427,84 @@ fn a_clicked_span_is_underlined_unless_it_says_not() {
     ));
     assert!(!underlined(text_span("chat.rs")));
 }
+
+/// A span's colour read on its own (`text_color_live`, a script's colour
+/// function): as it changes, the paragraph shows recoloured, shaped as it was.
+/// Its spans aren't made again and nothing lays out; made again for its text,
+/// it goes on following the colour.
+#[test]
+fn a_live_colour_recolours_the_paragraph_without_making_its_spans_again() {
+    use std::{cell::Cell, rc::Rc};
+    let mut ui = Ui::new(400., 100.);
+    let tint = ui.signal(Color(200, 0, 0, 255));
+    let words = ui.signal(String::from("tinted"));
+    let made = Rc::new(Cell::new(0));
+    let (live, text, count) = (tint.clone(), words.clone(), made.clone());
+    let handle = ui.mount(
+        column().text_color(Color(10, 10, 10, 255)).child(
+            rich_text_signal(move || {
+                count.set(count.get() + 1);
+                let live = live.clone();
+                vec![
+                    text_span("Plain "),
+                    text_span(text.get()).text_color_live(move || Some(live.get().into())),
+                ]
+            })
+            .id("rich"),
+        ),
+    );
+    ui.prepare_frame();
+    let node = ui.scene.borrow().children(handle.find("rich").unwrap())[0];
+    let colours = || {
+        let scene = ui.scene.borrow();
+        let NodeKind::RichText { text } = scene.kind(node) else {
+            panic!()
+        };
+        text.runs().iter().map(|run| run.color).collect::<Vec<_>>()
+    };
+    assert_eq!(colours(), [Color(10, 10, 10, 255), Color(200, 0, 0, 255)]);
+    let (made_before, bounds) = (made.get(), ui.scene.borrow().bounds(node));
+    ui.scene.borrow_mut().flush();
+    tint.set(Color(0, 0, 200, 255));
+    ui.prepare_frame();
+    assert_eq!(colours(), [Color(10, 10, 10, 255), Color(0, 0, 200, 255)]);
+    assert_eq!(made.get(), made_before, "its spans weren't made again");
+    let report = ui.scene.borrow_mut().flush();
+    assert_eq!(report.layout_nodes, 0, "nothing laid out");
+    assert!(!report.damage.is_empty(), "the recoloured run repaints");
+    assert_eq!(ui.scene.borrow().bounds(node), bounds);
+    // Only the recoloured run's box is damaged (a point wider each way, for
+    // its glyphs' overhang, then out to whole points), not the paragraph's.
+    let run = ui
+        .scene
+        .borrow()
+        .text_range_area(node, "Plain ".len().."Plain tinted".len())
+        .unwrap();
+    for rect in &report.damage {
+        assert!(
+            rect.x >= run.x - 2.
+                && rect.y >= run.y - 2.
+                && rect.x + rect.width <= run.x + run.width + 2.
+                && rect.y + rect.height <= run.y + run.height + 2.,
+            "{rect:?} reaches past the run's box {run:?}"
+        );
+    }
+    let damaged: f32 = report.damage.iter().map(|r| r.width * r.height).sum();
+    assert!(
+        damaged < bounds.width * bounds.height,
+        "damaged {damaged} pt², the paragraph's box {bounds:?}"
+    );
+    // Made again for its text: the colour as it is, and followed still.
+    words.set("tinted, longer".into());
+    ui.prepare_frame();
+    assert_eq!(made.get(), made_before + 1);
+    assert_eq!(colours()[1], Color(0, 0, 200, 255));
+    tint.set(Color(0, 160, 0, 255));
+    ui.prepare_frame();
+    assert_eq!(colours()[1], Color(0, 160, 0, 255));
+    assert_eq!(made.get(), made_before + 1);
+    // Gone with the paragraph: a change after reaches nothing.
+    ui.remove(handle.node());
+    tint.set(Color(1, 2, 3, 255));
+    ui.prepare_frame();
+}

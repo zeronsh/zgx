@@ -1984,6 +1984,55 @@ const OFF_GRID: u8 = 4;
 /// lane's `OFF_GRID` (#2354). Each bit is set and cleared on its own (`|=`,
 /// `& !`), never the whole byte written.
 const DRAWING: u8 = 8;
+/// The box on each line that bytes `range` of `text` run across, as `lines`
+/// lay it out (`Scene::text_range_rects`); for an empty range, its caret's
+/// place.
+pub(crate) fn range_pieces(
+    text: &str,
+    lines: &[TextLine],
+    range: std::ops::Range<usize>,
+) -> Vec<Rect> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let floor = |at: usize| {
+        let mut at = at.min(text.len());
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    let (start, end) = (floor(range.start), floor(range.end.max(range.start)));
+    // A caret's place across its line: past the graphemes before it.
+    let x = |line: &TextLine, at: usize| {
+        let at = at.clamp(line.range.start, line.range.end);
+        let index = text[line.range.start..at].graphemes(true).count();
+        line.carets
+            .get(index)
+            .or(line.carets.last())
+            .copied()
+            .unwrap_or(line.rect.x)
+    };
+    let mut pieces = Vec::new();
+    for line in lines {
+        let on = if start == end {
+            line.range.start <= start && start <= line.range.end
+        } else {
+            // A line it overlaps; an empty line within it.
+            (line.range.start < end && start < line.range.end)
+                || (line.range.is_empty() && (start..end).contains(&line.range.start))
+        };
+        if !on {
+            continue;
+        }
+        let (a, b) = (x(line, start), x(line, end));
+        let piece = Rect::new(a.min(b), line.rect.y, (a - b).abs(), line.rect.height);
+        pieces.push(piece);
+        if start == end {
+            break;
+        }
+    }
+    pieces
+}
+
 /// Whether `new` differs from `old` in colour alone (`PAINT_ONLY`): a rect's
 /// colour, a text's colour, a box's fill or border colour (with no
 /// decoration, whose rasters are kept apart).
@@ -8102,11 +8151,34 @@ impl Scene {
             .into_iter()
             .reduce(|area, piece| area.union(piece))
     }
+    /// Paragraph `id`'s text and its lines in its own space (from its
+    /// bounds' corner), where nothing is transformed (`None` where something
+    /// is, or for a node that isn't a paragraph): from them, the boxes a
+    /// recolouring of its runs damages (`range_pieces`,
+    /// `recolour_rich_text`). Shapes the text: kept for runs recoloured many
+    /// times, not worked out each time.
+    pub(crate) fn own_text_lines(&self, id: NodeId) -> Option<(Arc<str>, Vec<TextLine>)> {
+        if self.transformed > 0 || !self.contains(id) {
+            return None;
+        }
+        let NodeKind::RichText { text } = self.kind(id) else {
+            return None;
+        };
+        let (text, mut lines) = (text.text_arc(), self.text_lines(id)?);
+        let corner = self.bounds(id);
+        for line in &mut lines {
+            line.rect.x -= corner.x;
+            line.rect.y -= corner.y;
+            for caret in &mut line.carets {
+                *caret -= corner.x;
+            }
+        }
+        Some((text, lines))
+    }
     /// [`text_range_area`](Self::text_range_area) a line at a time: a box
     /// for each line the range runs on, in order (an atom wrapped across
     /// two lines, the one under the pointer). Empty where it has none.
     pub fn text_range_rects(&self, id: NodeId, range: std::ops::Range<usize>) -> Vec<Rect> {
-        use unicode_segmentation::UnicodeSegmentation;
         if !self.contains(id) {
             return Vec::new();
         }
@@ -8115,47 +8187,10 @@ impl Scene {
             NodeKind::RichText { text } => text.text_arc(),
             _ => return Vec::new(),
         };
-        let floor = |at: usize| {
-            let mut at = at.min(text.len());
-            while !text.is_char_boundary(at) {
-                at -= 1;
-            }
-            at
-        };
-        let (start, end) = (floor(range.start), floor(range.end.max(range.start)));
         let Some(lines) = self.text_lines(id) else {
             return Vec::new();
         };
-        // A caret's place across its line: past the graphemes before it.
-        let x = |line: &TextLine, at: usize| {
-            let at = at.clamp(line.range.start, line.range.end);
-            let index = text[line.range.start..at].graphemes(true).count();
-            line.carets
-                .get(index)
-                .or(line.carets.last())
-                .copied()
-                .unwrap_or(line.rect.x)
-        };
-        let mut pieces = Vec::new();
-        for line in &lines {
-            let on = if start == end {
-                line.range.start <= start && start <= line.range.end
-            } else {
-                // A line it overlaps; an empty line within it.
-                (line.range.start < end && start < line.range.end)
-                    || (line.range.is_empty() && (start..end).contains(&line.range.start))
-            };
-            if !on {
-                continue;
-            }
-            let (a, b) = (x(line, start), x(line, end));
-            let piece = Rect::new(a.min(b), line.rect.y, (a - b).abs(), line.rect.height);
-            pieces.push(piece);
-            if start == end {
-                break;
-            }
-        }
-        pieces
+        range_pieces(&text, &lines, range)
     }
     /// Shape `text` at `size` in `font`, wrapped at `width` if given.
     pub fn shape_text_with_font(
@@ -11023,6 +11058,51 @@ impl Scene {
         node.boxed &= !HIT_INSIDE;
         self.invalidate(id, PAINT);
         self.invalidate_content_layout(id);
+    }
+    /// `set_kind` for a paragraph recoloured in place (`RichText::recoloured`:
+    /// its text and shape as they were), told the boxes of the runs whose
+    /// colours changed, in its own space (from its bounds' corner): only
+    /// those are damaged, not its box. Where they can't be placed so (a
+    /// transform, a filter, a blur, paint past its clip) or weren't given, it
+    /// is `set_kind`'s, its box damaged.
+    pub(crate) fn recolour_rich_text(
+        &mut self,
+        id: NodeId,
+        text: Arc<crate::rich_text::RichText>,
+        changed: Option<&[Rect]>,
+    ) {
+        let node = self.node(id);
+        let same = matches!(&node.kind, NodeKind::RichText { text: old }
+            if old.same_shape(&text));
+        let plain = self.transformed + self.filtered.get() == 0
+            && node.effects.blur_radius == 0.
+            && node.measurement.is_some()
+            && !self.paints_past_clip(id);
+        let (true, true, Some(changed)) = (same, plain, changed) else {
+            return self.set_kind(id, NodeKind::RichText { text });
+        };
+        if !self.damage_is_full() && self.shown(id) {
+            let (bounds, _, clip) = self.world(id);
+            let painted = self.painted(id, bounds, 0.);
+            for rect in changed {
+                // A run's glyphs reach a little past its line's box (an
+                // italic's overhang, a descender's): the box widened by a
+                // point each way, within what the paragraph paints.
+                let rect = Rect::new(
+                    bounds.x + rect.x - 1.,
+                    bounds.y + rect.y - 1.,
+                    rect.width + 2.,
+                    rect.height + 2.,
+                );
+                self.damage_within(painted.and_then(|p| p.intersection(rect)), clip);
+            }
+        }
+        // Repainted where its damage is recorded (`PAINTED`, as layout marks
+        // a node it moved), and changed itself (`CHANGED`): a renderer makes
+        // its items again rather than move them, and a flush damages no box.
+        self.node_mut(id).kind = NodeKind::RichText { text };
+        self.invalidate(id, PAINTED);
+        self.node_mut(id).dirty |= CHANGED;
     }
     /// Where a walk up from `id`'s content change stops to lay out alone:
     /// its parent or its grandparent (a text in a row, in a button in a

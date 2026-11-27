@@ -9626,6 +9626,17 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 }
                 let rare = span.rare.as_deref();
                 if let Some(rare) = rare {
+                    if let Some(live) = rare.live_color.as_ref() {
+                        let read = rare.live_color_fn.get_or_init(|| {
+                            let (source, vm) = (resolve_owned(live), vm.clone());
+                            Rc::new(move || match resolve(&source, Ty::Color, None, &vm) {
+                                Some(Lit::Color(color)) => Some(zgx::theme::Themed::Value(color)),
+                                Some(Lit::Token(token)) => Some(zgx::theme::Themed::Token(token)),
+                                _ => None,
+                            })
+                        });
+                        out = out.text_color_live_shared(read.clone());
+                    }
                     if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
                         out = out.padding_end(end);
                     }

@@ -1942,7 +1942,16 @@ pub(crate) struct SpanRare {
     /// `line_height = 16`: its own line height, in points (a box span's
     /// box is it and its padding). Internal until its API is settled.
     pub line_height: Option<f32>,
+    /// `color = function() … end` (or a state): read on its own, so a change
+    /// recolours the paragraph rather than make its spans again
+    /// (`TextSpan::text_color_live`); and the one function lowering hands
+    /// zgx for it, made once, so a paragraph made again keeps the effect
+    /// reading it (`TextSpan::text_color_live_shared`).
+    pub live_color: Option<Source>,
+    pub live_color_fn: std::cell::OnceCell<LiveColorFn>,
 }
+/// A span's colour as its function or state says now (`SpanRare::live_color`).
+pub(crate) type LiveColorFn = Rc<dyn Fn() -> Option<Themed<Color>>>;
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
 #[derive(Clone)]
@@ -5649,7 +5658,11 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 && let Some((name, ty)) =
                     SPAN_FOLLOWS.iter().find(|(name, _)| name.as_bytes() == key)
             {
-                followed.push((*name, *ty, source(lua, *ty, name, given)?));
+                let source = source(lua, *ty, name, given)?;
+                match *name {
+                    "color" => rare_mut(&mut span).live_color = Some(source),
+                    _ => followed.push((*name, *ty, source)),
+                }
                 return Ok(());
             }
             let number = |given: mlua::Value| {

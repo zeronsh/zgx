@@ -6097,6 +6097,7 @@ fn paragraph_effect<const LOCATING: bool>(
     locating: Option<std::rc::Rc<std::cell::RefCell<Vec<crate::compose_rich::Run>>>>,
     mut fading: Fading,
 ) -> impl FnMut() + 'static {
+    let mut live_colours = LiveColours::default();
     move || {
         let base = typography.get();
         let spans = compute();
@@ -6109,6 +6110,10 @@ fn paragraph_effect<const LOCATING: bool>(
         let mut links = Vec::new();
         let mut icons = Vec::new();
         let mut spanned = Vec::new();
+        // Runs coloured by a colour read on its own (`TextSpan::text_color_live`),
+        // and the span being made's, from the run it starts at.
+        let mut live_runs = live_colours.begin();
+        let mut live: Option<(usize, crate::compose_rich::LiveColor)> = None;
         for (index, mut span) in spans.into_iter().enumerate() {
             if span.text.is_empty() {
                 continue;
@@ -6129,6 +6134,12 @@ fn paragraph_effect<const LOCATING: bool>(
                     // extras come, so a plain span pays nothing for fades.
                     if let Some(fade) = extras.fade {
                         fading.note(runs.len() + usize::from(apart), fade);
+                    }
+                    // A colour read on its own: not read here, but by the
+                    // effect following it (`LiveColours`), which colours the
+                    // runs this span makes, from here on.
+                    if let Some(color) = extras.live_color {
+                        live = Some((runs.len(), color));
                     }
                     (
                         extras.hover,
@@ -6151,6 +6162,9 @@ fn paragraph_effect<const LOCATING: bool>(
                 }
                 if let Some(color) = hover.text_color {
                     span.styles = std::mem::take(&mut span.styles).text_color(color);
+                    // The hover's colour shows, not a live one, until the
+                    // pointer leaves (which makes the paragraph again).
+                    live = None;
                 }
             }
             if span.styles.has_tokens() {
@@ -6349,9 +6363,15 @@ fn paragraph_effect<const LOCATING: bool>(
                     color,
                 });
             }
+            if let Some((from, live)) = live.take() {
+                live_runs.push((from..runs.len(), live));
+            }
         }
         if LOCATING && let Some(kept) = &locating {
             *kept.borrow_mut() = spanned;
+        }
+        if !live_runs.is_empty() || live_colours.held() {
+            live_colours.made(&weak, root, paragraph, live_runs, &theme, &mut runs);
         }
         let mut rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
@@ -6367,6 +6387,7 @@ fn paragraph_effect<const LOCATING: bool>(
             if fading.state.is_some() {
                 fading.runs(&weak, root, paragraph);
             }
+            live_colours.fading(&fading);
             return;
         }
         let Some(ui) = weak.upgrade() else {
@@ -6390,6 +6411,7 @@ fn paragraph_effect<const LOCATING: bool>(
         if fading.state.is_some() {
             fading.drawn(&weak, root, paragraph);
         }
+        live_colours.fading(&fading);
         // Icons' placeholders aren't text to read out.
         let content = if icons.is_empty() {
             content
@@ -6401,6 +6423,297 @@ fn paragraph_effect<const LOCATING: bool>(
             .borrow_mut()
             .set_text_content(paragraph, content);
         update_button_labels(&ui, root);
+    }
+}
+
+/// The runs of a paragraph coloured by colours read on their own
+/// (`TextSpan::text_color_live`), and the effect that reads them: as one
+/// changes, the paragraph is written again recoloured, shaped as it was, so
+/// nothing lays out and none of its spans are made again. The effect is kept
+/// while the paragraph is made again with the same colours (the same
+/// functions, as zgx-script lowers a span's each time), and made anew where
+/// they differ; a paragraph with none holds nothing and pays a test.
+#[derive(Default)]
+struct LiveColours {
+    /// The effect, kept as long as the paragraph's root is.
+    slot: Option<Rc<RefCell<Option<crate::reactive::Effect>>>>,
+    /// What it shares with the effect, and a handle that runs it early.
+    held: Option<(Rc<LiveHeld>, crate::reactive::Refresh)>,
+    /// The runs a making noted, kept for the next (no allocation a making).
+    spare: LiveRuns,
+}
+/// What a paragraph's live colours share with the effect reading them.
+struct LiveHeld {
+    /// The colours read, in the order of their runs.
+    live: Vec<crate::compose_rich::LiveColor>,
+    /// Each one's runs in the paragraph as last made.
+    runs: RefCell<Vec<std::ops::Range<usize>>>,
+    /// What each one last said, resolved (`own` for none).
+    colours: RefCell<Vec<crate::scene::Color>>,
+    /// The paragraph's own colour, for one that says none.
+    own: std::cell::Cell<crate::scene::Color>,
+    /// While the paragraph is being made: the effect reads, the paragraph
+    /// colours its runs with what it read, and nothing is written.
+    making: std::cell::Cell<bool>,
+    /// Fading's runs, whose base a recolouring changes (`FadingRuns::base`).
+    fades: RefCell<Option<Rc<FadingRuns>>>,
+    boxes: RefCell<RunBoxes>,
+}
+type LiveRuns = Vec<(std::ops::Range<usize>, crate::compose_rich::LiveColor)>;
+impl LiveColours {
+    /// Whether it follows any now.
+    #[inline]
+    fn held(&self) -> bool {
+        self.held.is_some()
+    }
+    /// The paragraph is being made: a write that queued the effect has it
+    /// read now, for the paragraph to colour its runs with, rather than
+    /// recolour it after. What the making notes its live runs in.
+    #[inline]
+    fn begin(&mut self) -> LiveRuns {
+        if let Some((held, refresh)) = &self.held {
+            held.making.set(true);
+            refresh.refresh();
+        }
+        std::mem::take(&mut self.spare)
+    }
+    /// Fading's runs, as the paragraph now has them.
+    #[inline]
+    fn fading(&self, fading: &Fading) {
+        if let Some((held, _)) = &self.held {
+            *held.fades.borrow_mut() = fading.active().map(|active| active.runs.clone());
+        }
+    }
+    /// The paragraph made, `live` its runs with colours of their own: those
+    /// runs coloured as the colours say now (the colour they were made with
+    /// the paragraph's own, for one that says none), and followed from here
+    /// on.
+    #[cold]
+    #[inline(never)]
+    fn made(
+        &mut self,
+        weak: &crate::widgets::WeakUi,
+        root: NodeId,
+        paragraph: NodeId,
+        mut live: LiveRuns,
+        theme: &std::rc::Rc<crate::theme::ThemeScope>,
+        runs: &mut [crate::rich_text::TextRun],
+    ) {
+        let own = live
+            .first()
+            .and_then(|(range, _)| runs.get(range.start))
+            .map_or(crate::scene::Color(0, 0, 0, 255), |run| run.color);
+        let same = self.held.as_ref().is_some_and(|(held, _)| {
+            held.live.len() == live.len() && held.live.iter().zip(&live).all(|(a, (_, b))| a == b)
+        });
+        if !same {
+            self.follow(weak, root, paragraph, &live, theme, own);
+        }
+        if let Some((held, _)) = &self.held {
+            if held.own.replace(own) != own {
+                // Read again for the paragraph's own colour (a theme's).
+                let read = || {
+                    (held.live.iter())
+                        .map(|live| resolve_live((live.0)(), theme, own))
+                        .collect::<Vec<_>>()
+                };
+                *held.colours.borrow_mut() = match weak.upgrade() {
+                    Some(ui) => ui.runtime.untracked(read),
+                    None => read(),
+                };
+            }
+            let mut ranges = held.runs.borrow_mut();
+            ranges.clear();
+            ranges.extend(live.iter().map(|(range, _)| range.clone()));
+            for ((range, _), colour) in live.iter().zip(held.colours.borrow().iter()) {
+                for run in &mut runs[range.clone()] {
+                    run.color = *colour;
+                }
+            }
+            held.making.set(false);
+        }
+        live.clear();
+        self.spare = live;
+    }
+    /// An effect for `live`, the last one's let go: its first run reads
+    /// them, while the paragraph is being made.
+    fn follow(
+        &mut self,
+        weak: &crate::widgets::WeakUi,
+        root: NodeId,
+        paragraph: NodeId,
+        live: &LiveRuns,
+        theme: &std::rc::Rc<crate::theme::ThemeScope>,
+        own: crate::scene::Color,
+    ) {
+        if let Some(slot) = &self.slot {
+            slot.borrow_mut().take();
+        }
+        self.held = None;
+        if live.is_empty() {
+            return;
+        }
+        let Some(mut ui) = weak.upgrade() else {
+            return;
+        };
+        let slot = self
+            .slot
+            .get_or_insert_with(|| {
+                let slot: Rc<RefCell<Option<crate::reactive::Effect>>> = Default::default();
+                ui.retain(root, slot.clone());
+                slot
+            })
+            .clone();
+        let held = Rc::new(LiveHeld {
+            live: live.iter().map(|(_, live)| live.clone()).collect(),
+            runs: RefCell::new(live.iter().map(|(range, _)| range.clone()).collect()),
+            colours: RefCell::new(vec![own; live.len()]),
+            own: std::cell::Cell::new(own),
+            making: std::cell::Cell::new(true),
+            fades: RefCell::default(),
+            boxes: RefCell::default(),
+        });
+        let (shared, weak, theme) = (held.clone(), weak.clone(), theme.clone());
+        let runtime = ui.runtime.clone();
+        let effect = runtime.untracked(|| {
+            runtime.effect(move || {
+                let held = &shared;
+                let own = held.own.get();
+                let mut changed = false;
+                for (shown, live) in held.colours.borrow_mut().iter_mut().zip(&held.live) {
+                    let colour = resolve_live((live.0)(), &theme, own);
+                    changed |= std::mem::replace(shown, colour) != colour;
+                }
+                if changed && !held.making.get() {
+                    recolour_live(held, &weak, paragraph);
+                }
+            })
+        });
+        // Made inside a flush, it waits its turn: read now, for this making.
+        let refresh = effect.refresher();
+        refresh.refresh();
+        *slot.borrow_mut() = Some(effect);
+        self.held = Some((held, refresh));
+    }
+}
+/// A live colour as it shows: a token through the theme, `own` for none.
+fn resolve_live(
+    color: Option<crate::theme::Themed<crate::scene::Color>>,
+    theme: &crate::theme::ThemeScope,
+    own: crate::scene::Color,
+) -> crate::scene::Color {
+    match color {
+        Some(crate::theme::Themed::Value(color)) => color,
+        Some(crate::theme::Themed::Token(token)) => theme.get(token).color().unwrap_or(own),
+        None => own,
+    }
+}
+/// Paragraph `paragraph` written again with its live runs as `held` last
+/// read them, shaped as it was: the runs whose colours changed damaged, not
+/// its box (`Scene::recolour_rich_text`).
+#[cold]
+#[inline(never)]
+fn recolour_live(held: &LiveHeld, weak: &crate::widgets::WeakUi, paragraph: NodeId) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    let mut scene = ui.scene.borrow_mut();
+    if !scene.contains(paragraph) {
+        return;
+    }
+    let (ranges, colours) = (held.runs.borrow(), held.colours.borrow());
+    let recolour = |rich: &crate::rich_text::RichText| {
+        std::sync::Arc::new(rich.recoloured(|i, color| {
+            ranges
+                .iter()
+                .zip(colours.iter())
+                .find(|(runs, _)| runs.contains(&i))
+                .map_or(color, |(_, colour)| *colour)
+        }))
+    };
+    let NodeKind::RichText { text: before } = scene.kind(paragraph) else {
+        return;
+    };
+    let before = before.clone();
+    // Fading too: its frame loop draws from the paragraph as made
+    // (`FadingRuns::base`), so that is what's recoloured.
+    let fades = held.fades.borrow();
+    let based = (fades.as_ref()).and_then(|fades| Some((fades, fades.base.borrow().clone()?)));
+    let text = match based {
+        Some((fades, base)) => {
+            let runs = fades.runs.borrow().clone();
+            fades.faded(&recolour(&base), &runs, crate::compose_rich::fade_now())
+        }
+        None => recolour(&before),
+    };
+    let changed = held
+        .boxes
+        .borrow_mut()
+        .changed(&scene, paragraph, &before, &text);
+    scene.recolour_rich_text(paragraph, text, changed.as_deref());
+}
+
+/// A paragraph's lines in its own space, shaped (`Scene::own_text_lines`) the
+/// first time one of its runs is recoloured and kept while the paragraph
+/// keeps its size and text: from them, the boxes of the runs a recolouring
+/// changes, which it damages rather than the paragraph's box
+/// (`Scene::recolour_rich_text`).
+#[derive(Default)]
+struct RunBoxes {
+    /// What they were shaped for: the paragraph's size, and the paragraph
+    /// (its text, runs and fonts: `RichText::same_metrics`).
+    size: Option<(f32, f32)>,
+    shaped: Option<std::sync::Arc<crate::rich_text::RichText>>,
+    lines: Option<(std::sync::Arc<str>, Vec<crate::scene::TextLine>)>,
+    /// The boxes of the runs recoloured so far, by their bytes: a run's
+    /// worked out once (each counts graphemes across its lines).
+    runs: Vec<(std::ops::Range<usize>, Vec<crate::scene::Rect>)>,
+}
+impl RunBoxes {
+    /// The boxes of the runs whose colours differ from `before` to `after`
+    /// (shaped alike); `None` where they can't be worked out in its own
+    /// space (something transformed).
+    fn changed(
+        &mut self,
+        scene: &crate::scene::Scene,
+        paragraph: NodeId,
+        before: &std::sync::Arc<crate::rich_text::RichText>,
+        after: &crate::rich_text::RichText,
+    ) -> Option<Vec<crate::scene::Rect>> {
+        let changed: Vec<_> = (before.runs().iter())
+            .zip(after.runs())
+            .filter(|(was, now)| was.color != now.color)
+            .map(|(was, _)| was.range.clone())
+            .collect();
+        if changed.is_empty() {
+            return Some(Vec::new());
+        }
+        let bounds = scene.bounds(paragraph);
+        let size = Some((bounds.width, bounds.height));
+        let kept = self.size == size
+            && (self.shaped.as_ref()).is_some_and(|shaped| {
+                std::sync::Arc::ptr_eq(shaped, before) || shaped.same_metrics(before)
+            });
+        if !kept {
+            self.size = size;
+            self.shaped = Some(before.clone());
+            self.lines = Some(scene.own_text_lines(paragraph)?);
+            self.runs.clear();
+        }
+        let (text, lines) = self.lines.as_ref()?;
+        let mut boxes = Vec::new();
+        for range in changed {
+            let at = match self.runs.iter().position(|(kept, _)| *kept == range) {
+                Some(at) => at,
+                None => {
+                    let pieces = crate::scene::range_pieces(text, lines, range.clone());
+                    self.runs.push((range, pieces));
+                    self.runs.len() - 1
+                }
+            };
+            boxes.extend_from_slice(&self.runs[at].1);
+        }
+        Some(boxes)
     }
 }
 
