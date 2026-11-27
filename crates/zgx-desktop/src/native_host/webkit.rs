@@ -484,7 +484,7 @@ define_class!(
         // A challenge: a server's certificate (trusted as the system trusts
         // it, else reported to the app and cancelled: WebKit could only be
         // told to trust it beyond this load), or credentials a server asks
-        // for (the app's to give, for this challenge alone). Raw types: an
+        // for (the app's to give, stored nowhere). Raw types: an
         // `NSURLAuthenticationChallenge`, and a `void (^)(NSInteger
         // disposition, NSURLCredential *)` block, called once.
         #[unsafe(method(webView:didReceiveAuthenticationChallenge:completionHandler:))]
@@ -930,7 +930,7 @@ impl Observer {
                     zgx::web_view::AuthResponder::new(move |credentials| match credentials {
                         Some((user, password)) => {
                             // SAFETY: NSURLCredential's constructor on the main
-                            // thread; persistence none (0): this challenge alone.
+                            // thread; persistence none (0): stored nowhere.
                             let credential: Option<Retained<AnyObject>> = unsafe {
                                 msg_send![
                                     objc2::class!(NSURLCredential),

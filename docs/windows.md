@@ -703,7 +703,8 @@ for that load alone, and zgx clears WebView2's session-long allow as it's
 given; with no handler, or a responder dropped, the load is cancelled
 ([the details](native-surfaces.md#certificate-errors-and-credentials)). So
 are the Basic credentials a server asks for (`WebView::set_auth_handler`):
-the app's answer is used for that challenge alone, kept nowhere.
+the app's answer is stored nowhere, though the engine may reuse it for
+that server for the session.
 
 WebView2's browser keys are off (`AreBrowserAcceleratorKeysEnabled`): Ctrl+F,
 F3, Ctrl+P, Ctrl+R, F5, zoom, Alt+arrows and F12 reach the page, and the

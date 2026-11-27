@@ -1462,11 +1462,10 @@ impl Page {
                                     } else {
                                         COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL
                                     };
-                                    // SAFETY: WebView2 on the UI thread, where answers come.
-                                    unsafe {
-                                        let _ = args.SetAction(action);
-                                        let _ = deferral.Complete();
-                                    }
+                                    // WebView2 on the UI thread, where answers come
+                                    // (inside the handlers' `unsafe` block).
+                                    let _ = args.SetAction(action);
+                                    let _ = deferral.Complete();
                                     if proceed {
                                         page(&|page| {
                                             *page.proceeded.borrow_mut() =
@@ -1496,7 +1495,7 @@ impl Page {
                 );
             }
             // Credentials a server asks for are the app's, for that
-            // challenge alone; without an answer the page gets the refusal.
+            // challenge; without an answer the page gets the refusal.
             if let Ok(view10) = view.cast::<ICoreWebView2_10>() {
                 let page = on.clone();
                 let _ = view10.add_BasicAuthenticationRequested(
@@ -1508,21 +1507,20 @@ impl Page {
                         let host = zgx::web_view::site_host(&url).unwrap_or_default();
                         let deferral = args.GetDeferral()?;
                         let answer = move |credentials: Option<(String, String)>| {
-                            // SAFETY: WebView2 on the UI thread, where answers come.
-                            unsafe {
-                                match credentials {
-                                    Some((user, password)) => {
-                                        if let Ok(response) = args.Response() {
-                                            let _ = response.SetUserName(&HSTRING::from(user));
-                                            let _ = response.SetPassword(&HSTRING::from(password));
-                                        }
-                                    }
-                                    None => {
-                                        let _ = args.SetCancel(true);
+                            // WebView2 on the UI thread, where answers come
+                            // (inside the handlers' `unsafe` block).
+                            match credentials {
+                                Some((user, password)) => {
+                                    if let Ok(response) = args.Response() {
+                                        let _ = response.SetUserName(&HSTRING::from(user));
+                                        let _ = response.SetPassword(&HSTRING::from(password));
                                     }
                                 }
-                                let _ = deferral.Complete();
+                                None => {
+                                    let _ = args.SetCancel(true);
+                                }
                             }
+                            let _ = deferral.Complete();
                         };
                         let answer = Rc::new(RefCell::new(Some(answer)));
                         page(&|page| {
