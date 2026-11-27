@@ -419,7 +419,8 @@ pub struct WebViewState {
     pub hovered_link: Option<String>,
     /// The page's theme colour (`<meta name="theme-color">`), which a
     /// browser tints its tab or toolbar with. `None` without one, or where
-    /// the engine doesn't say (WebView2).
+    /// the engine doesn't say (WebView2, and WebKitGTK for a page painted on
+    /// the CPU, `accelerated: false`).
     #[doc(hidden)]
     pub theme_color: Option<crate::scene::Color>,
 }

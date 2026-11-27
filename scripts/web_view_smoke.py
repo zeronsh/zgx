@@ -654,8 +654,11 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     checks["full screen"] = True
     # The page's theme colour (its <meta name="theme-color">) and the link
     # under the pointer reach the app's state.
-    session.wait(lambda: "#336699ff" in session.lines("THEME "), "the page's theme colour never reached its state")
-    checks["theme colour"] = True
+    # WebKitGTK reports no theme colour for a page it paints on the CPU
+    # (`accelerated: false`): it never changes `theme-color` there.
+    if not unaccelerated:
+        session.wait(lambda: "#336699ff" in session.lines("THEME "), "the page's theme colour never reached its state")
+        checks["theme colour"] = True
     session.xdo("mousemove", "--window", session.window, 80, 292)
     session.wait(lambda: session.lines("HOVERED ")[-1:] == ["https://example.com/dragged"],
                  "the link under the pointer never reached the page's state")
