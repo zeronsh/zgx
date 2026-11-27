@@ -3868,17 +3868,18 @@ impl Host {
         let role = pointer.and_then(|id| ui.semantics.borrow().get(id).map(|node| node.role));
         let scene = ui.scene.borrow();
         let revision = scene.interaction_revision();
+        // Where the interface has the pointer: winit's point, or where a
+        // driver moved it into the interface alone (`zgx inspect`, an agent,
+        // a test), so the cursor is what hover is over, and asks from the
+        // walk that found it (`Scene::with_hits`) rather than walk again.
+        let at = ui.input.pointer().unwrap_or(self.cursor);
         if self.pointer_inside
             && self
                 .cursor_query
                 .as_ref()
-                .is_none_or(|(point, version, _)| *point != self.cursor || *version != revision)
+                .is_none_or(|(point, version, _)| *point != at || *version != revision)
         {
-            self.cursor_query = Some((
-                self.cursor,
-                revision,
-                ui.input.cursor_at(&scene, self.cursor.0, self.cursor.1),
-            ));
+            self.cursor_query = Some((at, revision, ui.input.cursor_at(&scene, at.0, at.1)));
         }
         let explicit = ui
             .input

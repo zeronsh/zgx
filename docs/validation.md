@@ -1420,6 +1420,24 @@ rate, intermittently, as a window started. The app is launched as a direct
 child from a temporary directory and sends no input. Passed on macOS 26 (M5,
 120 Hz), 2026-10-25: 113.7, 117.2 and 116.7 fps.
 
+## A resting pointer over moving content
+
+A pointer resting over content that moves under it (a transcript following its
+end as a reply streams in) is looked for once a frame that moves geometry:
+hover finds what is under it (`Ui::refresh_hover_moved`), and the window's
+cursor after drawing (`sync_cursor`) answers from that walk rather than walk the
+scene again. Where a driver has moved the pointer into the interface alone
+(`zgx inspect`, an agent, a test), elsewhere than the real pointer rests, the
+cursor follows it as hover does: one walk, and a cursor that is what is hovered.
+`hover_walks_probe` (zgx-desktop's example) streams a reply into a following
+list whose rows have cursors, the real pointer resting over it, and counts the
+walks each frame (`Scene::hit_walks`, a debug build's count).
+
+- Linux, in `scripts/linux_smokes.py` as `hover-walks`
+  (`scripts/hover_walks_smoke.py`): X11 under Openbox, the real pointer moved
+  with xdotool, then the same with a driver's move to another point. No frame
+  walks the scene twice.
+
 ## Popups and a window at the back
 
 A popup wanted while the app is at the back doesn't show, and showing one raises
