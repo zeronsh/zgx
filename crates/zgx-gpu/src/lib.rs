@@ -7319,6 +7319,10 @@ impl GpuRenderer {
     /// budget, an image with no texture), each said once: a host hands
     /// these on (`zgx::issues::report`). Frames don't fail over them.
     pub fn take_issues(&mut self) -> Vec<String> {
+        // A canvas that didn't draw (`CanvasCache::get_panned`): said once.
+        for issue in self.canvases.take_issues() {
+            self.warn(&issue);
+        }
         std::mem::take(&mut self.issues)
     }
     /// A layer went coarser for its budget: `zgx inspect memory` shows it.
@@ -7335,17 +7339,6 @@ impl GpuRenderer {
     /// incoming pages, each its own layer) fits.
     fn layer_budget(&self) -> usize {
         (self.width as usize * self.height as usize * 4 * 4).max(LAYER_BUDGET)
-    }
-    /// A canvas' raster failed: said once, and the frame goes on without it,
-    /// but for a lost device, which is the frame's.
-    #[cold]
-    #[inline(never)]
-    fn canvas_failed(&mut self, error: GpuError) -> Result<(), GpuError> {
-        if error.is_device_lost() {
-            return Err(error);
-        }
-        self.warn(&format!("a canvas doesn't draw: {}", error.0));
-        Ok(())
     }
     #[cold]
     fn warn(&mut self, issue: &str) {
@@ -10712,39 +10705,20 @@ impl GpuRenderer {
                             let wait = self.waits_for_shaders();
                             let mut placed = None;
                             let fonts = self.context.inner.canvas_fonts.clone();
-                            let drawn = self.canvas_texture(item.id, &mut stats, |cache| {
+                            let id = self.canvas_texture(item.id, &mut stats, |cache| {
                                 cache.set_fonts(&fonts);
                                 let (raster, placement) = cache.get_panned(
                                     item.id, canvas, view, width, height, scale, wait,
                                 )?;
                                 placed = Some(placement);
                                 Ok(raster)
-                            });
+                            })?;
                             stats.canvas_rasterizations +=
                                 (self.canvases.rasterizations() - before) as usize;
-                            // A canvas that won't draw shows nothing: its
-                            // fault, not the frame's.
-                            let id = match drawn {
-                                Ok(id) => Some(id),
-                                Err(error) => {
-                                    self.canvas_failed(error)?;
-                                    None
-                                }
-                            };
-                            let canvas::Placement { rect, uv, scaled } = match id {
-                                Some(_) => placed.expect("placed"),
-                                None => canvas::Placement {
-                                    rect: [0.; 4],
-                                    uv: [0.; 4],
-                                    scaled: false,
-                                },
-                            };
+                            let canvas::Placement { rect, uv, scaled } = placed.expect("placed");
                             // Drawn again once that raster is made.
                             self.images_awaited |= scaled;
-                            if let Some(id) = id
-                                && rect[2] > 0.
-                                && rect[3] > 0.
-                            {
+                            if rect[2] > 0. && rect[3] > 0. {
                                 canvas_image = Some(id);
                                 quads.push(Quad {
                                     rect: [

@@ -48,7 +48,7 @@ struct Panned {
 /// Where a panned raster shows in its canvas's box: `rect` (x, y, width,
 /// height, in points from the box's corner; empty for nothing) and the part
 /// of the raster drawn there, `uv` (x, y, width, height, from 0 to 1).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Placement {
     /// Where in the box, in points.
     pub rect: [f32; 4],
@@ -874,6 +874,10 @@ pub struct CanvasCache {
     /// What uploading a tile's texture takes, in ms, and the frame whose
     /// uploads it last counted, with the ms they took (`tile_uploaded`).
     uploads: (f32, u64, f32, usize),
+    /// Canvases that didn't draw, said by the renderer (`take_issues`).
+    issues: Vec<String>,
+    /// What one that didn't draw is drawn with: a pixel, placed nowhere.
+    nothing: Option<Arc<ImageData>>,
 }
 impl CanvasCache {
     /// Draw the text of canvases that draw it into their raster
@@ -1047,8 +1051,51 @@ impl CanvasCache {
     /// shows, as `get_viewed` does. So does a zoom if `wait`; else the
     /// raster of the zoom before shows scaled (`Placement::scaled`) while
     /// this zoom's is made off the frame, and is swapped for it once made.
+    ///
+    /// A canvas that won't draw (too many commands or clips, or past the
+    /// budget at an eighth of the display's scale) is placed nowhere, and
+    /// said once (`take_issues`): its fault, not the frame's. A lost device
+    /// is the frame's.
     #[allow(clippy::too_many_arguments)]
     pub fn get_panned(
+        &mut self,
+        node: NodeId,
+        canvas: &Arc<Canvas>,
+        view: zgx::scene::CanvasView,
+        width: f32,
+        height: f32,
+        scale: f32,
+        wait: bool,
+    ) -> Result<(Raster, Placement), GpuError> {
+        match self.panned(node, canvas, view, width, height, scale, wait) {
+            Err(error) if !error.is_device_lost() => Ok(self.drew_nothing(error)),
+            done => done,
+        }
+    }
+    /// `get_panned` for a canvas that didn't draw: nothing, said.
+    #[cold]
+    #[inline(never)]
+    fn drew_nothing(&mut self, error: GpuError) -> (Raster, Placement) {
+        self.issues
+            .push(format!("a canvas doesn't draw: {}", error.0));
+        let nothing = self
+            .nothing
+            .get_or_insert_with(|| Arc::new(ImageData::new(1, 1, vec![0; 4]).expect("a pixel")))
+            .clone();
+        (
+            Raster {
+                id: nothing.id(),
+                pixels: Some(nothing),
+            },
+            Placement::default(),
+        )
+    }
+    /// Canvases that didn't draw since last asked, each a sentence.
+    pub(crate) fn take_issues(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.issues)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn panned(
         &mut self,
         node: NodeId,
         canvas: &Arc<Canvas>,
