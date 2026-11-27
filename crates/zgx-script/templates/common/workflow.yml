@@ -30,8 +30,6 @@ jobs:
           key: zgx-${{ runner.os }}-${{ env.ZGX_VERSION }}
       - name: Install zgx and zgx-run
         if: steps.tools.outputs.cache-hit != 'true'
-        env:
-          LUAU_CXXFLAGS: -DNDEBUG
         run: |
           cargo install --locked --version "$ZGX_VERSION" zgx-run
           cargo install --locked --version "$ZGX_VERSION" zgx-script --bin zgx

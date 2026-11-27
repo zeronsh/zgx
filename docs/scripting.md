@@ -643,15 +643,7 @@ The `ui.tween(state, opts)`, `ui.spring(state, opts)` and `ui.loop(opts)` bindin
 
 ### Cost
 
-**Release builds need `LUAU_CXXFLAGS=-DNDEBUG`.** Luau checks its asserts unless `NDEBUG` is defined, and the crate that compiles it for mlua never defines it: with them, every script loop, call and table access runs about a fifth slower (`list_state_bench`: 4.22 M instructions a tick against 3.07 M, 0.18 ms against 0.15 ms on an Apple M5 Max). This workspace's release builds need nothing set (its zgx-mlua-sys defines it, as 0.2.1 on crates.io will); an app built against zgx-script 0.2.0 sets it in its own:
-
-```toml
-# .cargo/config.toml
-[env]
-LUAU_CXXFLAGS = "-DNDEBUG"
-```
-
-A release build without it says so once on stderr and in `ScriptHost::warnings()`. Debug builds keep the asserts either way.
+**Release builds run Luau without its asserts.** Luau checks them unless `NDEBUG` is defined, and with them every script loop, call and table access runs about a fifth slower (`list_state_bench`: 4.22 M instructions a tick against 3.07 M, 0.18 ms against 0.15 ms on an Apple M5 Max). zgx-mlua-sys, the crate that compiles Luau, defines it wherever the build has no debug assertions, so an app built from crates.io or installed with `cargo install` needs nothing set. Debug builds keep the asserts. A release build that has them anyway (Luau built by another crate) says so once on stderr and in `ScriptHost::warnings()`.
 
 `anime_bench` animates 1,000 elements' `y` and `opacity` every frame, headless, and times one frame (Apple M5 Max, release):
 

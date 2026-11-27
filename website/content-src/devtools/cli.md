@@ -8,8 +8,8 @@ Each block below is read from the binary's source when the site builds, so it sa
 ## Install
 
 ```sh
-LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-run
-LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-script --bin zgx
+cargo install zgx-run
+cargo install zgx-script --bin zgx
 ```
 
 From crates.io; `--git https://github.com/zeronsh/zgx` before a crate's name installs what isn't released yet.
