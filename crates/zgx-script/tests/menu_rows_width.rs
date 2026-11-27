@@ -16,6 +16,13 @@ fn menu(width: &str, rows: &str) -> Harness {
     h
 }
 const WIDE: &str = r#"ui.div { id = "a", w = 100, h = 20 }, ui.div { id = "b", w = 300, h = 20 },"#;
+/// The panel's padding on each side, from where its row `row` starts in it
+/// (the platform's theme's: 16 on macOS, 8 on Linux).
+fn inset(h: &mut Harness, row: &str) -> f32 {
+    let padding = h.bounds(row).x - h.bounds("panel").x;
+    assert!(padding > 0., "the panel is padded: {padding}");
+    padding
+}
 
 #[test]
 fn a_menu_is_240_wide_by_default() {
@@ -24,14 +31,13 @@ fn a_menu_is_240_wide_by_default() {
 
 #[test]
 fn auto_sizes_a_menu_to_its_widest_row() {
-    // The panel's 16-point padding each side.
-    assert_eq!(menu(r#"w = "auto","#, WIDE).bounds("panel").width, 332.);
-    assert_eq!(
-        menu(r#"w = "auto","#, r#"ui.div { id = "a", w = 100, h = 20 },"#)
-            .bounds("panel")
-            .width,
-        132.
-    );
+    // The widest row and the panel's padding each side.
+    let mut h = menu(r#"w = "auto","#, WIDE);
+    let padding = inset(&mut h, "b");
+    assert_eq!(h.bounds("panel").width, 300. + 2. * padding);
+    let mut h = menu(r#"w = "auto","#, r#"ui.div { id = "a", w = 100, h = 20 },"#);
+    let padding = inset(&mut h, "a");
+    assert_eq!(h.bounds("panel").width, 100. + 2. * padding);
 }
 
 #[test]
@@ -39,11 +45,17 @@ fn a_menus_rows_fill_the_panel_whatever_its_width() {
     let rows = r#"ui.menu_item { id = "short", "Copy" }, ui.menu_item { id = "long", "Look Up this very long selection and then some" },"#;
     let mut h = menu("", rows);
     assert_eq!(h.bounds("panel").width, 240.);
-    assert_eq!(h.bounds("short").width, 208., "a row fills the 240 panel");
+    let padding = inset(&mut h, "short");
+    assert_eq!(
+        h.bounds("short").width,
+        240. - 2. * padding,
+        "a row fills the 240 panel"
+    );
     let mut h = menu(r#"w = "auto","#, rows);
     let (short, long) = (h.bounds("short").width, h.bounds("long").width);
     assert_eq!(short, long, "rows share the widest's width");
-    assert_eq!(long, h.bounds("panel").width - 32.);
+    let padding = inset(&mut h, "long");
+    assert_eq!(long, h.bounds("panel").width - 2. * padding);
 }
 
 fn context_menu_width(style: &str, label: &str) -> f32 {
