@@ -27,6 +27,9 @@ local FADE_MS = 300
 
 local reply = ui.state("reply", "")
 local blocks = ui.markdown(reply, { key = "reply" })
+-- How long the reply is, kept here: reading it from the state would copy
+-- the whole reply into a string each chunk, garbage that grows with it.
+local length = 0
 -- The chunks still fading, in order: their bytes in the reply.
 type Chunk = { from: number, to: number, started: number, ms: number, boost: number }
 -- (A table of the script's own, which a chunk's speed is changed in; its
@@ -50,7 +53,8 @@ ui.command {
 	id = "chunk",
 	run = function()
 		local text: string = ui.call_sync("stream.chunk", nil)
-		local from = #reply:peek() + 1
+		local from = length + 1
+		length += #text
 		reply:append(text)
 		if MODE == "none" then
 			return
@@ -127,11 +131,21 @@ local function paragraph(text: string, at: number): Node
 	return ui.rich(props)
 end
 
+-- The reply as one string, copied out of its state once a chunk rather than
+-- once a paragraph (`at_of` asks for each).
+local whole, whole_length = "", 0
+local function reply_now(): string
+	if whole_length ~= length then
+		whole, whole_length = reply:peek(), length
+	end
+	return whole
+end
+
 -- Where a block's text starts in the reply, as the chunks' bytes count: its
 -- last place (the reply goes round its replies again and again, and only the
 -- newest blocks have chunks still fading).
 local function at_of(text: string): number
-	local whole = reply:peek()
+	local whole = reply_now()
 	local at, from = 1, 1
 	while true do
 		local s = string.find(whole, text, from, true)
