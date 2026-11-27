@@ -849,6 +849,10 @@ pub(crate) fn mount_links(
         if geometry_key.as_ref() != Some(&key) {
             geometry = if data.links.is_empty() {
                 Vec::new()
+            } else if !(bounds.width > 0. && bounds.height > 0.) {
+                // Not laid out yet (mounted this frame): every box would be
+                // cut to nothing by the paragraph's, so none is shaped for.
+                vec![Vec::new(); data.links.len()]
             } else {
                 // At the width its lines wrap at, where they show
                 // (balanced). A change of balance moves `engine`.
