@@ -291,7 +291,12 @@ def main():
         return capture
 
     try:
-        window = win.wait_window(proc)
+        # A cold runner's first launch (a new executable, WebView2's
+        # environment and the GPU's shaders made afresh) took past 15 s.
+        try:
+            window = win.wait_window(proc, timeout=60.0)
+        except RuntimeError as error:
+            raise RuntimeError(f"{error}; the app said:\n  " + "\n  ".join(lines[-30:])) from None
         scale = win.dpi(window) / 96
         if args.no_foreground:
             at = lambda x, y: (round(x * scale), round(y * scale))
