@@ -770,6 +770,9 @@ jobs:
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --test patched_wgpu_hal --locked
+      # Backdrop filters batched draw as each does alone, on Metal directly
+      # and through wgpu (Linux runs every zgx-gpu test on lavapipe).
+      - run: cargo test -p zgx-gpu --test blur_batch_exact --locked
       # Metal's queue really goes at rest (zgx's wgpu-hal patch).
       - run: cargo test -p zgx-gpu --lib --locked -- queue_rest_tests
       - run: cargo test -p zgx-fx --locked
@@ -985,9 +988,10 @@ jobs:
       # as wgpu builds them (`app_shaders_d3d12`); and renderers on threads
       # on WARP's one device, made as others draw and as the last one goes
       # (`renderers_on_threads`, `warp_handover`, #2402), its loss failing
-      # every context on it (`shared_device_loss`). With an empty
-      # folder for the shader cache, every shader compiles.
-      - run: cargo test -p zgx-gpu --test borders --test transforms --test rounded_clip --test adapter --test shader_cache --test every_shader --test canvas --test box_model --test popup_backdrop --test app_shaders_d3d12 --test renderers_on_threads --test warp_handover --test shared_device_loss --test shared_device_rest --locked
+      # every context on it (`shared_device_loss`); and backdrop filters
+      # batched drawing as each does alone (`blur_batch_exact`). With an
+      # empty folder for the shader cache, every shader compiles.
+      - run: cargo test -p zgx-gpu --test borders --test transforms --test rounded_clip --test adapter --test shader_cache --test every_shader --test canvas --test box_model --test popup_backdrop --test app_shaders_d3d12 --test renderers_on_threads --test warp_handover --test shared_device_loss --test shared_device_rest --test blur_batch_exact --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold
           ZGX_EXPECT_COLD_CACHE: "1"
