@@ -583,20 +583,24 @@ impl Engine {
             .as_ref()
             .is_some_and(NodeHandle::assistive_technology);
         let every_row = changed.len() == screen_rows;
-        let shown: Vec<Rc<RowPaint>> = if every_row {
+        // Compared with what the slots draw in place: no row's paint is
+        // held past them, so each goes as its slot takes another, released
+        // where it always was whatever is inlined here.
+        let shifted = if every_row && scrolled == 0 {
             let rows = self.rows.borrow();
-            self.slots
-                .borrow()
-                .iter()
-                .map(|slot| rows[*slot].with_untracked(Rc::clone))
-                .collect()
+            let slots = self.slots.borrow();
+            shift(
+                slots.len(),
+                |i, paint| rows[slots[i]].with_untracked(|shown| **shown == *paint),
+                &changed,
+            )
         } else {
-            Vec::new()
+            0
         };
         let news = if output && listening {
             match scrolled {
-                0 => self.news_of(&shown, &changed),
-                _ => self.scrolled_news_of(&shown, &changed, scrolled),
+                0 => self.news_of(every_row, &changed),
+                _ => self.scrolled_news_of(every_row, &changed, scrolled),
             }
         } else {
             String::new()
@@ -606,7 +610,7 @@ impl Engine {
             // move up with them, as many as it says, or, every row worked
             // out again, as many as their rows show.
             match scrolled {
-                0 if every_row => self.scroll_slots(shift(&shown, &changed)),
+                0 if every_row => self.scroll_slots(shifted),
                 0 => {}
                 lines => self.scroll_slots(lines),
             }
@@ -687,17 +691,17 @@ impl Engine {
 
     /// What a reader hears of rows `changed` from what the rows show: new
     /// lines and what lines gained, less the shell's echo of what was typed.
-    /// `shown`, every row's paint, when every row changed (output may have
-    /// scrolled them); otherwise empty, and only the changed rows are read.
+    /// Every row is read when every row changed (`every_row`: output may
+    /// have scrolled them); otherwise only the changed rows are.
     /// Out of line: worked out only while a reader listens, it leaves the
     /// paint of every other frame as it was.
     #[cold]
     #[inline(never)]
-    fn news_of(&self, shown: &[Rc<RowPaint>], changed: &[(usize, RowPaint)]) -> String {
+    fn news_of(&self, every_row: bool, changed: &[(usize, RowPaint)]) -> String {
         if changed.is_empty() {
             return String::new();
         }
-        let news = if shown.is_empty() {
+        let news = if !every_row {
             // Rows that didn't all change didn't scroll: what each changed
             // row showed is all there is to compare.
             let rows = self.rows.borrow();
@@ -716,6 +720,7 @@ impl Engine {
                     .map(|(_, was, now)| (was.text.as_str(), now.text.as_str())),
             )
         } else {
+            let shown = self.shown();
             let mut after: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
             let before: Vec<&str> = after.clone();
             for (row, paint) in changed {
@@ -739,14 +744,14 @@ impl Engine {
     #[inline(never)]
     fn scrolled_news_of(
         &self,
-        shown: &[Rc<RowPaint>],
+        every_row: bool,
         changed: &[(usize, RowPaint)],
         scrolled: usize,
     ) -> String {
         if changed.is_empty() {
             return String::new();
         }
-        let news = if shown.is_empty() {
+        let news = if !every_row {
             // What each changed row showed before, moved up by the scroll:
             // the row below by as many, or nothing for a line brought in.
             let rows = self.rows.borrow();
@@ -771,6 +776,7 @@ impl Engine {
                 )
             }))
         } else {
+            let shown = self.shown();
             let mut after: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
             let before: Vec<&str> = after.clone();
             // The rows scrolled off left out, the lines brought in blank.
@@ -784,6 +790,16 @@ impl Engine {
             crate::news::news(&before, &after)
         };
         crate::news::less_echo(&mut self.typed.borrow_mut(), news)
+    }
+
+    /// Every screen row's paint, top first, for a reader's news.
+    fn shown(&self) -> Vec<Rc<RowPaint>> {
+        let rows = self.rows.borrow();
+        self.slots
+            .borrow()
+            .iter()
+            .map(|slot| rows[*slot].with_untracked(Rc::clone))
+            .collect()
     }
 
     /// Slot `slot`'s paint and line, made on first use.
@@ -2390,22 +2406,26 @@ fn row_view(engine: &Rc<Engine>, slot: usize) -> View {
         .accessible_label_when(move || label.with(|paint| paint.text.clone()))
 }
 
-/// How many lines the screen scrolled from `shown` to `rows` (every screen
+/// How many lines the screen scrolled from the `count` rows shown (`same`:
+/// whether the row shown at an index draws a paint) to `rows` (every screen
 /// row, in order): the least whose rows below match the first rows now,
 /// three of them where there are. 0 where none does, or the first row is
 /// unchanged. Only how much is drawn again depends on it: each row is
 /// compared with what its slot drew either way.
-fn shift(shown: &[Rc<RowPaint>], rows: &[(usize, RowPaint)]) -> usize {
-    let count = shown.len();
+fn shift(
+    count: usize,
+    same: impl Fn(usize, &RowPaint) -> bool,
+    rows: &[(usize, RowPaint)],
+) -> usize {
     if count < 2
         || rows.len() != count
         || rows.iter().enumerate().any(|(i, (row, _))| *row != i)
-        || *shown[0] == rows[0].1
+        || same(0, &rows[0].1)
     {
         return 0;
     }
     (1..count)
-        .find(|&lines| (0..(count - lines).min(3)).all(|i| *shown[lines + i] == rows[i].1))
+        .find(|&lines| (0..(count - lines).min(3)).all(|i| same(lines + i, &rows[i].1)))
         .unwrap_or(0)
 }
 
