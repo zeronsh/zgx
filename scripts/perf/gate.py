@@ -293,6 +293,14 @@ SCENES = [
     # The same table with its branches as functions (`ui.switch`'s cases,
     # `ui.show`'s rarely shown content): built only when they show.
     ('library-scroll-lazy', 'zgx-script', 'library_scroll_lazy_bench', {}),
+    # A chat transcript of 2,000 steps (messages, Markdown replies drawn by the
+    # script from `ui.markdown`'s blocks, tool calls as cards) in a measured,
+    # following `ui.list`, opened at its end and scrolled back by 120 wheel
+    # events, its text shaped by `TextServices`: the rows coming into view
+    # built from Luau, mounted, laid out and shaped, and their links' boxes
+    # placed. And the same with no links, the rows' own cost apart.
+    ('transcript-scroll', 'zgx-script', 'transcript_scroll_bench', {}),
+    ('transcript-scroll-plain', 'zgx-script', 'transcript_scroll_bench', {'LINKS': '0'}),
     # New text mounting, cold: a word's first shape.
     ('mount-text', 'zgx-script', 'mount_text_bench', {}),
     # An app's cold start: a chat feed decoded from the script's source into
