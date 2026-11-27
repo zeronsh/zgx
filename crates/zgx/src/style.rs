@@ -2093,6 +2093,7 @@ pub trait Styled: Sized {
     }
     /// The width the layout gives it from what it holds (CSS `auto`), over a
     /// default or an earlier width.
+    #[doc(hidden)]
     fn w_auto(mut self) -> Self {
         self.styles_mut().fields_mut(bit::WIDTH).width = Opt32::none();
         self.styles_mut()
@@ -2101,6 +2102,7 @@ pub trait Styled: Sized {
         self
     }
     /// The height the layout gives it from what it holds (CSS `auto`).
+    #[doc(hidden)]
     fn h_auto(mut self) -> Self {
         self.styles_mut().fields_mut(bit::HEIGHT).height = Opt32::none();
         self.styles_mut()
